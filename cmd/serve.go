@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"log"
+	"os"
 
 	"github.com/kiwifs/kiwifs/internal/api"
 	"github.com/kiwifs/kiwifs/internal/config"
@@ -39,12 +40,22 @@ func runServe(cmd *cobra.Command, args []string) error {
 	authType, _ := cmd.Flags().GetString("auth")
 	apiKey, _ := cmd.Flags().GetString("api-key")
 
+	// Auto-init: if root has no .kiwi/config.toml, initialize it.
+	kiwiConfig := fmt.Sprintf("%s/.kiwi/config.toml", root)
+	if _, err := os.Stat(kiwiConfig); os.IsNotExist(err) {
+		log.Printf("No config found at %s — auto-initializing...", root)
+		initCmd.Flags().Set("root", root)
+		if err := runInit(initCmd, nil); err != nil {
+			return fmt.Errorf("auto-init: %w", err)
+		}
+	}
+
 	cfg := &config.Config{
-		Server: config.ServerConfig{Host: host, Port: port},
-		Storage: config.StorageConfig{Root: root},
-		Search: config.SearchConfig{Engine: searchEngine},
+		Server:     config.ServerConfig{Host: host, Port: port},
+		Storage:    config.StorageConfig{Root: root},
+		Search:     config.SearchConfig{Engine: searchEngine},
 		Versioning: config.VersioningConfig{Strategy: versioningStrategy},
-		Auth: config.AuthConfig{Type: authType, APIKey: apiKey},
+		Auth:       config.AuthConfig{Type: authType, APIKey: apiKey},
 	}
 
 	store, err := storage.NewLocal(root)
