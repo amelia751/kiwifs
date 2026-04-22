@@ -1,0 +1,10 @@
+# Binary
+kiwifs
+*.test
+
+# Design docs (internal, not part of OSS repo)
+kiwifs.md
+tasks.md
+
+# Runtime data (created by `kiwifs init`)
+knowledge/
