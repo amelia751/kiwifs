@@ -152,6 +152,42 @@ func (s *Store) Add(path string, c Comment) (Comment, error) {
 	return c, nil
 }
 
+// Resolve toggles the resolved flag on the comment with the given id.
+// Returns the updated comment, or os.ErrNotExist when the id is not found.
+func (s *Store) Resolve(path, id string, resolved bool) (Comment, error) {
+	if id == "" {
+		return Comment{}, errors.New("id is required")
+	}
+	abs, err := s.absPath(path)
+	if err != nil {
+		return Comment{}, err
+	}
+
+	m := s.lockFor(path)
+	m.Lock()
+	defer m.Unlock()
+
+	list, err := readFile(abs)
+	if err != nil {
+		return Comment{}, err
+	}
+	idx := -1
+	for i, c := range list {
+		if c.ID == id {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return Comment{}, os.ErrNotExist
+	}
+	list[idx].Resolved = resolved
+	if err := writeFile(abs, list); err != nil {
+		return Comment{}, err
+	}
+	return list[idx], nil
+}
+
 // Delete removes the comment with the given id from the file at path.
 // Returns os.ErrNotExist when the id is not found.
 func (s *Store) Delete(path, id string) error {

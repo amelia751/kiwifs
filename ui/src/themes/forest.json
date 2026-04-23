@@ -1,0 +1,32 @@
+{
+  "name": "Forest",
+  "description": "Deep green — earthy and natural",
+  "light": {
+    "primary": "152 69% 35%",
+    "primary-foreground": "0 0% 100%",
+    "primary-hover": "152 69% 28%",
+    "ring": "152 69% 35%",
+    "destructive": "0 84% 60%",
+    "destructive-foreground": "0 0% 98%",
+    "destructive-hover": "0 84% 52%",
+    "kiwi-graph-palette-0": "#1b5e20",
+    "kiwi-graph-palette-1": "#2e7d32",
+    "kiwi-graph-palette-2": "#388e3c",
+    "kiwi-graph-palette-3": "#43a047",
+    "kiwi-graph-palette-4": "#4caf50"
+  },
+  "dark": {
+    "primary": "152 69% 48%",
+    "primary-foreground": "0 0% 5%",
+    "primary-hover": "152 69% 40%",
+    "ring": "152 69% 48%",
+    "destructive": "0 70% 45%",
+    "destructive-foreground": "0 0% 95%",
+    "destructive-hover": "0 70% 38%",
+    "kiwi-graph-palette-0": "#66bb6a",
+    "kiwi-graph-palette-1": "#4caf50",
+    "kiwi-graph-palette-2": "#81c784",
+    "kiwi-graph-palette-3": "#a5d6a7",
+    "kiwi-graph-palette-4": "#388e3c"
+  }
+}

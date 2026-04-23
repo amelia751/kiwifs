@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { getCurrentSpace } from "../lib/api";
 import {
   ChevronRight,
   FileText,
@@ -145,7 +146,7 @@ function Node({
   if (!isMarkdown(path)) {
     return (
       <a
-        href={`/api/kiwi/file?path=${encodeURIComponent(path)}`}
+        href={`/api/kiwi${getCurrentSpace() && getCurrentSpace() !== "default" ? "/" + getCurrentSpace() : ""}/file?path=${encodeURIComponent(path)}`}
         target="_blank"
         rel="noreferrer"
         className={cn(

@@ -86,7 +86,56 @@ export type MetaResponse = {
   results: MetaResult[];
 };
 
+export type SpaceMeta = {
+  name: string;
+  root: string;
+  fileCount: number;
+  lastModified?: string;
+  sizeBytes: number;
+};
+
 const DEFAULT_ACTOR = "human:web-ui";
+
+let _currentSpace: string | null = null;
+const _spaceListeners = new Set<() => void>();
+
+export function setCurrentSpace(space: string | null) {
+  _currentSpace = space;
+  try {
+    if (space) {
+      localStorage.setItem("kiwifs-space", space);
+    } else {
+      localStorage.removeItem("kiwifs-space");
+    }
+  } catch {}
+  _spaceListeners.forEach((fn) => fn());
+}
+
+export function getCurrentSpace(): string | null {
+  return _currentSpace;
+}
+
+export function onSpaceChange(fn: () => void): () => void {
+  _spaceListeners.add(fn);
+  return () => _spaceListeners.delete(fn);
+}
+
+// Restore last-used space from localStorage on load.
+try {
+  const saved = localStorage.getItem("kiwifs-space");
+  if (saved) _currentSpace = saved;
+} catch {}
+
+function kiwiBase(): string {
+  if (_currentSpace && _currentSpace !== "default") {
+    return `/api/kiwi/${_currentSpace}`;
+  }
+  return "/api/kiwi";
+}
+
+export function sseUrl(): string {
+  return `${kiwiBase()}/events`;
+}
 
 function actor(): string {
   try {
@@ -116,18 +165,47 @@ async function request<T>(url: string, init: RequestInit = {}): Promise<T> {
 }
 
 export const api = {
+  // ─── Space Management ───────────────────────────────────────────────────────
+
+  async listSpaces(): Promise<{ spaces: SpaceMeta[] }> {
+    return request("/api/spaces");
+  },
+
+  async getSpace(name: string): Promise<SpaceMeta> {
+    return request(`/api/spaces/${encodeURIComponent(name)}`);
+  },
+
+  async createSpace(
+    name: string,
+    root: string
+  ): Promise<SpaceMeta> {
+    return request("/api/spaces", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, root }),
+    });
+  },
+
+  async deleteSpace(name: string): Promise<{ deleted: string }> {
+    return request(`/api/spaces/${encodeURIComponent(name)}`, {
+      method: "DELETE",
+    });
+  },
+
+  // ─── Knowledge API (space-scoped) ───────────────────────────────────────────
+
   async health(): Promise<{ status: string }> {
     return request("/health");
   },
 
   async tree(path = "/"): Promise<TreeEntry> {
     const qs = new URLSearchParams({ path });
-    return request(`/api/kiwi/tree?${qs}`);
+    return request(`${kiwiBase()}/tree?${qs}`);
   },
 
   async readFile(path: string): Promise<{ content: string; etag: string | null }> {
     const qs = new URLSearchParams({ path });
-    const res = await fetch(`/api/kiwi/file?${qs}`, {
+    const res = await fetch(`${kiwiBase()}/file?${qs}`, {
       headers: { "X-Actor": actor() },
     });
     if (!res.ok) {
@@ -150,7 +228,7 @@ export const api = {
       "X-Actor": actor(),
     };
     if (etag) headers["If-Match"] = etag;
-    return request(`/api/kiwi/file?${qs}`, {
+    return request(`${kiwiBase()}/file?${qs}`, {
       method: "PUT",
       headers,
       body: content,
@@ -159,7 +237,7 @@ export const api = {
 
   async deleteFile(path: string): Promise<{ deleted: string }> {
     const qs = new URLSearchParams({ path });
-    return request(`/api/kiwi/file?${qs}`, { method: "DELETE" });
+    return request(`${kiwiBase()}/file?${qs}`, { method: "DELETE" });
   },
 
   async uploadAsset(file: File, dir: string): Promise<string> {
@@ -167,9 +245,7 @@ export const api = {
     if (dir) qs.set("path", dir);
     const form = new FormData();
     form.append("file", file);
-    // Don't set Content-Type — FormData picks the multipart boundary itself,
-    // and overriding it strips the boundary and kills the parse server-side.
-    const res = await fetch(`/api/kiwi/assets?${qs}`, {
+    const res = await fetch(`${kiwiBase()}/assets?${qs}`, {
       method: "POST",
       headers: { "X-Actor": actor() },
       body: form,
@@ -179,16 +255,13 @@ export const api = {
       throw new Error(`${res.status} ${res.statusText}: ${text}`);
     }
     const body = (await res.json()) as { path: string };
-    // Return the absolute URL — BlockNote embeds it directly in the image
-    // block, and /api/kiwi/file is the same endpoint that serves markdown
-    // reads, so no extra routing needed.
     const p = new URLSearchParams({ path: body.path });
-    return `/api/kiwi/file?${p}`;
+    return `${kiwiBase()}/file?${p}`;
   },
 
   async search(q: string): Promise<SearchResponse> {
     const qs = new URLSearchParams({ q });
-    return request(`/api/kiwi/search?${qs}`);
+    return request(`${kiwiBase()}/search?${qs}`);
   },
 
   async semanticSearch(
@@ -196,7 +269,7 @@ export const api = {
     topK = 10,
     offset = 0
   ): Promise<SemanticResponse> {
-    return request(`/api/kiwi/search/semantic`, {
+    return request(`${kiwiBase()}/search/semantic`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ query, topK, offset }),
@@ -205,12 +278,12 @@ export const api = {
 
   async versions(path: string): Promise<{ path: string; versions: Version[] }> {
     const qs = new URLSearchParams({ path });
-    return request(`/api/kiwi/versions?${qs}`);
+    return request(`${kiwiBase()}/versions?${qs}`);
   },
 
   async readVersion(path: string, version: string): Promise<string> {
     const qs = new URLSearchParams({ path, version });
-    const res = await fetch(`/api/kiwi/version?${qs}`, {
+    const res = await fetch(`${kiwiBase()}/version?${qs}`, {
       headers: { "X-Actor": actor() },
     });
     if (!res.ok) {
@@ -222,35 +295,35 @@ export const api = {
 
   async diff(path: string, from: string, to: string): Promise<string> {
     const qs = new URLSearchParams({ path, from, to });
-    return request(`/api/kiwi/diff?${qs}`);
+    return request(`${kiwiBase()}/diff?${qs}`);
   },
 
   async blame(path: string): Promise<{ path: string; lines: BlameLine[] }> {
     const qs = new URLSearchParams({ path });
-    return request(`/api/kiwi/blame?${qs}`);
+    return request(`${kiwiBase()}/blame?${qs}`);
   },
 
   async backlinks(path: string): Promise<{ path: string; backlinks: BacklinkEntry[] }> {
     const qs = new URLSearchParams({ path });
-    return request(`/api/kiwi/backlinks?${qs}`);
+    return request(`${kiwiBase()}/backlinks?${qs}`);
   },
 
   async graph(): Promise<GraphResponse> {
-    return request(`/api/kiwi/graph`);
+    return request(`${kiwiBase()}/graph`);
   },
 
   async listTemplates(): Promise<{ templates: { name: string; path: string }[] }> {
-    return request(`/api/kiwi/templates`);
+    return request(`${kiwiBase()}/templates`);
   },
 
   async readTemplate(name: string): Promise<{ name: string; content: string }> {
     const qs = new URLSearchParams({ name });
-    return request(`/api/kiwi/template?${qs}`);
+    return request(`${kiwiBase()}/template?${qs}`);
   },
 
   async listComments(path: string): Promise<CommentsResponse> {
     const qs = new URLSearchParams({ path });
-    return request(`/api/kiwi/comments?${qs}`);
+    return request(`${kiwiBase()}/comments?${qs}`);
   },
 
   async addComment(
@@ -259,7 +332,7 @@ export const api = {
     body: string
   ): Promise<Comment> {
     const qs = new URLSearchParams({ path });
-    return request(`/api/kiwi/comments?${qs}`, {
+    return request(`${kiwiBase()}/comments?${qs}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ anchor, body }),
@@ -271,7 +344,20 @@ export const api = {
     id: string
   ): Promise<{ deleted: string; path: string }> {
     const qs = new URLSearchParams({ path });
-    return request(`/api/kiwi/comments/${id}?${qs}`, { method: "DELETE" });
+    return request(`${kiwiBase()}/comments/${id}?${qs}`, { method: "DELETE" });
+  },
+
+  async resolveComment(
+    path: string,
+    id: string,
+    resolved: boolean
+  ): Promise<Comment> {
+    const qs = new URLSearchParams({ path });
+    return request(`${kiwiBase()}/comments/${id}?${qs}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ resolved }),
+    });
   },
 
   async meta(opts: {
@@ -282,8 +368,6 @@ export const api = {
     offset?: number;
   }): Promise<MetaResponse> {
     const qs = new URLSearchParams();
-    // The server concatenates field+op+value into one "where" param, so do
-    // the same here rather than sending JSON — keeps curl debugging viable.
     for (const f of opts.where ?? []) {
       qs.append("where", `${f.field}${f.op}${f.value}`);
     }
@@ -291,6 +375,18 @@ export const api = {
     if (opts.order) qs.set("order", opts.order);
     if (opts.limit != null) qs.set("limit", String(opts.limit));
     if (opts.offset != null) qs.set("offset", String(opts.offset));
-    return request(`/api/kiwi/meta?${qs}`);
+    return request(`${kiwiBase()}/meta?${qs}`);
+  },
+
+  async getTheme(): Promise<Record<string, unknown>> {
+    return request(`${kiwiBase()}/theme`);
+  },
+
+  async putTheme(theme: Record<string, unknown>): Promise<Record<string, unknown>> {
+    return request(`${kiwiBase()}/theme`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(theme),
+    });
   },
 };

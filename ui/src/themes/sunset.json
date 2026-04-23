@@ -1,0 +1,32 @@
+{
+  "name": "Sunset",
+  "description": "Warm orange-red — bold and energetic",
+  "light": {
+    "primary": "24 95% 53%",
+    "primary-foreground": "0 0% 100%",
+    "primary-hover": "24 95% 45%",
+    "ring": "24 95% 53%",
+    "destructive": "0 84% 60%",
+    "destructive-foreground": "0 0% 98%",
+    "destructive-hover": "0 84% 52%",
+    "kiwi-graph-palette-0": "#e65100",
+    "kiwi-graph-palette-1": "#ef6c00",
+    "kiwi-graph-palette-2": "#f57c00",
+    "kiwi-graph-palette-3": "#fb8c00",
+    "kiwi-graph-palette-4": "#ff9800"
+  },
+  "dark": {
+    "primary": "24 95% 60%",
+    "primary-foreground": "0 0% 5%",
+    "primary-hover": "24 95% 52%",
+    "ring": "24 95% 60%",
+    "destructive": "0 70% 45%",
+    "destructive-foreground": "0 0% 95%",
+    "destructive-hover": "0 70% 38%",
+    "kiwi-graph-palette-0": "#ffb74d",
+    "kiwi-graph-palette-1": "#ff9800",
+    "kiwi-graph-palette-2": "#ffa726",
+    "kiwi-graph-palette-3": "#ffcc02",
+    "kiwi-graph-palette-4": "#ef6c00"
+  }
+}

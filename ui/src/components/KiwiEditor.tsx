@@ -8,10 +8,13 @@ import {
 import { BlockNoteView } from "@blocknote/mantine";
 import "@blocknote/core/fonts/inter.css";
 import "@blocknote/mantine/style.css";
-import { Info, Link as LinkIcon, ListTree, Save, TriangleAlert, X, XCircle } from "lucide-react";
+import { Check, Circle, Info, Link as LinkIcon, ListTree, Loader2, Save, TriangleAlert, User, X, XCircle } from "lucide-react";
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { dirOf } from "@/lib/paths";
+import { formatDistanceToNow } from "date-fns";
+
+type SaveStatus = "clean" | "dirty" | "saving" | "saved" | "error";
 
 type SaveHandle = { save: () => Promise<void> };
 
@@ -113,10 +116,21 @@ function EditorInner({
   saveRef?: React.MutableRefObject<SaveHandle | null>;
 }) {
   const [ready, setReady] = useState(false);
+  const [saveStatus, setSaveStatus] = useState<SaveStatus>("clean");
+  const autoSaveTimer = useRef<number | null>(null);
+  const savedFlashTimer = useRef<number | null>(null);
+  const [lastEdit, setLastEdit] = useState<{ author: string; date: string } | null>(null);
 
-  // Upload handler flows through the same pipeline as markdown writes — the
-  // server commits the asset to git, broadcasts SSE, and hands back a URL
-  // the editor can embed.
+  useEffect(() => {
+    let cancelled = false;
+    api.versions(path).then((r) => {
+      if (cancelled || !r.versions.length) return;
+      const v = r.versions[0];
+      setLastEdit({ author: v.author, date: v.date });
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [path]);
+
   const uploadFile = useCallback(
     async (file: File) => {
       const targetDir = dirOf(path);
@@ -144,39 +158,67 @@ function EditorInner({
     };
   }, [editor, initialMd]);
 
-  // Keep a ref to the latest save logic so the exported saveRef handle and
-  // the button onClick always call the current closure without stale captures.
-  const onSaveRef = useRef<() => Promise<void>>(async () => {});
-  onSaveRef.current = async () => {
+  const onSaveRef = useRef<(opts?: { close?: boolean }) => Promise<void>>(async () => {});
+  onSaveRef.current = async (opts) => {
     if (!editor) return;
     setSaving(true);
+    setSaveStatus("saving");
     setError(null);
     try {
       const md = await editor.blocksToMarkdownLossy(editor.document);
       const res = await api.writeFile(path, md, etagRef.current || undefined);
       etagRef.current = res.etag ? `"${res.etag}"` : null;
-      onSaved(path);
+      setSaveStatus("saved");
+      setLastEdit({ author: "you", date: new Date().toISOString() });
+      if (savedFlashTimer.current) window.clearTimeout(savedFlashTimer.current);
+      savedFlashTimer.current = window.setTimeout(() => setSaveStatus("clean"), 2000);
+      if (opts?.close) onSaved(path);
     } catch (e) {
+      setSaveStatus("error");
       setError(String(e));
     } finally {
       setSaving(false);
     }
   };
 
+  const markDirty = useCallback(() => {
+    if (!ready) return;
+    setSaveStatus("dirty");
+    if (autoSaveTimer.current) window.clearTimeout(autoSaveTimer.current);
+    autoSaveTimer.current = window.setTimeout(() => {
+      onSaveRef.current();
+    }, 2000);
+  }, [ready]);
+
+  useEffect(() => {
+    return () => {
+      if (autoSaveTimer.current) window.clearTimeout(autoSaveTimer.current);
+      if (savedFlashTimer.current) window.clearTimeout(savedFlashTimer.current);
+    };
+  }, []);
+
   useEffect(() => {
     if (!saveRef) return;
-    saveRef.current = { save: () => onSaveRef.current() };
+    saveRef.current = { save: () => onSaveRef.current({ close: true }) };
     return () => { saveRef.current = null; };
   }, [saveRef]);
 
   return (
     <div className="flex flex-col h-full">
       <div className="flex items-center justify-between px-8 py-3 border-b border-border">
-        <div className="text-sm text-muted-foreground font-mono truncate">
-          {path}
+        <div className="flex items-center gap-2 min-w-0">
+          <div className="text-sm text-muted-foreground font-mono truncate">
+            {path}
+          </div>
+          <SaveIndicator status={saveStatus} />
         </div>
         <div className="flex items-center gap-2">
-          <Button onClick={() => onSaveRef.current()} disabled={saving || !ready} size="sm">
+          <Button
+            onClick={() => onSaveRef.current({ close: true })}
+            disabled={saving || !ready || saveStatus === "clean"}
+            size="sm"
+            variant={saveStatus === "dirty" ? "default" : "outline"}
+          >
             <Save className="h-3.5 w-3.5" />
             {saving ? "Saving…" : "Save"}
           </Button>
@@ -192,6 +234,7 @@ function EditorInner({
               editor={editor as BlockNoteEditor}
               theme={isDark ? "dark" : "light"}
               slashMenu={false}
+              onChange={markDirty}
             >
               <SuggestionMenuController
                 triggerCharacter="/"
@@ -209,8 +252,59 @@ function EditorInner({
           )}
         </div>
       </div>
+      {lastEdit && (
+        <div className="px-8 py-2 border-t border-border text-xs text-muted-foreground flex items-center gap-2">
+          <User className="h-3 w-3" />
+          Last edited by {lastEdit.author} {relativeTime(lastEdit.date)}
+        </div>
+      )}
     </div>
   );
+}
+
+function SaveIndicator({ status }: { status: SaveStatus }) {
+  switch (status) {
+    case "dirty":
+      return (
+        <span className="flex items-center gap-1 text-xs text-amber-500">
+          <Circle className="h-2.5 w-2.5 fill-current" />
+          Unsaved
+        </span>
+      );
+    case "saving":
+      return (
+        <span className="flex items-center gap-1 text-xs text-muted-foreground">
+          <Loader2 className="h-3 w-3 animate-spin" />
+          Saving…
+        </span>
+      );
+    case "saved":
+      return (
+        <span className="flex items-center gap-1 text-xs text-green-500">
+          <Check className="h-3 w-3" />
+          Saved
+        </span>
+      );
+    case "error":
+      return (
+        <span className="flex items-center gap-1 text-xs text-destructive">
+          <XCircle className="h-3 w-3" />
+          Error
+        </span>
+      );
+    default:
+      return null;
+  }
+}
+
+function relativeTime(d: string): string {
+  try {
+    const parsed = new Date(d);
+    if (isNaN(parsed.getTime())) return d;
+    return formatDistanceToNow(parsed, { addSuffix: true });
+  } catch {
+    return d;
+  }
 }
 
 // Kiwifs-specific slash commands. Each returns a paragraph block that renders

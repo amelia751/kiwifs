@@ -3,14 +3,26 @@ package spaces
 import (
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/kiwifs/kiwifs/internal/api"
 	"github.com/kiwifs/kiwifs/internal/bootstrap"
 	"github.com/kiwifs/kiwifs/internal/config"
 	"github.com/labstack/echo/v4"
 )
+
+// SpaceMeta holds summary metadata for a space.
+type SpaceMeta struct {
+	Name      string     `json:"name"`
+	Root      string     `json:"root"`
+	FileCount int        `json:"fileCount"`
+	LastMod   *time.Time `json:"lastModified,omitempty"`
+	SizeBytes int64      `json:"sizeBytes"`
+}
 
 // Manager manages multiple independent knowledge spaces.
 // Each space has its own storage, versioner, searcher, and pipeline.
@@ -19,8 +31,9 @@ type Manager struct {
 	// order preserves registration order so resolveSpace can pick a
 	// deterministic default (the first space registered) instead of
 	// whichever Go map iteration happened to return.
-	order []string
-	mu    sync.RWMutex
+	order   []string
+	baseCfg *config.Config
+	mu      sync.RWMutex
 }
 
 // Space represents a single knowledge space with its own backend.
@@ -43,10 +56,13 @@ type Space struct {
 	ownStack bool
 }
 
-// NewManager creates a new space manager.
-func NewManager() *Manager {
+// NewManager creates a new space manager. baseCfg is used as the template
+// for dynamically created spaces (POST /api/spaces); pass nil if dynamic
+// creation is not needed.
+func NewManager(baseCfg *config.Config) *Manager {
 	return &Manager{
-		spaces: make(map[string]*Space),
+		spaces:  make(map[string]*Space),
+		baseCfg: baseCfg,
 	}
 }
 
@@ -147,6 +163,149 @@ func (m *Manager) ListSpaces() []string {
 	return out
 }
 
+// RemoveSpace soft-deletes a space: closes its stack, unregisters it, and
+// renames the root directory to {root}.deleted-{timestamp} so files are
+// recoverable but the name is free for re-use.
+func (m *Manager) RemoveSpace(name string) error {
+	m.mu.Lock()
+	sp, ok := m.spaces[name]
+	if !ok {
+		m.mu.Unlock()
+		return fmt.Errorf("space %q not found", name)
+	}
+	delete(m.spaces, name)
+	newOrder := make([]string, 0, len(m.order)-1)
+	for _, n := range m.order {
+		if n != name {
+			newOrder = append(newOrder, n)
+		}
+	}
+	m.order = newOrder
+	m.mu.Unlock()
+
+	if sp.Stack != nil && sp.ownStack {
+		_ = sp.Stack.Close()
+	}
+	if sp.Root != "" {
+		tombstone := sp.Root + ".deleted-" + time.Now().Format("20060102T150405")
+		_ = os.Rename(sp.Root, tombstone)
+	}
+	return nil
+}
+
+// SpaceInfo computes metadata for a registered space by walking its root.
+func (m *Manager) SpaceInfo(name string) (*SpaceMeta, error) {
+	m.mu.RLock()
+	sp, ok := m.spaces[name]
+	m.mu.RUnlock()
+	if !ok {
+		return nil, fmt.Errorf("space %q not found", name)
+	}
+	meta := &SpaceMeta{Name: sp.Name, Root: sp.Root}
+	_ = filepath.WalkDir(sp.Root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if strings.HasPrefix(d.Name(), ".") && d.IsDir() {
+			return filepath.SkipDir
+		}
+		if d.IsDir() {
+			return nil
+		}
+		info, ierr := d.Info()
+		if ierr != nil {
+			return nil
+		}
+		meta.FileCount++
+		meta.SizeBytes += info.Size()
+		t := info.ModTime()
+		if meta.LastMod == nil || t.After(*meta.LastMod) {
+			meta.LastMod = &t
+		}
+		return nil
+	})
+	return meta, nil
+}
+
+// CreateSpace initialises a new space directory with a minimal config,
+// builds the full dependency stack, and registers it. Returns the space
+// metadata on success.
+func (m *Manager) CreateSpace(name, root string) (*SpaceMeta, error) {
+	if name == "" {
+		return nil, fmt.Errorf("name is required")
+	}
+	if root == "" {
+		// Derive root from the first registered space's parent directory.
+		m.mu.RLock()
+		if len(m.order) > 0 {
+			first := m.spaces[m.order[0]]
+			root = filepath.Join(filepath.Dir(first.Root), name)
+		}
+		m.mu.RUnlock()
+		if root == "" {
+			return nil, fmt.Errorf("root is required when no spaces exist yet")
+		}
+	}
+	if strings.ContainsAny(name, "/\\ .") {
+		return nil, fmt.Errorf("invalid space name %q", name)
+	}
+
+	if err := os.MkdirAll(root, 0755); err != nil {
+		return nil, fmt.Errorf("create root: %w", err)
+	}
+	kiwiDir := filepath.Join(root, ".kiwi")
+	if err := os.MkdirAll(kiwiDir, 0755); err != nil {
+		return nil, fmt.Errorf("create .kiwi: %w", err)
+	}
+	cfgPath := filepath.Join(kiwiDir, "config.toml")
+	if _, err := os.Stat(cfgPath); os.IsNotExist(err) {
+		minimal := "[search]\nengine = \"sqlite\"\n\n[versioning]\nstrategy = \"git\"\n"
+		if werr := os.WriteFile(cfgPath, []byte(minimal), 0644); werr != nil {
+			return nil, fmt.Errorf("write config: %w", werr)
+		}
+	}
+
+	cfg := m.spaceCfg(root)
+	if err := m.AddSpace(name, root, cfg); err != nil {
+		return nil, err
+	}
+	return m.SpaceInfo(name)
+}
+
+// spaceCfg derives a config for a new space from the base config.
+func (m *Manager) spaceCfg(root string) *config.Config {
+	if m.baseCfg != nil {
+		sub := *m.baseCfg
+		sub.Storage.Root = root
+		return &sub
+	}
+	return &config.Config{
+		Storage:    config.StorageConfig{Root: root},
+		Search:     config.SearchConfig{Engine: "sqlite"},
+		Versioning: config.VersioningConfig{Strategy: "git"},
+	}
+}
+
+// FilterKeysForSpace returns a copy of cfg with Auth.APIKeys filtered to
+// only those matching spaceName. Matched keys have their Space field
+// cleared so the per-space middleware's inScope check doesn't further
+// restrict by path — URL routing already provides space isolation.
+func FilterKeysForSpace(cfg *config.Config, spaceName string) *config.Config {
+	if cfg.Auth.Type != "perspace" || len(cfg.Auth.APIKeys) == 0 {
+		return cfg
+	}
+	out := *cfg
+	out.Auth.APIKeys = nil
+	for _, k := range cfg.Auth.APIKeys {
+		if k.Space == spaceName || k.Space == "" {
+			out.Auth.APIKeys = append(out.Auth.APIKeys, config.APIKeyEntry{
+				Key: k.Key, Actor: k.Actor,
+			})
+		}
+	}
+	return &out
+}
+
 // Handler returns an HTTP handler that routes multi-space requests.
 // Requests to /api/kiwi/{space}/... are rewritten to /api/kiwi/... and
 // forwarded to the resolved space's fully-configured api.Server. Requests
@@ -161,9 +320,49 @@ func (m *Manager) Handler() http.Handler {
 	})
 
 	e.GET("/api/spaces", func(c echo.Context) error {
-		return c.JSON(http.StatusOK, map[string]interface{}{
-			"spaces": m.ListSpaces(),
-		})
+		names := m.ListSpaces()
+		out := make([]SpaceMeta, 0, len(names))
+		for _, n := range names {
+			if info, err := m.SpaceInfo(n); err == nil {
+				out = append(out, *info)
+			}
+		}
+		return c.JSON(http.StatusOK, map[string]interface{}{"spaces": out})
+	})
+
+	e.GET("/api/spaces/:name", func(c echo.Context) error {
+		name := c.Param("name")
+		info, err := m.SpaceInfo(name)
+		if err != nil {
+			return echo.NewHTTPError(http.StatusNotFound, err.Error())
+		}
+		return c.JSON(http.StatusOK, info)
+	})
+
+	e.POST("/api/spaces", func(c echo.Context) error {
+		var body struct {
+			Name string `json:"name"`
+			Root string `json:"root"`
+		}
+		if err := c.Bind(&body); err != nil {
+			return echo.NewHTTPError(http.StatusBadRequest, "invalid JSON body")
+		}
+		info, err := m.CreateSpace(body.Name, body.Root)
+		if err != nil {
+			if strings.Contains(err.Error(), "already exists") {
+				return echo.NewHTTPError(http.StatusConflict, err.Error())
+			}
+			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+		}
+		return c.JSON(http.StatusCreated, info)
+	})
+
+	e.DELETE("/api/spaces/:name", func(c echo.Context) error {
+		name := c.Param("name")
+		if err := m.RemoveSpace(name); err != nil {
+			return echo.NewHTTPError(http.StatusNotFound, err.Error())
+		}
+		return c.JSON(http.StatusOK, map[string]string{"deleted": name})
 	})
 
 	// Catch-all: resolve space, rewrite path, forward to the space's server.

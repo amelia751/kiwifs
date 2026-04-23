@@ -1,20 +1,28 @@
-import { useEffect, useRef, useState } from "react";
-import { History, Moon, Network, Plus, Search as SearchIcon, Sun } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Check, History, Keyboard, Moon, Network, Palette, Plus, Search as SearchIcon, Sun } from "lucide-react";
 import { KiwiTree } from "./components/KiwiTree";
 import { KiwiPage } from "./components/KiwiPage";
 import { KiwiEditor } from "./components/KiwiEditor";
 import { KiwiSearch } from "./components/KiwiSearch";
 import { KiwiGraph } from "./components/KiwiGraph";
 import { KiwiHistory } from "./components/KiwiHistory";
+import { KiwiThemeEditor } from "./components/KiwiThemeEditor";
 import { NewPageDialog } from "./components/NewPageDialog";
+import { KeyboardShortcuts } from "./components/KeyboardShortcuts";
+import { SpaceSelector } from "./components/SpaceSelector";
 import { Button } from "./components/ui/button";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "./components/ui/popover";
 import {
   Tooltip,
   TooltipContent,
   TooltipProvider,
   TooltipTrigger,
 } from "./components/ui/tooltip";
-import { api, type TreeEntry } from "./lib/api";
+import { api, getCurrentSpace, setCurrentSpace, sseUrl, type TreeEntry } from "./lib/api";
 import { useTheme } from "./hooks/useTheme";
 import { isMarkdown } from "./lib/paths";
 
@@ -27,7 +35,9 @@ export default function App() {
   const [newOpen, setNewOpen] = useState(false);
   const [graphOpen, setGraphOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
-  const [theme, toggleTheme] = useTheme();
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [themeEditorOpen, setThemeEditorOpen] = useState(false);
+  const { theme, toggleTheme, preset, setPreset, presets: themePresets } = useTheme();
   // Keep the latest values accessible to the global keydown listener without
   // retearing it on every state change — otherwise editors remount on each key.
   const editorRef = useRef<{ save: () => Promise<void> } | null>(null);
@@ -70,6 +80,9 @@ export default function App() {
         if (!stateRef.current.editing) return;
         e.preventDefault();
         editorRef.current?.save().catch(() => {});
+      } else if (mod && (key === "/" || key === "?")) {
+        e.preventDefault();
+        setShortcutsOpen((v) => !v);
       } else if (e.key === "Escape") {
         setSearchOpen(false);
       }
@@ -78,11 +91,23 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
+  // spaceKey bumps on space switch so all data-fetching effects re-run
+  const [spaceKey, setSpaceKey] = useState(0);
+  const handleSpaceSwitch = useCallback(() => {
+    setActivePath(null);
+    setEditing(false);
+    setGraphOpen(false);
+    setHistoryOpen(false);
+    setSpaceKey((k) => k + 1);
+    setRefreshKey((k) => k + 1);
+  }, []);
+
   // Live updates: subscribe to the server's SSE feed. Any write/delete/bulk
   // or comment change bumps refreshKey, which cascades into tree reloads and
   // page re-fetches so "agents write, humans see live" actually holds.
+  // Re-subscribes on space switch so events are scoped to the active space.
   useEffect(() => {
-    const es = new EventSource("/api/kiwi/events");
+    const es = new EventSource(sseUrl());
     const bump = () => setRefreshKey((k) => k + 1);
     const events = [
       "write",
@@ -99,7 +124,44 @@ export default function App() {
       events.forEach((name) => es.removeEventListener(name, bump));
       es.close();
     };
+  }, [spaceKey]);
+
+  // URL sync: encode space + page in hash for bookmarkable URLs.
+  // Format: #/{space}/{path} or #/{path} for the default space.
+  useEffect(() => {
+    const hash = window.location.hash.replace(/^#\/?/, "");
+    if (!hash) return;
+    const parts = hash.split("/");
+    // Try the first segment as a space name by peeking at available spaces.
+    api.listSpaces().then((res) => {
+      const names = new Set(res.spaces.map((s) => s.name));
+      if (parts.length > 1 && names.has(parts[0])) {
+        const space = parts[0];
+        const path = parts.slice(1).join("/");
+        setCurrentSpace(space === "default" ? null : space);
+        if (path) setActivePath(path);
+        setSpaceKey((k) => k + 1);
+        setRefreshKey((k) => k + 1);
+      } else {
+        setActivePath(hash);
+      }
+    }).catch(() => {
+      setActivePath(hash);
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Push state to hash on navigation.
+  useEffect(() => {
+    if (!activePath) return;
+    const space = getCurrentSpace();
+    const frag = space && space !== "default"
+      ? `#/${space}/${activePath}`
+      : `#/${activePath}`;
+    if (window.location.hash !== frag) {
+      window.history.replaceState(null, "", frag);
+    }
+  }, [activePath, spaceKey]);
 
   function navigate(path: string) {
     // Breadcrumb root → first markdown file in tree.
@@ -143,6 +205,44 @@ export default function App() {
               >
                 <History className="h-4 w-4" />
               </ToolbarButton>
+              <Popover>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <PopoverTrigger asChild>
+                      <Button variant="ghost" size="icon" aria-label="Theme preset">
+                        <Palette className="h-4 w-4" />
+                      </Button>
+                    </PopoverTrigger>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom">Theme preset</TooltipContent>
+                </Tooltip>
+                <PopoverContent align="end" className="w-48 p-1">
+                  {themePresets.map((p) => (
+                    <button
+                      key={p.name}
+                      onClick={() => setPreset(p.name)}
+                      className="flex items-center gap-2 w-full rounded-sm px-2 py-1.5 text-sm hover:bg-accent hover:text-accent-foreground"
+                    >
+                      <span
+                        className="h-3 w-3 rounded-full shrink-0 border border-border"
+                        style={{ background: `hsl(${p.light.primary || "0 0% 50%"})` }}
+                      />
+                      <span className="flex-1 text-left">{p.name}</span>
+                      {preset === p.name && <Check className="h-3.5 w-3.5 text-primary" />}
+                    </button>
+                  ))}
+                  <div className="h-px bg-border my-1" />
+                  <button
+                    onClick={() => setThemeEditorOpen(true)}
+                    className="flex items-center gap-2 w-full rounded-sm px-2 py-1.5 text-sm hover:bg-accent hover:text-accent-foreground text-muted-foreground"
+                  >
+                    Customize...
+                  </button>
+                </PopoverContent>
+              </Popover>
+              <ToolbarButton onClick={() => setShortcutsOpen(true)} label="Keyboard shortcuts (⌘?)">
+                <Keyboard className="h-4 w-4" />
+              </ToolbarButton>
               <ToolbarButton onClick={toggleTheme} label="Toggle theme">
                 {theme === "dark" ? (
                   <Sun className="h-4 w-4" />
@@ -152,6 +252,7 @@ export default function App() {
               </ToolbarButton>
             </div>
           </header>
+          <SpaceSelector onSwitch={handleSpaceSwitch} />
           <div className="flex-1 overflow-auto kiwi-scroll">
             <KiwiTree
               activePath={activePath}
@@ -161,7 +262,12 @@ export default function App() {
           </div>
         </aside>
         <main className="flex-1 overflow-auto kiwi-scroll">
-          {graphOpen ? (
+          {themeEditorOpen ? (
+            <KiwiThemeEditor
+              onClose={() => setThemeEditorOpen(false)}
+              onPresetReset={() => setPreset(preset)}
+            />
+          ) : graphOpen ? (
             <KiwiGraph
               tree={tree}
               onNavigate={(p) => {
@@ -174,6 +280,7 @@ export default function App() {
             <KiwiHistory
               path={activePath}
               onClose={() => setHistoryOpen(false)}
+              onRestored={() => setRefreshKey((k) => k + 1)}
             />
           ) : editing && activePath ? (
             <KiwiEditor
@@ -221,6 +328,10 @@ export default function App() {
             setActivePath(p);
             setEditing(true);
           }}
+        />
+        <KeyboardShortcuts
+          open={shortcutsOpen}
+          onOpenChange={setShortcutsOpen}
         />
       </div>
     </TooltipProvider>

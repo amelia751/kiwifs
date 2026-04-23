@@ -6,6 +6,10 @@ kiwifs
 kiwifs.md
 tasks.md
 todo.md
+todolist.md
+
+# Claude Code / Cursor local settings
+.claude/
 
 # Runtime data (created by `kiwifs init`)
 knowledge/

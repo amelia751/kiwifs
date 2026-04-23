@@ -5,7 +5,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { MessageSquare, Plus, Trash2 } from "lucide-react";
+import { CheckCircle, Circle, MessageSquare, Plus, Trash2 } from "lucide-react";
 import { api, type Comment, type CommentAnchor } from "@/lib/api";
 import {
   anchorFromSelection,
@@ -158,6 +158,17 @@ export function KiwiComments({ path, containerRef, renderKey, refreshKey }: Prop
     }
   }
 
+  async function toggleResolve(id: string) {
+    const c = comments.find((x) => x.id === id);
+    if (!c) return;
+    try {
+      const updated = await api.resolveComment(path, id, !c.resolved);
+      setComments((xs) => xs.map((x) => (x.id === id ? updated : x)));
+    } catch (err) {
+      console.error("resolve comment failed", err);
+    }
+  }
+
   async function remove(id: string) {
     try {
       await api.deleteComment(path, id);
@@ -266,18 +277,34 @@ export function KiwiComments({ path, containerRef, renderKey, refreshKey }: Prop
             <div style={rectAnchorStyle(popover.rect)} />
           </PopoverAnchor>
           <PopoverContent side="bottom" align="center" className="w-80">
-            <div className="mb-1 text-xs text-muted-foreground">
-              {activeView.author} · {formatDate(activeView.createdAt)}
+            <div className="mb-1 text-xs text-muted-foreground flex items-center gap-1.5">
+              <span>{activeView.author} · {formatDate(activeView.createdAt)}</span>
+              {activeView.resolved && (
+                <span className="text-green-500 flex items-center gap-0.5">
+                  <CheckCircle className="h-3 w-3" /> Resolved
+                </span>
+              )}
             </div>
             <div className="whitespace-pre-wrap text-sm">{activeView.body}</div>
-            <div className="mt-3 flex items-center justify-end">
+            <div className="mt-3 flex items-center justify-end gap-1">
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => toggleResolve(activeView.id)}
+              >
+                {activeView.resolved ? (
+                  <><Circle className="h-3.5 w-3.5" /> Unresolve</>
+                ) : (
+                  <><CheckCircle className="h-3.5 w-3.5" /> Resolve</>
+                )}
+              </Button>
               <Button
                 variant="ghost"
                 size="sm"
                 onClick={() => remove(activeView.id)}
                 className="text-destructive hover:text-destructive"
               >
-                <Trash2 className="h-3.5 w-3.5" /> Resolve
+                <Trash2 className="h-3.5 w-3.5" /> Delete
               </Button>
             </div>
           </PopoverContent>
@@ -299,6 +326,7 @@ export function KiwiComments({ path, containerRef, renderKey, refreshKey }: Prop
           }
         }}
         onDelete={remove}
+        onToggleResolve={toggleResolve}
       />
     </>
   );
@@ -308,10 +336,12 @@ function CommentsList({
   comments,
   onFocus,
   onDelete,
+  onToggleResolve,
 }: {
   comments: Comment[];
   onFocus: (c: Comment) => void;
   onDelete: (id: string) => void;
+  onToggleResolve: (id: string) => void;
 }) {
   if (comments.length === 0) {
     return (
@@ -340,27 +370,41 @@ function CommentsList({
         <ul className="space-y-3">
           {comments.map((c) => (
             <li key={c.id}>
-              <Card className="p-3">
-                <div className="flex items-start gap-2">
+              <Card className={“p-3” + (c.resolved ? “ opacity-60” : “”)}>
+                <div className=”flex items-start gap-2”>
                   <button
-                    type="button"
+                    type=”button”
                     onClick={() => onFocus(c)}
-                    className="flex-1 text-left"
+                    className=”flex-1 text-left”
                   >
-                    <div className="text-xs text-muted-foreground mb-1">
-                      {c.author} · {formatDate(c.createdAt)}
+                    <div className=”text-xs text-muted-foreground mb-1 flex items-center gap-1.5”>
+                      <span>{c.author} · {formatDate(c.createdAt)}</span>
+                      {c.resolved && (
+                        <span className=”text-green-500 flex items-center gap-0.5”>
+                          <CheckCircle className=”h-3 w-3” /> Resolved
+                        </span>
+                      )}
                     </div>
-                    <div className="text-xs italic text-muted-foreground mb-1.5">
+                    <div className=”text-xs italic text-muted-foreground mb-1.5”>
                       “{truncate(c.anchor.quote, 120)}”
                     </div>
-                    <div className="whitespace-pre-wrap">{c.body}</div>
+                    <div className={“whitespace-pre-wrap” + (c.resolved ? “ line-through” : “”)}>{c.body}</div>
                   </button>
                   <Button
-                    variant="ghost"
-                    size="icon"
+                    variant=”ghost”
+                    size=”icon”
+                    onClick={() => onToggleResolve(c.id)}
+                    title={c.resolved ? “Unresolve” : “Resolve”}
+                    className=”h-7 w-7 text-muted-foreground”
+                  >
+                    {c.resolved ? <Circle className=”h-3.5 w-3.5” /> : <CheckCircle className=”h-3.5 w-3.5” />}
+                  </Button>
+                  <Button
+                    variant=”ghost”
+                    size=”icon”
                     onClick={() => onDelete(c.id)}
-                    title="Resolve / delete"
-                    className="h-7 w-7 text-muted-foreground hover:text-destructive"
+                    title=”Delete”
+                    className=”h-7 w-7 text-muted-foreground hover:text-destructive”
                   >
                     <Trash2 className="h-3.5 w-3.5" />
                   </Button>

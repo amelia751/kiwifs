@@ -1,0 +1,32 @@
+{
+  "name": "Ocean",
+  "description": "Blue-teal — calm and professional",
+  "light": {
+    "primary": "199 89% 48%",
+    "primary-foreground": "0 0% 100%",
+    "primary-hover": "199 89% 40%",
+    "ring": "199 89% 48%",
+    "destructive": "0 84% 60%",
+    "destructive-foreground": "0 0% 98%",
+    "destructive-hover": "0 84% 52%",
+    "kiwi-graph-palette-0": "#0077b6",
+    "kiwi-graph-palette-1": "#0096c7",
+    "kiwi-graph-palette-2": "#00b4d8",
+    "kiwi-graph-palette-3": "#48cae4",
+    "kiwi-graph-palette-4": "#0288d1"
+  },
+  "dark": {
+    "primary": "199 89% 58%",
+    "primary-foreground": "0 0% 5%",
+    "primary-hover": "199 89% 50%",
+    "ring": "199 89% 58%",
+    "destructive": "0 70% 45%",
+    "destructive-foreground": "0 0% 95%",
+    "destructive-hover": "0 70% 38%",
+    "kiwi-graph-palette-0": "#48cae4",
+    "kiwi-graph-palette-1": "#00b4d8",
+    "kiwi-graph-palette-2": "#0096c7",
+    "kiwi-graph-palette-3": "#90e0ef",
+    "kiwi-graph-palette-4": "#0077b6"
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "name": "Neutral",
+  "description": "Gray, no brand colour — blends into any context",
+  "light": {
+    "primary": "0 0% 20%",
+    "primary-foreground": "0 0% 98%",
+    "primary-hover": "0 0% 15%",
+    "ring": "0 0% 20%",
+    "kiwi-graph-palette-0": "#555555",
+    "kiwi-graph-palette-1": "#666666",
+    "kiwi-graph-palette-2": "#777777",
+    "kiwi-graph-palette-3": "#888888",
+    "kiwi-graph-palette-4": "#999999"
+  },
+  "dark": {
+    "primary": "0 0% 80%",
+    "primary-foreground": "0 0% 5%",
+    "primary-hover": "0 0% 72%",
+    "ring": "0 0% 80%",
+    "kiwi-graph-palette-0": "#aaaaaa",
+    "kiwi-graph-palette-1": "#999999",
+    "kiwi-graph-palette-2": "#bbbbbb",
+    "kiwi-graph-palette-3": "#888888",
+    "kiwi-graph-palette-4": "#cccccc"
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "name": "Kiwi",
+  "description": "Chartreuse default — the signature KiwiFS look",
+  "light": {
+    "primary": "65 80% 55%",
+    "primary-foreground": "0 0% 9%",
+    "primary-hover": "65 80% 48%",
+    "ring": "65 80% 55%",
+    "kiwi-graph-palette-0": "#6b8e23",
+    "kiwi-graph-palette-1": "#556b2f",
+    "kiwi-graph-palette-2": "#8fbc8f",
+    "kiwi-graph-palette-3": "#2e8b57",
+    "kiwi-graph-palette-4": "#3cb371"
+  },
+  "dark": {
+    "primary": "65 80% 62%",
+    "primary-foreground": "0 0% 5%",
+    "primary-hover": "65 80% 54%",
+    "ring": "65 80% 62%",
+    "kiwi-graph-palette-0": "#9acd32",
+    "kiwi-graph-palette-1": "#6b8e23",
+    "kiwi-graph-palette-2": "#8fbc8f",
+    "kiwi-graph-palette-3": "#66cdaa",
+    "kiwi-graph-palette-4": "#3cb371"
+  }
+}

@@ -17,7 +17,7 @@ func minimalCfg() *config.Config {
 }
 
 func TestAddSpaceAndList(t *testing.T) {
-	m := NewManager()
+	m := NewManager(nil)
 	dir := t.TempDir()
 
 	if err := m.AddSpace("alpha", dir, minimalCfg()); err != nil {
@@ -36,7 +36,7 @@ func TestAddSpaceAndList(t *testing.T) {
 }
 
 func TestAddSpaceDuplicateRejects(t *testing.T) {
-	m := NewManager()
+	m := NewManager(nil)
 	dir := t.TempDir()
 
 	if err := m.AddSpace("dup", dir, minimalCfg()); err != nil {
@@ -50,7 +50,7 @@ func TestAddSpaceDuplicateRejects(t *testing.T) {
 }
 
 func TestGetSpace(t *testing.T) {
-	m := NewManager()
+	m := NewManager(nil)
 	dir := t.TempDir()
 	if err := m.AddSpace("one", dir, minimalCfg()); err != nil {
 		t.Fatalf("AddSpace: %v", err)
@@ -66,7 +66,7 @@ func TestGetSpace(t *testing.T) {
 }
 
 func TestResolveSpaceDefaultsToFirst(t *testing.T) {
-	m := NewManager()
+	m := NewManager(nil)
 	dir1 := t.TempDir()
 	dir2 := t.TempDir()
 	m.AddSpace("first", dir1, minimalCfg())
@@ -81,7 +81,7 @@ func TestResolveSpaceDefaultsToFirst(t *testing.T) {
 }
 
 func TestResolveSpaceByName(t *testing.T) {
-	m := NewManager()
+	m := NewManager(nil)
 	dir1 := t.TempDir()
 	dir2 := t.TempDir()
 	m.AddSpace("alpha", dir1, minimalCfg())
@@ -99,7 +99,7 @@ func TestResolveSpaceByName(t *testing.T) {
 }
 
 func TestResolveSpaceTrailingSlash(t *testing.T) {
-	m := NewManager()
+	m := NewManager(nil)
 	dir := t.TempDir()
 	m.AddSpace("docs", dir, minimalCfg())
 	defer m.Close()
@@ -112,7 +112,7 @@ func TestResolveSpaceTrailingSlash(t *testing.T) {
 }
 
 func TestResolveSpaceEmpty(t *testing.T) {
-	m := NewManager()
+	m := NewManager(nil)
 	r := &http.Request{URL: &url.URL{Path: "/api/kiwi/tree"}}
 	sp := m.resolveSpace(r)
 	if sp != nil {
@@ -121,7 +121,7 @@ func TestResolveSpaceEmpty(t *testing.T) {
 }
 
 func TestHandlerHealthEndpoint(t *testing.T) {
-	m := NewManager()
+	m := NewManager(nil)
 	h := m.Handler()
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
@@ -134,7 +134,7 @@ func TestHandlerHealthEndpoint(t *testing.T) {
 }
 
 func TestHandlerSpacesEndpoint(t *testing.T) {
-	m := NewManager()
+	m := NewManager(nil)
 	dir := t.TempDir()
 	m.AddSpace("wiki", dir, minimalCfg())
 	defer m.Close()
@@ -150,7 +150,7 @@ func TestHandlerSpacesEndpoint(t *testing.T) {
 }
 
 func TestCloseSkipsRegisterServerSpaces(t *testing.T) {
-	m := NewManager()
+	m := NewManager(nil)
 	dir := t.TempDir()
 
 	if err := m.AddSpace("built", dir, minimalCfg()); err != nil {
@@ -164,7 +164,7 @@ func TestCloseSkipsRegisterServerSpaces(t *testing.T) {
 }
 
 func TestListSpacesPreservesOrder(t *testing.T) {
-	m := NewManager()
+	m := NewManager(nil)
 	names := []string{"charlie", "alpha", "bravo"}
 	for _, name := range names {
 		dir := t.TempDir()

@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -1233,10 +1234,107 @@ func (h *Handlers) DeleteComment(c echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]string{"deleted": id, "path": path})
 }
 
+// PATCH /api/kiwi/comments/:id?path=<path>
+func (h *Handlers) ResolveComment(c echo.Context) error {
+	id := c.Param("id")
+	path := c.QueryParam("path")
+	if path == "" || id == "" {
+		return echo.NewHTTPError(http.StatusBadRequest, "path and id are required")
+	}
+	actor := c.Request().Header.Get("X-Actor")
+	if actor == "" {
+		actor = pipeline.DefaultActor
+	}
+
+	var body struct {
+		Resolved bool `json:"resolved"`
+	}
+	if err := c.Bind(&body); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid body")
+	}
+
+	updated, err := h.comments.Resolve(path, id, body.Resolved)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return echo.NewHTTPError(http.StatusNotFound, "comment not found")
+		}
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	jsonPath := h.comments.FilePath(path)
+	verb := "resolve"
+	if !body.Resolved {
+		verb = "unresolve"
+	}
+	if cerr := h.versioner.Commit(c.Request().Context(), jsonPath, actor, fmt.Sprintf("comment-%s: %s — %s", verb, path, shortID(id))); cerr != nil {
+		log.Printf("handlers: commit comment-%s %s: %v", verb, path, cerr)
+	}
+	if h.hub != nil {
+		h.hub.Broadcast(events.Event{Op: "comment.resolve", Path: path, Actor: actor})
+	}
+	return c.JSON(http.StatusOK, updated)
+}
+
 func shortID(id string) string {
 	if len(id) > 8 {
 		return id[:8]
 	}
 	return id
+}
+
+// ─── Theme ──────────────────────────────────────────────────────────────────
+
+// GetTheme returns the current theme from .kiwi/theme.json.
+// GET /api/kiwi/theme
+func (h *Handlers) GetTheme(c echo.Context) error {
+	p := filepath.Join(h.root, ".kiwi", "theme.json")
+	data, err := os.ReadFile(p)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return c.JSON(http.StatusOK, map[string]any{})
+		}
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	var theme map[string]any
+	if err := json.Unmarshal(data, &theme); err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, "invalid theme.json")
+	}
+	return c.JSON(http.StatusOK, theme)
+}
+
+// PutTheme saves theme overrides to .kiwi/theme.json.
+// PUT /api/kiwi/theme
+func (h *Handlers) PutTheme(c echo.Context) error {
+	const maxBody = 64 << 10
+	body, err := io.ReadAll(io.LimitReader(c.Request().Body, maxBody+1))
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "failed to read body")
+	}
+	if len(body) > maxBody {
+		return echo.NewHTTPError(http.StatusRequestEntityTooLarge, "theme JSON exceeds 64 KB")
+	}
+	var theme map[string]any
+	if err := json.Unmarshal(body, &theme); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid JSON")
+	}
+	formatted, err := json.MarshalIndent(theme, "", "  ")
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	dir := filepath.Join(h.root, ".kiwi")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	p := filepath.Join(dir, "theme.json")
+	if err := os.WriteFile(p, formatted, 0o644); err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	actor := c.Request().Header.Get("X-Actor")
+	if actor == "" {
+		actor = pipeline.DefaultActor
+	}
+	if cerr := h.versioner.Commit(c.Request().Context(), ".kiwi/theme.json", actor, "theme: update"); cerr != nil {
+		log.Printf("handlers: commit theme: %v", cerr)
+	}
+	return c.JSON(http.StatusOK, theme)
 }
 

@@ -232,6 +232,9 @@ func (s *Server) setupRoutes() {
 	api.GET("/comments", h.ListComments)
 	api.POST("/comments", h.AddComment)
 	api.DELETE("/comments/:id", h.DeleteComment)
+	api.PATCH("/comments/:id", h.ResolveComment)
+	api.GET("/theme", h.GetTheme)
+	api.PUT("/theme", h.PutTheme)
 
 	// Embedded UI — must be last so it acts as a catch-all SPA fallback.
 	// /api/* and /health are matched above this.

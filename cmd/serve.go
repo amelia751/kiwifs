@@ -109,7 +109,15 @@ func runServe(cmd *cobra.Command, args []string) error {
 
 	noWatch, _ := cmd.Flags().GetBool("no-watch")
 
-	stack, err := bootstrap.Build("default", root, cfg)
+	// In multi-space mode, filter API keys so each space's server only
+	// accepts keys scoped to that space. Applied before building the
+	// default stack so its auth middleware is correctly configured.
+	spaceSpecs, _ := cmd.Flags().GetStringSlice("space")
+	defaultCfg := cfg
+	if len(spaceSpecs) > 0 {
+		defaultCfg = spaces.FilterKeysForSpace(cfg, "default")
+	}
+	stack, err := bootstrap.Build("default", root, defaultCfg)
 	if err != nil {
 		return err
 	}
@@ -214,8 +222,8 @@ func runServe(cmd *cobra.Command, args []string) error {
 		extraHandler http.Handler
 		spaceMgr     *spaces.Manager
 	)
-	if spaceSpecs, _ := cmd.Flags().GetStringSlice("space"); len(spaceSpecs) > 0 {
-		spaceMgr = spaces.NewManager()
+	if len(spaceSpecs) > 0 {
+		spaceMgr = spaces.NewManager(cfg)
 		if err := spaceMgr.RegisterStack("default", root, stack); err != nil {
 			return fmt.Errorf("register default space: %w", err)
 		}
@@ -228,7 +236,8 @@ func runServe(cmd *cobra.Command, args []string) error {
 			}
 			sub := *cfg
 			sub.Storage.Root = spacePath
-			if err := spaceMgr.AddSpace(name, spacePath, &sub); err != nil {
+			filtered := spaces.FilterKeysForSpace(&sub, name)
+			if err := spaceMgr.AddSpace(name, spacePath, filtered); err != nil {
 				return fmt.Errorf("add space %q: %w", name, err)
 			}
 			log.Printf("space %q mounted at /api/kiwi/%s → %s", name, name, spacePath)
