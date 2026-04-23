@@ -12,6 +12,15 @@
   One Go binary. Your agent writes markdown with <code>cat</code>. Your team reads it in a web UI with wiki links, graph view, and a block editor. Git versions everything. <code>./kiwifs serve</code>.
 </p>
 
+<p align="center">
+  <a href="https://github.com/amelia751/kiwifs/actions/workflows/ci.yml"><img src="https://github.com/amelia751/kiwifs/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/amelia751/kiwifs/releases"><img src="https://img.shields.io/github/v/release/amelia751/kiwifs?include_prereleases&label=release" alt="Release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-BSL--1.1-blue" alt="License: BSL 1.1"></a>
+  <a href="https://github.com/amelia751/kiwifs"><img src="https://img.shields.io/badge/go-1.25-00ADD8?logo=go&logoColor=white" alt="Go 1.25"></a>
+  <a href="https://github.com/amelia751/kiwifs"><img src="https://img.shields.io/badge/single_binary-yes-green" alt="Single Binary"></a>
+  <a href="https://github.com/amelia751/kiwifs/discussions"><img src="https://img.shields.io/github/discussions/amelia751/kiwifs" alt="Discussions"></a>
+</p>
+
 ```bash
 curl -fsSL https://kiwifs.dev/install.sh | sh
 kiwifs serve --root ./knowledge
@@ -501,6 +510,6 @@ Writes accept `X-Actor` (git attribution), `X-Provenance` (lineage tracking), an
 
 ## License
 
-[Business Source License 1.1](LICENSE) — free to use, self-host, and modify. The only restriction: you can't offer KiwiFS as a commercial hosted service. Each release converts to Apache 2.0 after 4 years. [Read the FAQ →](https://kiwifs.dev/license)
+[Business Source License 1.1](LICENSE) — free to use, self-host, and modify. The only restriction: you can't offer KiwiFS as a commercial hosted service. Each release converts to Apache 2.0 after 4 years.
 
 If you want to offer KiwiFS as a managed service or need a commercial license, [get in touch](mailto:amelia.anh.lam@gmail.com).
