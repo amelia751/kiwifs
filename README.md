@@ -5,11 +5,11 @@
 <h1 align="center">KiwiFS</h1>
 
 <p align="center">
-  <strong>Obsidian for the web — with an agent interface and a git audit trail.</strong>
+  <strong>The knowledge server.</strong>
 </p>
 
 <p align="center">
-  One Go binary. Your agent writes markdown with <code>cat</code>. Your team reads it in a web UI with wiki links, graph view, and a block editor. Git versions everything. <code>./kiwifs serve</code>.
+  PocketBase for Knowledge — one Go binary, zero config. Obsidian's file-first philosophy. Agents write with <code>cat</code>. Humans read in a wiki. Git versions everything.
 </p>
 
 <p align="center">
