@@ -69,6 +69,27 @@ export interface KiwiTokens {
   "kiwi-graph-palette-7"?: string;
   "kiwi-graph-palette-8"?: string;
   "kiwi-graph-palette-9"?: string;
+  "font-sans"?: string;
+  "font-mono"?: string;
+  "font-serif"?: string;
+  "font-size-base"?: string;
+  "font-size-sm"?: string;
+  "font-size-lg"?: string;
+  "line-height-base"?: string;
+  "line-height-tight"?: string;
+  "spacing-unit"?: string;
+  "content-max-width"?: string;
+  "sidebar-width"?: string;
+  "heading-1-size"?: string;
+  "heading-2-size"?: string;
+  "heading-3-size"?: string;
+  "heading-4-size"?: string;
+  "heading-scale"?: string;
+  "code-font-size"?: string;
+  "code-bg"?: string;
+  "code-border"?: string;
+  "link-decoration"?: string;
+  "link-color"?: string;
   [key: string]: string | undefined;
 }
 

@@ -53,7 +53,7 @@ export type BacklinkEntry = {
   count: number;
 };
 
-export type GraphNode = { path: string };
+export type GraphNode = { path: string; tags?: string[] };
 export type GraphEdge = { source: string; target: string };
 export type GraphResponse = { nodes: GraphNode[]; edges: GraphEdge[] };
 
@@ -203,7 +203,7 @@ export const api = {
     return request(`${kiwiBase()}/tree?${qs}`);
   },
 
-  async readFile(path: string): Promise<{ content: string; etag: string | null }> {
+  async readFile(path: string): Promise<{ content: string; etag: string | null; lastModified: string | null }> {
     const qs = new URLSearchParams({ path });
     const res = await fetch(`${kiwiBase()}/file?${qs}`, {
       headers: { "X-Actor": actor() },
@@ -214,7 +214,8 @@ export const api = {
     }
     const content = await res.text();
     const etag = res.headers.get("ETag");
-    return { content, etag };
+    const lastModified = res.headers.get("Last-Modified");
+    return { content, etag, lastModified };
   },
 
   async writeFile(
@@ -259,8 +260,9 @@ export const api = {
     return `${kiwiBase()}/file?${p}`;
   },
 
-  async search(q: string): Promise<SearchResponse> {
+  async search(q: string, opts?: { modifiedAfter?: string }): Promise<SearchResponse> {
     const qs = new URLSearchParams({ q });
+    if (opts?.modifiedAfter) qs.set("modifiedAfter", opts.modifiedAfter);
     return request(`${kiwiBase()}/search?${qs}`);
   },
 
@@ -376,6 +378,10 @@ export const api = {
     if (opts.limit != null) qs.set("limit", String(opts.limit));
     if (opts.offset != null) qs.set("offset", String(opts.offset));
     return request(`${kiwiBase()}/meta?${qs}`);
+  },
+
+  async getUIConfig(): Promise<{ themeLocked: boolean }> {
+    return request(`${kiwiBase()}/ui-config`);
   },
 
   async getTheme(): Promise<Record<string, unknown>> {

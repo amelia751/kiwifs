@@ -16,6 +16,8 @@
   }
   body {
     @apply bg-background text-foreground antialiased;
+    font-family: var(--font-sans);
+    font-size: var(--font-size-base);
     font-feature-settings: "cv11", "ss01";
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
@@ -24,25 +26,37 @@
 
 /* ─── Prose (markdown body) ─── */
 .kiwi-prose {
-  @apply text-foreground leading-7;
+  @apply text-foreground;
+  line-height: var(--line-height-base);
+  max-width: var(--content-max-width);
 }
 .kiwi-prose h1 {
-  @apply text-3xl font-bold tracking-tight mt-8 mb-4 scroll-mt-20;
+  font-size: calc(var(--heading-1-size) * var(--heading-scale));
+  line-height: var(--line-height-tight);
+  @apply font-bold tracking-tight mt-8 mb-4 scroll-mt-20;
 }
 .kiwi-prose h2 {
-  @apply text-2xl font-semibold tracking-tight mt-8 mb-3 pb-1 border-b border-border scroll-mt-20;
+  font-size: calc(var(--heading-2-size) * var(--heading-scale));
+  line-height: var(--line-height-tight);
+  @apply font-semibold tracking-tight mt-8 mb-3 pb-1 border-b border-border scroll-mt-20;
 }
 .kiwi-prose h3 {
-  @apply text-xl font-semibold tracking-tight mt-6 mb-2 scroll-mt-20;
+  font-size: calc(var(--heading-3-size) * var(--heading-scale));
+  line-height: var(--line-height-tight);
+  @apply font-semibold tracking-tight mt-6 mb-2 scroll-mt-20;
 }
 .kiwi-prose h4 {
-  @apply text-lg font-semibold mt-5 mb-2 scroll-mt-20;
+  font-size: calc(var(--heading-4-size) * var(--heading-scale));
+  line-height: var(--line-height-tight);
+  @apply font-semibold mt-5 mb-2 scroll-mt-20;
 }
 .kiwi-prose p {
   @apply my-3 text-foreground/90;
 }
 .kiwi-prose a {
-  @apply text-foreground font-medium underline underline-offset-4 decoration-primary/60;
+  color: hsl(var(--link-color));
+  text-decoration: var(--link-decoration);
+  @apply font-medium underline-offset-4 decoration-primary/60;
   transition: opacity 0.15s ease;
 }
 .kiwi-prose a:hover {
@@ -59,13 +73,19 @@
   @apply border-l-4 border-primary/40 pl-4 my-4 text-muted-foreground italic;
 }
 .kiwi-prose code {
-  @apply bg-muted text-foreground rounded-md px-1.5 py-0.5 text-[0.875em] font-mono;
+  background: hsl(var(--code-bg));
+  font-size: var(--code-font-size);
+  font-family: var(--font-mono);
+  @apply text-foreground rounded-md px-1.5 py-0.5;
 }
 .kiwi-prose pre {
-  @apply bg-muted rounded-lg p-4 my-4 overflow-x-auto;
+  background: hsl(var(--code-bg));
+  border: 1px solid hsl(var(--code-border));
+  @apply rounded-lg p-4 my-4 overflow-x-auto;
 }
 .kiwi-prose pre code {
-  @apply bg-transparent p-0 text-sm;
+  font-size: var(--font-size-sm);
+  @apply bg-transparent p-0;
 }
 .kiwi-prose table {
   @apply w-full my-4 text-sm border-collapse;
@@ -150,4 +170,10 @@
 }
 .kiwi-blocknote {
   filter: var(--kiwi-blocknote-filter);
+}
+
+/* Wiki link pills in editor */
+.kiwi-editor-wikilink {
+  @apply bg-primary/15 text-foreground rounded px-1 py-0.5 font-medium;
+  border-bottom: 2px solid hsl(var(--primary) / 0.5);
 }

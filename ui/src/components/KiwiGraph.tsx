@@ -20,7 +20,7 @@ import {
   useSetSettings,
   useSigma,
 } from "@react-sigma/core";
-import { ArrowLeft, Loader2, Search as SearchIcon } from "lucide-react";
+import { ArrowLeft, Loader2, Search as SearchIcon, Tag } from "lucide-react";
 import "@react-sigma/core/lib/style.css";
 import { api, type GraphResponse, type TreeEntry } from "@/lib/api";
 import { buildResolver } from "@/lib/wikiLinks";
@@ -44,6 +44,7 @@ import {
 
 type Props = {
   tree: TreeEntry | null;
+  activePath?: string | null;
   onNavigate: (path: string) => void;
   onClose: () => void;
 };
@@ -56,6 +57,7 @@ function topDir(path: string): string {
 type Built = {
   graph: Graph;
   dirs: string[];
+  tags: string[];
   theme: KiwiGraphTheme;
 };
 
@@ -71,14 +73,17 @@ function buildGraph(
   const g = new Graph({ type: "undirected", multi: false });
   const resolver = buildResolver(tree);
 
+  const tagSet = new Set<string>();
   for (const n of resp.nodes) {
     g.addNode(n.path, {
       label: titleize(n.path),
       path: n.path,
       dir: topDir(n.path),
+      tags: n.tags || [],
       size: 4,
       color: theme.defaultNode,
     });
+    if (n.tags) n.tags.forEach((t) => tagSet.add(t));
   }
 
   const dirSet = new Set<string>();
@@ -98,7 +103,7 @@ function buildGraph(
   // Node size ∝ degree (backlinks + outgoing), clamped so hubs don't dwarf leaves.
   g.forEachNode((node, attrs) => {
     const deg = g.degree(node);
-    g.setNodeAttribute(node, "size", Math.max(3, Math.min(18, 3 + Math.sqrt(deg) * 2.5)));
+    g.setNodeAttribute(node, "size", Math.max(6, Math.min(22, 6 + Math.sqrt(deg) * 2.5)));
     void attrs;
   });
 
@@ -130,13 +135,14 @@ function buildGraph(
     },
   });
 
-  return { graph: g, dirs: Array.from(dirSet).sort(), theme };
+  return { graph: g, dirs: Array.from(dirSet).sort(), tags: Array.from(tagSet).sort(), theme };
 }
 
-export function KiwiGraph({ tree, onNavigate, onClose }: Props) {
+export function KiwiGraph({ tree, activePath, onNavigate, onClose }: Props) {
   const [resp, setResp] = useState<GraphResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [dirFilter, setDirFilter] = useState<string>("");
+  const [tagFilter, setTagFilter] = useState<string>("");
   const [query, setQuery] = useState<string>("");
   const [hovered, setHovered] = useState<string | null>(null);
   const [htmlClassEpoch, setHtmlClassEpoch] = useState(0);
@@ -213,6 +219,25 @@ export function KiwiGraph({ tree, onNavigate, onClose }: Props) {
               </SelectContent>
             </Select>
           )}
+          {built && built.tags.length > 0 && (
+            <Select
+              value={tagFilter || "__all__"}
+              onValueChange={(v) => setTagFilter(v === "__all__" ? "" : v)}
+            >
+              <SelectTrigger className="h-8 w-44 text-sm">
+                <Tag className="h-3 w-3 mr-1" />
+                <SelectValue placeholder="All tags" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__all__">All tags</SelectItem>
+                {built.tags.map((t) => (
+                  <SelectItem key={t} value={t}>
+                    {t}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
         </div>
       </div>
 
@@ -257,6 +282,8 @@ export function KiwiGraph({ tree, onNavigate, onClose }: Props) {
               setHovered={setHovered}
               query={query.trim().toLowerCase()}
               dirFilter={dirFilter}
+              tagFilter={tagFilter}
+              activePath={activePath || undefined}
               colors={built.theme}
             />
           </SigmaContainer>
@@ -272,6 +299,9 @@ export function KiwiGraph({ tree, onNavigate, onClose }: Props) {
               {built.graph.degree(hovered) === 1 ? "" : "s"}
             </div>
           </Card>
+        )}
+        {built && built.graph.order > 0 && (
+          <GraphLegend graph={built.graph} theme={built.theme} />
         )}
         <div
           className={cn(
@@ -296,6 +326,8 @@ function GraphInteractions({
   setHovered,
   query,
   dirFilter,
+  tagFilter,
+  activePath,
   colors,
 }: {
   onNavigate: (path: string) => void;
@@ -303,6 +335,8 @@ function GraphInteractions({
   setHovered: (s: string | null) => void;
   query: string;
   dirFilter: string;
+  tagFilter: string;
+  activePath?: string;
   colors: KiwiGraphTheme;
 }) {
   const sigma = useSigma();
@@ -348,7 +382,9 @@ function GraphInteractions({
         const path = (data as any).path as string;
         const dir = (data as any).dir as string;
         const label = ((data as any).label as string) || "";
-        const filteredOut = dirFilter && dir !== dirFilter;
+        const tags = ((data as any).tags as string[]) || [];
+        const tagOut = tagFilter && !tags.includes(tagFilter);
+        const filteredOut = (dirFilter && dir !== dirFilter) || tagOut;
         const queryMatch = query
           ? path.toLowerCase().includes(query) || label.toLowerCase().includes(query)
           : true;
@@ -356,11 +392,20 @@ function GraphInteractions({
           out.hidden = true;
           return out;
         }
+        if (activePath && node === activePath) {
+          out.size = Math.max((out.size as number) || 6, 10);
+          out.zIndex = 3;
+          out.forceLabel = true;
+          out.borderColor = "#ffffff";
+          out.borderSize = 2;
+        }
         if (hovered) {
           if (!neighbors.has(node)) {
-            out.color = colors.nodeDim;
-            out.label = "";
-            out.zIndex = 0;
+            if (node !== activePath) {
+              out.color = colors.nodeDim;
+              out.label = "";
+              out.zIndex = 0;
+            }
           } else {
             out.zIndex = 2;
             out.forceLabel = true;
@@ -388,6 +433,14 @@ function GraphInteractions({
             return out;
           }
         }
+        if (tagFilter) {
+          const sTags = (g.getNodeAttribute(s, "tags") as string[]) || [];
+          const tTags = (g.getNodeAttribute(t, "tags") as string[]) || [];
+          if (!sTags.includes(tagFilter) && !tTags.includes(tagFilter)) {
+            out.hidden = true;
+            return out;
+          }
+        }
         if (hovered) {
           if (s !== hovered && t !== hovered) {
             out.color = colors.edgeGhost;
@@ -403,7 +456,54 @@ function GraphInteractions({
     });
 
     sigma.refresh();
-  }, [sigma, setSettings, hovered, query, dirFilter, colors]);
+  }, [sigma, setSettings, hovered, query, dirFilter, tagFilter, activePath, colors]);
 
   return null;
+}
+
+function GraphLegend({ graph, theme }: { graph: Graph; theme: KiwiGraphTheme }) {
+  const communities = new Map<number, { color: string; count: number; dirs: Map<string, number> }>();
+  graph.forEachNode((_, attrs) => {
+    const c = (attrs as any).community as number | undefined;
+    if (c == null) return;
+    const dir = (attrs as any).dir as string || "(root)";
+    const existing = communities.get(c);
+    if (existing) {
+      existing.count++;
+      existing.dirs.set(dir, (existing.dirs.get(dir) || 0) + 1);
+    } else {
+      const dirs = new Map<string, number>();
+      dirs.set(dir, 1);
+      communities.set(c, {
+        color: colorForGraphCommunity(c, theme),
+        count: 1,
+        dirs,
+      });
+    }
+  });
+  if (communities.size <= 1) return null;
+
+  const sorted = Array.from(communities.entries()).sort((a, b) => b[1].count - a[1].count);
+
+  return (
+    <Card className="absolute top-3 right-3 px-3 py-2 text-xs">
+      <div className="text-muted-foreground mb-1.5 font-medium">Communities</div>
+      <div className="space-y-1">
+        {sorted.map(([idx, { color, count, dirs }]) => {
+          const topDir = Array.from(dirs.entries()).sort((a, b) => b[1] - a[1])[0]?.[0] || "unknown";
+          return (
+            <div key={idx} className="flex items-center gap-2">
+              <span
+                className="h-2.5 w-2.5 rounded-full shrink-0"
+                style={{ background: color }}
+              />
+              <span className="text-muted-foreground">
+                {topDir} ({count})
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    </Card>
+  );
 }

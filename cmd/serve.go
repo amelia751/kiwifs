@@ -213,44 +213,36 @@ func runServe(cmd *cobra.Command, args []string) error {
 
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
 
-	// Multi-space mode. When --space name=path entries are supplied, wrap
-	// the default stack's server + each extra space behind a Manager that
-	// routes /api/kiwi/{space}/... to the right backend. The default space
-	// is registered under "default" (first in order → fallback for
-	// non-prefixed requests) so single-space clients keep working.
-	var (
-		extraHandler http.Handler
-		spaceMgr     *spaces.Manager
-	)
-	if len(spaceSpecs) > 0 {
-		spaceMgr = spaces.NewManager(cfg)
-		if err := spaceMgr.RegisterStack("default", root, stack); err != nil {
-			return fmt.Errorf("register default space: %w", err)
-		}
-		for _, spec := range spaceSpecs {
-			name, spacePath, ok := strings.Cut(spec, "=")
-			name = strings.TrimSpace(name)
-			spacePath = strings.TrimSpace(spacePath)
-			if !ok || name == "" || spacePath == "" {
-				return fmt.Errorf("invalid --space %q (want name=path)", spec)
-			}
-			sub := *cfg
-			sub.Storage.Root = spacePath
-			filtered := spaces.FilterKeysForSpace(&sub, name)
-			if err := spaceMgr.AddSpace(name, spacePath, filtered); err != nil {
-				return fmt.Errorf("add space %q: %w", name, err)
-			}
-			log.Printf("space %q mounted at /api/kiwi/%s → %s", name, name, spacePath)
-		}
-		defer spaceMgr.Close()
-		extraHandler = spaceMgr.Handler()
+	// Always create a Manager so /api/spaces is available even in
+	// single-space mode. The default space is registered first (fallback
+	// for non-prefixed requests) so existing clients keep working.
+	spaceMgr := spaces.NewManager(cfg)
+	if err := spaceMgr.RegisterStack("default", root, stack); err != nil {
+		return fmt.Errorf("register default space: %w", err)
 	}
+	for _, spec := range spaceSpecs {
+		name, spacePath, ok := strings.Cut(spec, "=")
+		name = strings.TrimSpace(name)
+		spacePath = strings.TrimSpace(spacePath)
+		if !ok || name == "" || spacePath == "" {
+			return fmt.Errorf("invalid --space %q (want name=path)", spec)
+		}
+		sub := *cfg
+		sub.Storage.Root = spacePath
+		filtered := spaces.FilterKeysForSpace(&sub, name)
+		if err := spaceMgr.AddSpace(name, spacePath, filtered); err != nil {
+			return fmt.Errorf("add space %q: %w", name, err)
+		}
+		log.Printf("space %q mounted at /api/kiwi/%s → %s", name, name, spacePath)
+	}
+	defer spaceMgr.Close()
+	mgrHandler := spaceMgr.Handler()
 
 	if wantS3, _ := cmd.Flags().GetBool("s3"); wantS3 {
 		port, _ := cmd.Flags().GetInt("s3-port")
 		s3Addr := fmt.Sprintf("%s:%d", cfg.Server.Host, port)
 		var s3Srv *kiwis3.Server
-		if spaceMgr != nil {
+		if len(spaceSpecs) > 0 {
 			// One bucket per space. Order matches Manager.ListSpaces so
 			// awscli sees buckets in the same order they were registered.
 			buckets := map[string]kiwis3.SpaceBackend{}
@@ -277,26 +269,12 @@ func runServe(cmd *cobra.Command, args []string) error {
 		runHTTP("KiwiFS S3 API", &http.Server{Addr: s3Addr, Handler: s3Srv.Handler()})
 	}
 
-	if extraHandler != nil {
+	if len(spaceSpecs) > 0 {
 		log.Printf("KiwiFS multi-space serving on http://%s", addr)
-		runHTTP("KiwiFS multi-space", &http.Server{Addr: addr, Handler: extraHandler})
 	} else {
 		log.Printf("KiwiFS serving %s on http://%s", root, addr)
-		srv := stack.Server
-		g.Go(func() error {
-			if err := srv.Start(addr); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				return fmt.Errorf("rest: %w", err)
-			}
-			return nil
-		})
-		g.Go(func() error {
-			<-gctx.Done()
-			shutCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-			defer cancel()
-			_ = srv.Shutdown(shutCtx)
-			return nil
-		})
 	}
+	runHTTP("KiwiFS", &http.Server{Addr: addr, Handler: mgrHandler})
 
 	// Signal-triggered context cancellation propagates through gctx once
 	// any server returns an error OR the signal fires. Wait returns the

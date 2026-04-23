@@ -188,6 +188,7 @@ func (s *Server) setupRoutes() {
 		vectors:   s.vectors,
 		comments:  s.comments,
 		assets:    s.cfg.Assets,
+		ui:        s.cfg.UI,
 		root:      s.pipe.Store.AbsPath(""),
 	}
 	// Chain cache invalidation onto the pipeline's fan-out so any write —
@@ -235,6 +236,7 @@ func (s *Server) setupRoutes() {
 	api.PATCH("/comments/:id", h.ResolveComment)
 	api.GET("/theme", h.GetTheme)
 	api.PUT("/theme", h.PutTheme)
+	api.GET("/ui-config", h.UIConfig)
 
 	// Embedded UI — must be last so it acts as a catch-all SPA fallback.
 	// /api/* and /health are matched above this.

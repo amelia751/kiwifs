@@ -18,14 +18,14 @@ const PALETTE_VAR_NAMES = Array.from(
 );
 
 const DEFAULTS: KiwiGraphTheme = {
-  defaultNode: "#8a8a8a",
-  edge: "#d4d4d4",
-  nodeDim: "#e5e5e5",
-  edgeGhost: "#f0f0f0",
-  edgeStrong: "#666666",
+  defaultNode: "#7c8a6e",
+  edge: "#c8c8c8",
+  nodeDim: "#e0e0e0",
+  edgeGhost: "#ececec",
+  edgeStrong: "#555555",
   palette: [
-    "#555555", "#666666", "#777777", "#888888", "#999999",
-    "#5e5e5e", "#707070", "#808080", "#909090", "#a0a0a0",
+    "#5b9e4f", "#4a89c8", "#d97b3e", "#c254a5", "#3db5a6",
+    "#c9534e", "#8b6cc1", "#c4a832", "#4eadd4", "#7a8f3e",
   ],
 };
 

@@ -33,7 +33,7 @@ export function SpaceSelector({
 }) {
   const [spaces, setSpaces] = useState<SpaceMeta[]>([]);
   const [value, setValue] = useState(getCurrentSpace() || "default");
-  const [multiSpace, setMultiSpace] = useState(false);
+  const [loaded, setLoaded] = useState(false);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [newName, setNewName] = useState("");
   const [creating, setCreating] = useState(false);
@@ -43,12 +43,12 @@ export function SpaceSelector({
       .listSpaces()
       .then((res) => {
         setSpaces(res.spaces);
-        setMultiSpace(res.spaces.length > 1);
+        setLoaded(true);
         if (!getCurrentSpace() && res.spaces.length > 0) {
           setValue(res.spaces[0].name);
         }
       })
-      .catch(() => setMultiSpace(false));
+      .catch(() => setLoaded(false));
   }, []);
 
   useEffect(load, [load]);
@@ -84,7 +84,7 @@ export function SpaceSelector({
     }
   }, [newName, onSwitch, load]);
 
-  if (!multiSpace) return null;
+  if (!loaded) return null;
 
   return (
     <>
@@ -101,6 +101,9 @@ export function SpaceSelector({
                   <span>{s.name}</span>
                   <span className="text-muted-foreground text-[11px] tabular-nums">
                     {s.fileCount} files
+                    {s.lastModified && (
+                      <> · {new Date(s.lastModified).toLocaleDateString()}</>
+                    )}
                   </span>
                 </div>
               </SelectItem>

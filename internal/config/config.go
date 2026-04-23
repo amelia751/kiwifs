@@ -16,10 +16,16 @@ type Config struct {
 	Versioning VersioningConfig `toml:"versioning"`
 	Auth       AuthConfig       `toml:"auth"`
 	Assets     AssetsConfig     `toml:"assets"`
+	UI         UIConfig         `toml:"ui"`
 	// Spaces enables multi-tenant mode: each entry becomes an
 	// independent knowledge base mapped under /api/kiwi/{name}/...
 	// When empty, the server runs single-space against Storage.Root.
 	Spaces []SpaceConfig `toml:"spaces"`
+}
+
+// UIConfig controls frontend behaviour. Toggled via [ui] in config.toml.
+type UIConfig struct {
+	ThemeLocked bool `toml:"theme_locked"`
 }
 
 // AssetsConfig controls binary upload limits and MIME allowlist. Zero values

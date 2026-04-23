@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Download, Upload, X } from "lucide-react";
+import { HexColorPicker } from "react-colorful";
 import { Button } from "./ui/button";
+import { Input } from "./ui/input";
 import { Label } from "./ui/label";
+import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover";
 import { applyKiwiTheme, type KiwiThemeOverrides, type KiwiTokens } from "../lib/kiwiTheme";
 import { getCustomTheme, setCustomTheme } from "../hooks/useTheme";
 import { api } from "../lib/api";
@@ -9,6 +12,11 @@ import { api } from "../lib/api";
 interface TokenGroup {
   label: string;
   tokens: { key: keyof KiwiTokens; label: string }[];
+}
+
+interface TextTokenGroup {
+  label: string;
+  tokens: { key: string; label: string; placeholder: string }[];
 }
 
 const TOKEN_GROUPS: TokenGroup[] = [
@@ -51,6 +59,56 @@ const TOKEN_GROUPS: TokenGroup[] = [
     tokens: [
       { key: "destructive", label: "Destructive" },
       { key: "destructive-foreground", label: "Destructive text" },
+    ],
+  },
+  {
+    label: "Code Blocks",
+    tokens: [
+      { key: "code-bg", label: "Code background" },
+      { key: "code-border", label: "Code border" },
+    ],
+  },
+];
+
+const TEXT_TOKEN_GROUPS: TextTokenGroup[] = [
+  {
+    label: "Typography",
+    tokens: [
+      { key: "font-sans", label: "Sans font", placeholder: "ui-sans-serif, system-ui, sans-serif" },
+      { key: "font-mono", label: "Mono font", placeholder: "ui-monospace, monospace" },
+      { key: "font-size-base", label: "Base size", placeholder: "1rem" },
+      { key: "font-size-sm", label: "Small size", placeholder: "0.875rem" },
+      { key: "font-size-lg", label: "Large size", placeholder: "1.125rem" },
+      { key: "line-height-base", label: "Line height", placeholder: "1.75" },
+    ],
+  },
+  {
+    label: "Spacing",
+    tokens: [
+      { key: "spacing-unit", label: "Spacing unit", placeholder: "8px" },
+      { key: "content-max-width", label: "Content width", placeholder: "48rem" },
+    ],
+  },
+  {
+    label: "Headings",
+    tokens: [
+      { key: "heading-scale", label: "Scale multiplier", placeholder: "1" },
+      { key: "heading-1-size", label: "H1 size", placeholder: "1.875rem" },
+      { key: "heading-2-size", label: "H2 size", placeholder: "1.5rem" },
+      { key: "heading-3-size", label: "H3 size", placeholder: "1.25rem" },
+    ],
+  },
+  {
+    label: "Code",
+    tokens: [
+      { key: "code-font-size", label: "Code font size", placeholder: "0.875em" },
+    ],
+  },
+  {
+    label: "Links",
+    tokens: [
+      { key: "link-color", label: "Link color", placeholder: "var(--foreground)" },
+      { key: "link-decoration", label: "Decoration", placeholder: "underline" },
     ],
   },
 ];
@@ -96,6 +154,12 @@ function getCurrentTokens(): KiwiTokens {
       if (val) tokens[t.key as string] = val;
     }
   }
+  for (const group of TEXT_TOKEN_GROUPS) {
+    for (const t of group.tokens) {
+      const val = style.getPropertyValue(`--${t.key}`).trim();
+      if (val) tokens[t.key] = val;
+    }
+  }
   return tokens;
 }
 
@@ -133,6 +197,21 @@ export function KiwiThemeEditor({ onClose, onPresetReset }: Props) {
       const hsl = hexToHsl(hex);
       setActiveTokens((prev) => {
         const next = { ...prev, [key]: hsl };
+        const overrides: KiwiThemeOverrides = isDark
+          ? { light: lightTokens, dark: next }
+          : { light: next, dark: darkTokens };
+        applyKiwiTheme(overrides);
+        return next;
+      });
+    },
+    [isDark, lightTokens, darkTokens, setActiveTokens],
+  );
+
+  const updateTextToken = useCallback(
+    (key: string, value: string) => {
+      setActiveTokens((prev) => {
+        const next = { ...prev, [key]: value || undefined };
+        if (!value) delete next[key];
         const overrides: KiwiThemeOverrides = isDark
           ? { light: lightTokens, dark: next }
           : { light: next, dark: darkTokens };
@@ -212,17 +291,60 @@ export function KiwiThemeEditor({ onClose, onPresetReset }: Props) {
                 const val = activeTokens[t.key as string] || "";
                 const hex = val ? hslToHex(val) : "#888888";
                 return (
-                  <div key={t.key as string} className="flex items-center gap-2">
-                    <input
-                      type="color"
-                      value={hex}
-                      onChange={(e) => updateToken(t.key as string, e.target.value)}
-                      className="h-8 w-8 rounded border border-border cursor-pointer shrink-0"
-                    />
-                    <Label className="text-xs">{t.label}</Label>
-                  </div>
+                  <Popover key={t.key as string}>
+                    <PopoverTrigger asChild>
+                      <button className="flex items-center gap-2 group cursor-pointer rounded-md px-1.5 py-1 -mx-1.5 hover:bg-accent transition-colors">
+                        <span
+                          className="h-7 w-7 rounded-md border border-border shrink-0 shadow-sm"
+                          style={{ background: hex }}
+                        />
+                        <div className="text-left">
+                          <Label className="text-xs cursor-pointer">{t.label}</Label>
+                          <div className="text-[10px] text-muted-foreground font-mono">{hex}</div>
+                        </div>
+                      </button>
+                    </PopoverTrigger>
+                    <PopoverContent side="right" align="start" className="w-auto p-3">
+                      <HexColorPicker
+                        color={hex}
+                        onChange={(c) => updateToken(t.key as string, c)}
+                      />
+                      <input
+                        type="text"
+                        value={hex}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          if (/^#[0-9a-fA-F]{6}$/.test(v)) updateToken(t.key as string, v);
+                        }}
+                        className="mt-2 w-full text-xs font-mono px-2 py-1 rounded border border-border bg-background text-foreground"
+                      />
+                    </PopoverContent>
+                  </Popover>
                 );
               })}
+            </div>
+          </div>
+        ))}
+
+        <div className="h-px bg-border" />
+
+        {TEXT_TOKEN_GROUPS.map((group) => (
+          <div key={group.label}>
+            <h3 className="text-sm font-medium text-muted-foreground mb-3">
+              {group.label}
+            </h3>
+            <div className="grid grid-cols-2 gap-3">
+              {group.tokens.map((t) => (
+                <div key={t.key}>
+                  <Label className="text-xs">{t.label}</Label>
+                  <Input
+                    value={activeTokens[t.key] || ""}
+                    onChange={(e) => updateTextToken(t.key, e.target.value)}
+                    placeholder={t.placeholder}
+                    className="h-8 text-xs font-mono mt-1"
+                  />
+                </div>
+              ))}
             </div>
           </div>
         ))}

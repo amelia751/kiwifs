@@ -44,25 +44,56 @@
   --ghost-hover-foreground: 0 0% 9%;
   --link-hover-opacity: 0.75;
 
+  /* Typography */
+  --font-sans: ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-mono: ui-monospace, "Cascadia Code", "Fira Code", monospace;
+  --font-serif: ui-serif, Georgia, "Times New Roman", serif;
+  --font-size-base: 1rem;
+  --font-size-sm: 0.875rem;
+  --font-size-lg: 1.125rem;
+  --line-height-base: 1.75;
+  --line-height-tight: 1.3;
+
+  /* Spacing / density */
+  --spacing-unit: 8px;
+  --content-max-width: 48rem;
+  --sidebar-width: 288px;
+
+  /* Headings */
+  --heading-1-size: 1.875rem;
+  --heading-2-size: 1.5rem;
+  --heading-3-size: 1.25rem;
+  --heading-4-size: 1.125rem;
+  --heading-scale: 1;
+
+  /* Code */
+  --code-font-size: 0.875em;
+  --code-bg: 0 0% 96%;
+  --code-border: 0 0% 90%;
+
+  /* Links */
+  --link-decoration: underline;
+  --link-color: var(--foreground);
+
   --kiwi-shiki-filter: none;
   --kiwi-blocknote-filter: none;
 
   /* Graph (hex — read by readKiwiGraphTheme()) */
-  --kiwi-graph-default-node: #8a8a8a;
-  --kiwi-graph-edge: #d4d4d4;
-  --kiwi-graph-node-dim: #e5e5e5;
-  --kiwi-graph-edge-ghost: #f0f0f0;
-  --kiwi-graph-edge-strong: #666666;
-  --kiwi-graph-palette-0: #555555;
-  --kiwi-graph-palette-1: #666666;
-  --kiwi-graph-palette-2: #777777;
-  --kiwi-graph-palette-3: #888888;
-  --kiwi-graph-palette-4: #999999;
-  --kiwi-graph-palette-5: #5e5e5e;
-  --kiwi-graph-palette-6: #707070;
-  --kiwi-graph-palette-7: #808080;
-  --kiwi-graph-palette-8: #909090;
-  --kiwi-graph-palette-9: #a0a0a0;
+  --kiwi-graph-default-node: #7c8a6e;
+  --kiwi-graph-edge: #c8c8c8;
+  --kiwi-graph-node-dim: #e0e0e0;
+  --kiwi-graph-edge-ghost: #ececec;
+  --kiwi-graph-edge-strong: #555555;
+  --kiwi-graph-palette-0: #5b9e4f;
+  --kiwi-graph-palette-1: #4a89c8;
+  --kiwi-graph-palette-2: #d97b3e;
+  --kiwi-graph-palette-3: #c254a5;
+  --kiwi-graph-palette-4: #3db5a6;
+  --kiwi-graph-palette-5: #c9534e;
+  --kiwi-graph-palette-6: #8b6cc1;
+  --kiwi-graph-palette-7: #c4a832;
+  --kiwi-graph-palette-8: #4eadd4;
+  --kiwi-graph-palette-9: #7a8f3e;
 }
 
 /* ─── Dark ─── */
@@ -100,19 +131,22 @@
   --ghost-hover-foreground: 0 0% 95%;
   --link-hover-opacity: 0.85;
 
-  --kiwi-graph-default-node: #808080;
+  --code-bg: 0 0% 12%;
+  --code-border: 0 0% 18%;
+
+  --kiwi-graph-default-node: #a4b894;
   --kiwi-graph-edge: #555555;
-  --kiwi-graph-node-dim: #3a3a3a;
+  --kiwi-graph-node-dim: #333333;
   --kiwi-graph-edge-ghost: #2a2a2a;
-  --kiwi-graph-edge-strong: #aaaaaa;
-  --kiwi-graph-palette-0: #8a8a8a;
-  --kiwi-graph-palette-1: #929292;
-  --kiwi-graph-palette-2: #9a9a9a;
-  --kiwi-graph-palette-3: #7a7a7a;
-  --kiwi-graph-palette-4: #828282;
-  --kiwi-graph-palette-5: #6a6a6a;
-  --kiwi-graph-palette-6: #727272;
-  --kiwi-graph-palette-7: #959595;
-  --kiwi-graph-palette-8: #858585;
-  --kiwi-graph-palette-9: #7d7d7d;
+  --kiwi-graph-edge-strong: #cccccc;
+  --kiwi-graph-palette-0: #6ec45e;
+  --kiwi-graph-palette-1: #5ea0e6;
+  --kiwi-graph-palette-2: #f09050;
+  --kiwi-graph-palette-3: #e068c0;
+  --kiwi-graph-palette-4: #4ed4c4;
+  --kiwi-graph-palette-5: #e66060;
+  --kiwi-graph-palette-6: #a884e0;
+  --kiwi-graph-palette-7: #e0c840;
+  --kiwi-graph-palette-8: #60c4f0;
+  --kiwi-graph-palette-9: #98b850;
 }

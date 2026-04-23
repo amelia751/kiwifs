@@ -1,5 +1,23 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Check, History, Keyboard, Moon, Network, Palette, Plus, Search as SearchIcon, Sun } from "lucide-react";
+import {
+  Check,
+  ChevronDown,
+  ChevronRight,
+  Clock,
+  File,
+  FileAxis3D,
+  History,
+  Moon,
+  Network,
+  Palette,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Pin,
+  Plus,
+  Search as SearchIcon,
+  Star,
+  Sun,
+} from "lucide-react";
 import { KiwiTree } from "./components/KiwiTree";
 import { KiwiPage } from "./components/KiwiPage";
 import { KiwiEditor } from "./components/KiwiEditor";
@@ -10,6 +28,10 @@ import { KiwiThemeEditor } from "./components/KiwiThemeEditor";
 import { NewPageDialog } from "./components/NewPageDialog";
 import { KeyboardShortcuts } from "./components/KeyboardShortcuts";
 import { SpaceSelector } from "./components/SpaceSelector";
+import { useRecentPages } from "./hooks/useRecentPages";
+import { useStarredPages } from "./hooks/useStarredPages";
+import { usePinnedPages } from "./hooks/usePinnedPages";
+import { titleize } from "./lib/paths";
 import { Button } from "./components/ui/button";
 import {
   Popover,
@@ -32,19 +54,33 @@ export default function App() {
   const [editing, setEditing] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
   const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState<string | undefined>();
   const [newOpen, setNewOpen] = useState(false);
+  const [newFolder, setNewFolder] = useState<string | undefined>();
   const [graphOpen, setGraphOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [themeEditorOpen, setThemeEditorOpen] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(() => {
+    try { return localStorage.getItem("kiwifs-sidebar") !== "collapsed"; } catch { return true; }
+  });
+  const [sidebarWidth, setSidebarWidth] = useState(() => {
+    try {
+      const saved = localStorage.getItem("kiwifs-sidebar-width");
+      return saved ? Math.max(200, Math.min(480, parseInt(saved, 10))) : 272;
+    } catch { return 272; }
+  });
+  const resizing = useRef(false);
   const { theme, toggleTheme, preset, setPreset, presets: themePresets } = useTheme();
-  // Keep the latest values accessible to the global keydown listener without
-  // retearing it on every state change — otherwise editors remount on each key.
+  const [themeLocked, setThemeLocked] = useState(false);
+  const currentSpace = getCurrentSpace() || "default";
+  const { recent, recordVisit } = useRecentPages(currentSpace);
+  const { starred, toggle: toggleStar, isStarred } = useStarredPages(currentSpace);
+  const { pinned, toggle: togglePin, isPinned } = usePinnedPages(currentSpace);
   const editorRef = useRef<{ save: () => Promise<void> } | null>(null);
   const stateRef = useRef({ editing, activePath, graphOpen, historyOpen });
   stateRef.current = { editing, activePath, graphOpen, historyOpen };
 
-  // Load tree; keep a copy in state so the wiki-link resolver can use it.
   useEffect(() => {
     api
       .tree("/")
@@ -52,15 +88,12 @@ export default function App() {
       .catch(() => setTree(null));
   }, [refreshKey]);
 
-  // Pick first .md file on first load as a reasonable starting point.
   useEffect(() => {
     if (!tree || activePath) return;
     const firstMd = firstMarkdown(tree);
     if (firstMd) setActivePath(firstMd);
   }, [tree, activePath]);
 
-  // Global keyboard: Cmd/Ctrl+K for search, Cmd/Ctrl+N for new page,
-  // Cmd/Ctrl+E to toggle edit, Cmd/Ctrl+S to save while editing.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const mod = e.metaKey || e.ctrlKey;
@@ -70,6 +103,7 @@ export default function App() {
         setSearchOpen((v) => !v);
       } else if (mod && key === "n") {
         e.preventDefault();
+        setNewFolder(undefined);
         setNewOpen(true);
       } else if (mod && key === "e") {
         const { activePath, graphOpen, historyOpen } = stateRef.current;
@@ -91,8 +125,12 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  // spaceKey bumps on space switch so all data-fetching effects re-run
   const [spaceKey, setSpaceKey] = useState(0);
+
+  useEffect(() => {
+    api.getUIConfig().then((c) => setThemeLocked(c.themeLocked)).catch(() => {});
+  }, [spaceKey]);
+
   const handleSpaceSwitch = useCallback(() => {
     setActivePath(null);
     setEditing(false);
@@ -102,37 +140,22 @@ export default function App() {
     setRefreshKey((k) => k + 1);
   }, []);
 
-  // Live updates: subscribe to the server's SSE feed. Any write/delete/bulk
-  // or comment change bumps refreshKey, which cascades into tree reloads and
-  // page re-fetches so "agents write, humans see live" actually holds.
-  // Re-subscribes on space switch so events are scoped to the active space.
   useEffect(() => {
     const es = new EventSource(sseUrl());
     const bump = () => setRefreshKey((k) => k + 1);
-    const events = [
-      "write",
-      "delete",
-      "bulk",
-      "comment.add",
-      "comment.delete",
-    ];
+    const events = ["write", "delete", "bulk", "comment.add", "comment.delete"];
     events.forEach((name) => es.addEventListener(name, bump));
-    es.onerror = () => {
-      // Browsers auto-reconnect; swallow transient errors silently.
-    };
+    es.onerror = () => {};
     return () => {
       events.forEach((name) => es.removeEventListener(name, bump));
       es.close();
     };
   }, [spaceKey]);
 
-  // URL sync: encode space + page in hash for bookmarkable URLs.
-  // Format: #/{space}/{path} or #/{path} for the default space.
   useEffect(() => {
     const hash = window.location.hash.replace(/^#\/?/, "");
     if (!hash) return;
     const parts = hash.split("/");
-    // Try the first segment as a space name by peeking at available spaces.
     api.listSpaces().then((res) => {
       const names = new Set(res.spaces.map((s) => s.name));
       if (parts.length > 1 && names.has(parts[0])) {
@@ -151,7 +174,6 @@ export default function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Push state to hash on navigation.
   useEffect(() => {
     if (!activePath) return;
     const space = getCurrentSpace();
@@ -164,179 +186,420 @@ export default function App() {
   }, [activePath, spaceKey]);
 
   function navigate(path: string) {
-    // Breadcrumb root → first markdown file in tree.
     if (!path) {
       const firstMd = tree ? firstMarkdown(tree) : null;
       if (firstMd) setActivePath(firstMd);
       return;
     }
     if (!isMarkdown(path)) {
-      const idx = `${path}/index.md`;
-      setActivePath(idx);
-      setEditing(false);
+      const folder = findFolder(tree, path);
+      const target = folder ? firstMarkdown(folder) : `${path}/index.md`;
+      if (target) {
+        setActivePath(target);
+        setEditing(false);
+        recordVisit(target);
+      }
       return;
     }
     setActivePath(path);
     setEditing(false);
+    setGraphOpen(false);
+    setHistoryOpen(false);
+    recordVisit(path);
   }
+
+  const toggleSidebar = useCallback((open: boolean) => {
+    setSidebarOpen(open);
+    try { localStorage.setItem("kiwifs-sidebar", open ? "open" : "collapsed"); } catch {}
+  }, []);
 
   return (
     <TooltipProvider delayDuration={250}>
-      <div className="h-full flex bg-background text-foreground">
-        <aside className="w-72 shrink-0 border-r border-border bg-card flex flex-col">
-          <header className="p-3 border-b border-border flex items-center gap-2">
-            <div className="h-7 w-7 rounded-md bg-primary text-primary-foreground grid place-items-center font-bold text-sm">
-              K
+      <div className="h-full flex flex-col bg-background text-foreground">
+        {/* ── Header: full-width app bar ── */}
+        <header className="h-12 shrink-0 border-b border-border bg-card flex items-center px-3 gap-2">
+          {/* Left zone: sidebar toggle + logo + space */}
+          <div className="flex items-center gap-2 min-w-0">
+            <ToolbarButton
+              onClick={() => toggleSidebar(!sidebarOpen)}
+              label={sidebarOpen ? "Collapse sidebar" : "Expand sidebar"}
+            >
+              {sidebarOpen
+                ? <PanelLeftClose className="h-4 w-4" />
+                : <PanelLeftOpen className="h-4 w-4" />}
+            </ToolbarButton>
+            <div className="flex items-center gap-2">
+              <div className="h-7 w-7 rounded-md bg-primary text-primary-foreground grid place-items-center font-bold text-sm shrink-0">
+                K
+              </div>
+              <span className="font-semibold text-sm hidden sm:inline">KiwiFS</span>
             </div>
-            <div className="font-semibold text-sm">KiwiFS</div>
-            <div className="ml-auto flex items-center gap-0.5">
-              <ToolbarButton onClick={() => setNewOpen(true)} label="New page (⌘N)">
-                <Plus className="h-4 w-4" />
+          </div>
+
+          {/* Center zone: search bar */}
+          <div className="flex-1 flex justify-center px-4">
+            <button
+              type="button"
+              onClick={() => setSearchOpen(true)}
+              className="flex items-center gap-2 px-3 py-1.5 rounded-md border border-border bg-background hover:bg-accent text-muted-foreground text-sm transition-colors w-full max-w-md"
+            >
+              <SearchIcon className="h-3.5 w-3.5 shrink-0" />
+              <span className="flex-1 text-left truncate">Search pages…</span>
+              <kbd className="text-[10px] bg-muted px-1.5 py-0.5 rounded font-mono hidden sm:inline">
+                {navigator.platform?.includes("Mac") ? "⌘" : "Ctrl+"}K
+              </kbd>
+            </button>
+          </div>
+
+          {/* Right zone: actions */}
+          <div className="flex items-center gap-0.5">
+            <ToolbarButton onClick={() => { setNewFolder(undefined); setNewOpen(true); }} label="New page (⌘N)">
+              <Plus className="h-4 w-4" />
+            </ToolbarButton>
+            <ToolbarButton onClick={() => setGraphOpen((v) => !v)} label="Knowledge graph">
+              <Network className="h-4 w-4" />
+            </ToolbarButton>
+            <ToolbarButton
+              onClick={() => activePath && setHistoryOpen((v) => !v)}
+              label="Version history"
+            >
+              <History className="h-4 w-4" />
+            </ToolbarButton>
+            {themeLocked ? (
+              <ToolbarButton onClick={toggleTheme} label={theme === "dark" ? "Light mode" : "Dark mode"}>
+                {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
               </ToolbarButton>
-              <ToolbarButton onClick={() => setSearchOpen(true)} label="Search (⌘K)">
-                <SearchIcon className="h-4 w-4" />
-              </ToolbarButton>
-              <ToolbarButton onClick={() => setGraphOpen(true)} label="Knowledge graph">
-                <Network className="h-4 w-4" />
-              </ToolbarButton>
-              <ToolbarButton
-                onClick={() => activePath && setHistoryOpen(true)}
-                label="Version history"
-              >
-                <History className="h-4 w-4" />
-              </ToolbarButton>
+            ) : (
               <Popover>
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <PopoverTrigger asChild>
-                      <Button variant="ghost" size="icon" aria-label="Theme preset">
+                      <Button variant="ghost" size="icon" className="h-8 w-8" aria-label="Theme">
                         <Palette className="h-4 w-4" />
                       </Button>
                     </PopoverTrigger>
                   </TooltipTrigger>
-                  <TooltipContent side="bottom">Theme preset</TooltipContent>
+                  <TooltipContent side="bottom">Theme</TooltipContent>
                 </Tooltip>
                 <PopoverContent align="end" className="w-48 p-1">
-                  {themePresets.map((p) => (
-                    <button
-                      key={p.name}
-                      onClick={() => setPreset(p.name)}
-                      className="flex items-center gap-2 w-full rounded-sm px-2 py-1.5 text-sm hover:bg-accent hover:text-accent-foreground"
-                    >
-                      <span
-                        className="h-3 w-3 rounded-full shrink-0 border border-border"
-                        style={{ background: `hsl(${p.light.primary || "0 0% 50%"})` }}
-                      />
-                      <span className="flex-1 text-left">{p.name}</span>
-                      {preset === p.name && <Check className="h-3.5 w-3.5 text-primary" />}
-                    </button>
-                  ))}
+                  {themePresets.map((p) => {
+                    const swatchColor = theme === "dark"
+                      ? (p.dark.primary || p.light.primary || "0 0% 50%")
+                      : (p.light.primary || "0 0% 50%");
+                    return (
+                      <button
+                        key={p.name}
+                        onClick={() => setPreset(p.name)}
+                        className="flex items-center gap-2 w-full rounded-sm px-2 py-1.5 text-sm hover:bg-accent hover:text-accent-foreground"
+                      >
+                        <span
+                          className="h-4 w-4 rounded-full shrink-0 border border-border ring-1 ring-inset ring-white/20"
+                          style={{ background: `hsl(${swatchColor})` }}
+                        />
+                        <span className="flex-1 text-left">{p.name}</span>
+                        {preset === p.name && <Check className="h-3.5 w-3.5 text-primary" />}
+                      </button>
+                    );
+                  })}
                   <div className="h-px bg-border my-1" />
                   <button
                     onClick={() => setThemeEditorOpen(true)}
                     className="flex items-center gap-2 w-full rounded-sm px-2 py-1.5 text-sm hover:bg-accent hover:text-accent-foreground text-muted-foreground"
                   >
-                    Customize...
+                    Customize…
+                  </button>
+                  <div className="h-px bg-border my-1" />
+                  <button
+                    onClick={toggleTheme}
+                    className="flex items-center gap-2 w-full rounded-sm px-2 py-1.5 text-sm hover:bg-accent hover:text-accent-foreground"
+                  >
+                    {theme === "dark" ? <Sun className="h-3.5 w-3.5" /> : <Moon className="h-3.5 w-3.5" />}
+                    <span className="flex-1 text-left">
+                      {theme === "dark" ? "Light mode" : "Dark mode"}
+                    </span>
                   </button>
                 </PopoverContent>
               </Popover>
-              <ToolbarButton onClick={() => setShortcutsOpen(true)} label="Keyboard shortcuts (⌘?)">
-                <Keyboard className="h-4 w-4" />
-              </ToolbarButton>
-              <ToolbarButton onClick={toggleTheme} label="Toggle theme">
-                {theme === "dark" ? (
-                  <Sun className="h-4 w-4" />
-                ) : (
-                  <Moon className="h-4 w-4" />
-                )}
-              </ToolbarButton>
-            </div>
-          </header>
-          <SpaceSelector onSwitch={handleSpaceSwitch} />
-          <div className="flex-1 overflow-auto kiwi-scroll">
-            <KiwiTree
-              activePath={activePath}
-              onSelect={navigate}
-              refreshKey={refreshKey}
-            />
+            )}
           </div>
-        </aside>
-        <main className="flex-1 overflow-auto kiwi-scroll">
-          {themeEditorOpen ? (
-            <KiwiThemeEditor
-              onClose={() => setThemeEditorOpen(false)}
-              onPresetReset={() => setPreset(preset)}
-            />
-          ) : graphOpen ? (
-            <KiwiGraph
-              tree={tree}
-              onNavigate={(p) => {
-                setGraphOpen(false);
-                navigate(p);
-              }}
-              onClose={() => setGraphOpen(false)}
-            />
-          ) : historyOpen && activePath ? (
-            <KiwiHistory
-              path={activePath}
-              onClose={() => setHistoryOpen(false)}
-              onRestored={() => setRefreshKey((k) => k + 1)}
-            />
-          ) : editing && activePath ? (
-            <KiwiEditor
-              path={activePath}
-              saveRef={editorRef}
-              onClose={() => setEditing(false)}
-              onSaved={() => {
-                setEditing(false);
-                setRefreshKey((k) => k + 1);
-              }}
-            />
-          ) : activePath ? (
-            <KiwiPage
-              path={activePath}
-              tree={tree}
-              onNavigate={navigate}
-              onEdit={() => setEditing(true)}
-              onHistory={() => setHistoryOpen(true)}
-              refreshKey={refreshKey}
-            />
-          ) : (
-            <div className="grid place-items-center h-full text-muted-foreground">
-              <div className="text-center">
-                <div className="text-2xl font-semibold mb-2 text-foreground">
-                  KiwiFS
-                </div>
-                <div className="text-sm">
-                  Open a page from the sidebar or press ⌘K to search.
-                </div>
+        </header>
+
+        {/* ── Body: sidebar + content ── */}
+        <div className="flex-1 flex overflow-hidden">
+          {/* Sidebar */}
+          <aside
+            className={"shrink-0 border-r border-border bg-card flex flex-col overflow-hidden" + (resizing.current ? "" : " transition-[width] duration-200")}
+            style={{ width: sidebarOpen ? sidebarWidth : 0 }}
+          >
+            <div className="flex flex-col h-full" style={{ minWidth: sidebarWidth }}>
+              {/* Space selector */}
+              <SpaceSelector onSwitch={handleSpaceSwitch} />
+
+              {/* Sidebar sections */}
+              <div className="flex-1 overflow-auto kiwi-scroll">
+                {starred.length > 0 && (
+                  <SidebarSection icon={<Star className="h-3.5 w-3.5" />} title="Starred" storageKey="starred">
+                    {starred.map((p) => (
+                      <SidebarPageItem
+                        key={p}
+                        path={p}
+                        active={activePath === p}
+                        onSelect={navigate}
+                        trailing={
+                          <button
+                            type="button"
+                            onClick={(e) => { e.stopPropagation(); toggleStar(p); }}
+                            className="opacity-0 group-hover:opacity-100 text-amber-500"
+                          >
+                            <Star className="h-3 w-3 fill-current" />
+                          </button>
+                        }
+                      />
+                    ))}
+                  </SidebarSection>
+                )}
+                {pinned.length > 0 && (
+                  <SidebarSection icon={<Pin className="h-3.5 w-3.5" />} title="Pinned" storageKey="pinned">
+                    {pinned.map((p) => (
+                      <SidebarPageItem
+                        key={p}
+                        path={p}
+                        active={activePath === p}
+                        onSelect={navigate}
+                        trailing={
+                          <button
+                            type="button"
+                            onClick={(e) => { e.stopPropagation(); togglePin(p); }}
+                            className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-foreground"
+                          >
+                            <Pin className="h-3 w-3 fill-current" />
+                          </button>
+                        }
+                      />
+                    ))}
+                  </SidebarSection>
+                )}
+                {recent.length > 0 && (
+                  <SidebarSection icon={<Clock className="h-3.5 w-3.5" />} title="Recent" storageKey="recent">
+                    {recent.slice(0, 5).map((r) => (
+                      <SidebarPageItem
+                        key={r.path}
+                        path={r.path}
+                        active={activePath === r.path}
+                        onSelect={navigate}
+                      />
+                    ))}
+                  </SidebarSection>
+                )}
+                <SidebarSection icon={<FileAxis3D className="h-3.5 w-3.5" />} title="Pages" storageKey="pages" defaultOpen>
+                  <KiwiTree
+                    activePath={activePath}
+                    onSelect={navigate}
+                    refreshKey={refreshKey}
+                    onCreateChild={(folder) => {
+                      setNewFolder(folder);
+                      setNewOpen(true);
+                    }}
+                    onDeleted={() => {
+                      setActivePath(null);
+                      setRefreshKey((k) => k + 1);
+                    }}
+                    onDuplicated={(p) => {
+                      setRefreshKey((k) => k + 1);
+                      navigate(p);
+                    }}
+                    onMoved={(p) => {
+                      setRefreshKey((k) => k + 1);
+                      navigate(p);
+                    }}
+                  />
+                </SidebarSection>
               </div>
             </div>
+          </aside>
+
+          {/* Sidebar resize handle */}
+          {sidebarOpen && (
+            <div
+              className="w-1 cursor-col-resize hover:bg-primary/30 active:bg-primary/50 transition-colors shrink-0 relative z-10"
+              onMouseDown={(e) => {
+                e.preventDefault();
+                resizing.current = true;
+                const startX = e.clientX;
+                const startW = sidebarWidth;
+                let latestW = startW;
+                const onMove = (ev: MouseEvent) => {
+                  latestW = Math.max(200, Math.min(480, startW + ev.clientX - startX));
+                  setSidebarWidth(latestW);
+                };
+                const onUp = () => {
+                  resizing.current = false;
+                  document.removeEventListener("mousemove", onMove);
+                  document.removeEventListener("mouseup", onUp);
+                  try { localStorage.setItem("kiwifs-sidebar-width", String(latestW)); } catch {}
+                };
+                document.addEventListener("mousemove", onMove);
+                document.addEventListener("mouseup", onUp);
+              }}
+            />
           )}
-        </main>
-        <KiwiSearch
-          open={searchOpen}
-          onOpenChange={setSearchOpen}
-          onSelect={(p) => navigate(p)}
-        />
-        <NewPageDialog
-          open={newOpen}
-          onOpenChange={setNewOpen}
-          onCreated={(p) => {
-            setNewOpen(false);
-            setRefreshKey((k) => k + 1);
-            setActivePath(p);
-            setEditing(true);
-          }}
-        />
-        <KeyboardShortcuts
-          open={shortcutsOpen}
-          onOpenChange={setShortcutsOpen}
-        />
+
+          {/* Main content area */}
+          <main className="flex-1 overflow-auto kiwi-scroll relative">
+            {themeEditorOpen ? (
+              <KiwiThemeEditor
+                onClose={() => setThemeEditorOpen(false)}
+                onPresetReset={() => setPreset(preset)}
+              />
+            ) : graphOpen ? (
+              <KiwiGraph
+                tree={tree}
+                activePath={activePath}
+                onNavigate={(p) => {
+                  setGraphOpen(false);
+                  navigate(p);
+                }}
+                onClose={() => setGraphOpen(false)}
+              />
+            ) : historyOpen && activePath ? (
+              <KiwiHistory
+                path={activePath}
+                onClose={() => setHistoryOpen(false)}
+                onRestored={() => setRefreshKey((k) => k + 1)}
+              />
+            ) : editing && activePath ? (
+              <KiwiEditor
+                path={activePath}
+                tree={tree}
+                saveRef={editorRef}
+                onClose={() => setEditing(false)}
+                onNavigate={navigate}
+                onSaved={() => {
+                  setEditing(false);
+                  setRefreshKey((k) => k + 1);
+                }}
+              />
+            ) : activePath ? (
+              <KiwiPage
+                path={activePath}
+                tree={tree}
+                onNavigate={navigate}
+                onEdit={() => setEditing(true)}
+                onHistory={() => setHistoryOpen(true)}
+                onToggleStar={() => toggleStar(activePath)}
+                isStarred={isStarred(activePath)}
+                onTogglePin={() => togglePin(activePath)}
+                isPinned={isPinned(activePath)}
+                onDeleted={() => {
+                  setActivePath(null);
+                  setRefreshKey((k) => k + 1);
+                }}
+                onDuplicated={(p) => {
+                  setRefreshKey((k) => k + 1);
+                  navigate(p);
+                }}
+                onMoved={(p) => {
+                  setRefreshKey((k) => k + 1);
+                  navigate(p);
+                }}
+                onTagClick={(tag) => {
+                  setSearchQuery(`tag:${tag}`);
+                  setSearchOpen(true);
+                }}
+                refreshKey={refreshKey}
+              />
+            ) : (
+              <WelcomeScreen
+                onNewPage={() => { setNewFolder(undefined); setNewOpen(true); }}
+                onSearch={() => setSearchOpen(true)}
+                onGraph={() => setGraphOpen(true)}
+              />
+            )}
+          </main>
+        </div>
       </div>
+
+      {/* Modals */}
+      <KiwiSearch
+        open={searchOpen}
+        onOpenChange={(open) => {
+          setSearchOpen(open);
+          if (!open) setSearchQuery(undefined);
+        }}
+        onSelect={(p) => navigate(p)}
+        tree={tree}
+        initialQuery={searchQuery}
+      />
+      <NewPageDialog
+        open={newOpen}
+        onOpenChange={setNewOpen}
+        defaultFolder={newFolder}
+        onCreated={(p) => {
+          setNewOpen(false);
+          setRefreshKey((k) => k + 1);
+          setActivePath(p);
+          setEditing(true);
+        }}
+      />
+      <KeyboardShortcuts
+        open={shortcutsOpen}
+        onOpenChange={setShortcutsOpen}
+      />
     </TooltipProvider>
   );
 }
+
+/* ── Welcome Screen ── */
+
+function WelcomeScreen({
+  onNewPage,
+  onSearch,
+  onGraph,
+}: {
+  onNewPage: () => void;
+  onSearch: () => void;
+  onGraph: () => void;
+}) {
+  return (
+    <div className="grid place-items-center h-full text-muted-foreground">
+      <div className="text-center max-w-md">
+        <div className="h-16 w-16 mx-auto mb-4 rounded-2xl bg-primary text-primary-foreground grid place-items-center font-bold text-3xl">
+          K
+        </div>
+        <div className="text-2xl font-semibold mb-2 text-foreground">
+          Welcome to KiwiFS
+        </div>
+        <div className="text-sm mb-6">
+          Your knowledge base is ready. Get started by creating a page or exploring existing content.
+        </div>
+        <div className="flex flex-col gap-2 items-center">
+          <Button onClick={onNewPage} className="gap-2">
+            <Plus className="h-4 w-4" />
+            Create your first page
+          </Button>
+          <Button variant="outline" onClick={onSearch} className="gap-2">
+            <SearchIcon className="h-4 w-4" />
+            Search pages
+            <kbd className="ml-1 text-[10px] bg-muted px-1.5 py-0.5 rounded font-mono">
+              {navigator.platform?.includes("Mac") ? "⌘" : "Ctrl+"}K
+            </kbd>
+          </Button>
+          <Button variant="ghost" onClick={onGraph} className="gap-2 text-muted-foreground">
+            <Network className="h-4 w-4" />
+            View knowledge graph
+          </Button>
+        </div>
+        <div className="mt-8 text-xs space-y-1">
+          <div><kbd className="bg-muted px-1.5 py-0.5 rounded font-mono">⌘N</kbd> New page</div>
+          <div><kbd className="bg-muted px-1.5 py-0.5 rounded font-mono">⌘E</kbd> Toggle editor</div>
+          <div><kbd className="bg-muted px-1.5 py-0.5 rounded font-mono">⌘/</kbd> Keyboard shortcuts</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ── Toolbar Button ── */
 
 function ToolbarButton({
   children,
@@ -353,6 +616,7 @@ function ToolbarButton({
         <Button
           variant="ghost"
           size="icon"
+          className="h-8 w-8"
           aria-label={label}
           onClick={onClick}
         >
@@ -364,11 +628,113 @@ function ToolbarButton({
   );
 }
 
-function firstMarkdown(t: TreeEntry): string | null {
-  if (!t.isDir && t.path.toLowerCase().endsWith(".md")) return t.path;
+/* ── Sidebar Section ── */
+
+function SidebarSection({
+  icon,
+  title,
+  children,
+  storageKey,
+  defaultOpen,
+}: {
+  icon: React.ReactNode;
+  title: string;
+  children: React.ReactNode;
+  storageKey?: string;
+  defaultOpen?: boolean;
+}) {
+  const [collapsed, setCollapsed] = useState(() => {
+    if (!storageKey) return false;
+    try {
+      const stored = localStorage.getItem(`kiwifs-section-${storageKey}`);
+      if (stored !== null) return stored === "1";
+    } catch {}
+    return !defaultOpen;
+  });
+  return (
+    <div className="border-b border-border/50 last:border-b-0">
+      <button
+        type="button"
+        onClick={() => {
+          const next = !collapsed;
+          setCollapsed(next);
+          if (storageKey) {
+            try { localStorage.setItem(`kiwifs-section-${storageKey}`, next ? "1" : "0"); } catch {}
+          }
+        }}
+        className="flex items-center gap-1.5 px-3 py-2 text-xs text-muted-foreground uppercase tracking-wider w-full text-left hover:text-foreground hover:bg-accent/50 transition-colors"
+      >
+        {icon}
+        <span className="flex-1">{title}</span>
+        {collapsed
+          ? <ChevronRight className="h-3 w-3" />
+          : <ChevronDown className="h-3 w-3" />}
+      </button>
+      {!collapsed && <div className="pb-2">{children}</div>}
+    </div>
+  );
+}
+
+/* ── Sidebar Page Item ── */
+
+function SidebarPageItem({
+  path,
+  active,
+  onSelect,
+  trailing,
+}: {
+  path: string;
+  active: boolean;
+  onSelect: (path: string) => void;
+  trailing?: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={() => onSelect(path)}
+      className={
+        "group w-full flex items-center gap-1.5 px-3 py-1 text-left text-sm transition-colors " +
+        "hover:bg-accent hover:text-accent-foreground " +
+        (active ? "bg-accent text-accent-foreground font-medium" : "")
+      }
+    >
+      <File className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+      <span className="truncate flex-1">{titleize(path)}</span>
+      {trailing}
+    </button>
+  );
+}
+
+/* ── Helpers ── */
+
+function findFolder(t: TreeEntry | null, path: string): TreeEntry | null {
+  if (!t) return null;
+  const clean = path.replace(/\/+$/, "");
   for (const c of t.children || []) {
-    const r = firstMarkdown(c);
-    if (r) return r;
+    const cp = c.path.replace(/\/+$/, "");
+    if (c.isDir && cp === clean) return c;
+    if (c.isDir && clean.startsWith(cp + "/")) {
+      const inner = findFolder(c, path);
+      if (inner) return inner;
+    }
+  }
+  return null;
+}
+
+function firstMarkdown(t: TreeEntry): string | null {
+  const children = t.children || [];
+  const idx = children.find(
+    (c) => !c.isDir && c.name.toLowerCase() === "index.md",
+  );
+  if (idx) return idx.path;
+  for (const c of children) {
+    if (!c.isDir && c.path.toLowerCase().endsWith(".md")) return c.path;
+  }
+  for (const c of children) {
+    if (c.isDir) {
+      const r = firstMarkdown(c);
+      if (r) return r;
+    }
   }
   return null;
 }

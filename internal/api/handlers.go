@@ -46,6 +46,7 @@ type Handlers struct {
 	vectors   *vectorstore.Service // nil when vector search is disabled
 	comments  *comments.Store
 	assets    config.AssetsConfig
+	ui        config.UIConfig
 	root      string
 
 	// graphCache stores the last-computed /graph response; pipeline
@@ -622,6 +623,40 @@ func (h *Handlers) Search(c echo.Context) error {
 	if results == nil {
 		results = []search.Result{}
 	}
+	if ma := c.QueryParam("modifiedAfter"); ma != "" {
+		cutoff, perr := time.Parse(time.RFC3339, ma)
+		if perr == nil {
+			if df, ok := h.searcher.(search.DateFilterer); ok {
+				paths := make([]string, len(results))
+				for i, r := range results {
+					paths[i] = r.Path
+				}
+				kept, ferr := df.FilterByDate(c.Request().Context(), paths, cutoff)
+				if ferr == nil {
+					keptSet := make(map[string]bool, len(kept))
+					for _, p := range kept {
+						keptSet[p] = true
+					}
+					filtered := results[:0]
+					for _, r := range results {
+						if keptSet[r.Path] {
+							filtered = append(filtered, r)
+						}
+					}
+					results = filtered
+				}
+			} else {
+				filtered := results[:0]
+				for _, r := range results {
+					info, serr := h.store.Stat(c.Request().Context(), r.Path)
+					if serr == nil && info.ModTime.After(cutoff) {
+						filtered = append(filtered, r)
+					}
+				}
+				results = filtered
+			}
+		}
+	}
 	return c.JSON(http.StatusOK, searchResponse{
 		Query:   q,
 		Limit:   limit,
@@ -995,7 +1030,8 @@ func (h *Handlers) Backlinks(c echo.Context) error {
 // ─── Graph ───────────────────────────────────────────────────────────────────
 
 type graphNode struct {
-	Path string `json:"path"`
+	Path string   `json:"path"`
+	Tags []string `json:"tags,omitempty"`
 }
 
 type graphResponse struct {
@@ -1049,7 +1085,11 @@ func (h *Handlers) computeGraph(ctx context.Context) (*graphResponse, error) {
 	// previous filepath.Walk implementation bypassed the abstraction and
 	// would break the moment a different storage backend was wired in.
 	walkErr := storage.Walk(ctx, h.store, "/", func(e storage.Entry) error {
-		nodes = append(nodes, graphNode{Path: e.Path})
+		node := graphNode{Path: e.Path}
+		if raw, err := h.store.Read(ctx, e.Path); err == nil {
+			node.Tags = extractFrontmatterTags(raw)
+		}
+		nodes = append(nodes, node)
 		return nil
 	})
 	if walkErr != nil {
@@ -1068,6 +1108,35 @@ func (h *Handlers) computeGraph(ctx context.Context) (*graphResponse, error) {
 		}
 	}
 	return &graphResponse{Nodes: nodes, Edges: edges}, nil
+}
+
+func extractFrontmatterTags(raw []byte) []string {
+	fm, err := markdown.Frontmatter(raw)
+	if err != nil || fm == nil {
+		return nil
+	}
+	val, ok := fm["tags"]
+	if !ok {
+		val, ok = fm["labels"]
+	}
+	if !ok {
+		return nil
+	}
+	switch v := val.(type) {
+	case []any:
+		tags := make([]string, 0, len(v))
+		for _, item := range v {
+			if s, ok := item.(string); ok && s != "" {
+				tags = append(tags, s)
+			}
+		}
+		return tags
+	case string:
+		if v != "" {
+			return []string{v}
+		}
+	}
+	return nil
 }
 
 // ─── Templates ───────────────────────────────────────────────────────────────
@@ -1301,9 +1370,20 @@ func (h *Handlers) GetTheme(c echo.Context) error {
 	return c.JSON(http.StatusOK, theme)
 }
 
+// UIConfig returns client-facing flags derived from the server config.
+// GET /api/kiwi/ui-config
+func (h *Handlers) UIConfig(c echo.Context) error {
+	return c.JSON(http.StatusOK, map[string]any{
+		"themeLocked": h.ui.ThemeLocked,
+	})
+}
+
 // PutTheme saves theme overrides to .kiwi/theme.json.
 // PUT /api/kiwi/theme
 func (h *Handlers) PutTheme(c echo.Context) error {
+	if h.ui.ThemeLocked {
+		return echo.NewHTTPError(http.StatusForbidden, "theme editing is locked by admin")
+	}
 	const maxBody = 64 << 10
 	body, err := io.ReadAll(io.LimitReader(c.Request().Body, maxBody+1))
 	if err != nil {

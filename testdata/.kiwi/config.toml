@@ -1,0 +1,32 @@
+[server]
+port = 3333
+host = "0.0.0.0"
+
+[storage]
+root = "."
+
+[search]
+engine = "sqlite"
+
+[versioning]
+strategy = "git"
+
+[auth]
+type = "none"
+# type = "apikey"  → single global key via api_key below
+# type = "perspace" → per-space keys via [[auth.api_keys]] below
+# type = "oidc"    → JWT validation via [auth.oidc] below
+
+# Single global API key (auth.type = "apikey"):
+# api_key = "your-secret-key"
+
+# Per-space API keys (auth.type = "perspace"):
+# [[auth.api_keys]]
+# key   = "kiwi_proj_abc123"
+# space = "project-alpha"
+# actor = "jetrun-agent"
+
+# OIDC / OAuth JWT validation (auth.type = "oidc"):
+# [auth.oidc]
+# issuer    = "https://accounts.google.com"
+# client_id = "your-client-id"

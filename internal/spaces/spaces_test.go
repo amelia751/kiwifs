@@ -1,9 +1,11 @@
 package spaces
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/kiwifs/kiwifs/internal/config"
@@ -176,6 +178,176 @@ func TestListSpacesPreservesOrder(t *testing.T) {
 	for i, want := range names {
 		if got[i] != want {
 			t.Fatalf("ListSpaces[%d] = %s, want %s", i, got[i], want)
+		}
+	}
+}
+
+// ─── HTTP handler tests for space CRUD ──────────────────────────────────────
+
+func TestHTTPCreateSpace(t *testing.T) {
+	baseCfg := minimalCfg()
+	baseCfg.Storage.Root = t.TempDir()
+	m := NewManager(baseCfg)
+	dir := t.TempDir()
+	m.AddSpace("seed", dir, minimalCfg())
+	defer m.Close()
+
+	h := m.Handler()
+
+	body := `{"name":"newspace"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/spaces", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("POST /api/spaces status = %d, want 201; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var meta SpaceMeta
+	if err := json.NewDecoder(rec.Body).Decode(&meta); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if meta.Name != "newspace" {
+		t.Fatalf("created space name = %q, want %q", meta.Name, "newspace")
+	}
+
+	names := m.ListSpaces()
+	found := false
+	for _, n := range names {
+		if n == "newspace" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("newspace not found in ListSpaces: %v", names)
+	}
+}
+
+func TestHTTPCreateSpaceDuplicate(t *testing.T) {
+	m := NewManager(minimalCfg())
+	dir := t.TempDir()
+	m.AddSpace("existing", dir, minimalCfg())
+	defer m.Close()
+
+	h := m.Handler()
+
+	body := `{"name":"existing"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/spaces", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("POST duplicate status = %d, want 409; body: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHTTPGetSpace(t *testing.T) {
+	m := NewManager(nil)
+	dir := t.TempDir()
+	m.AddSpace("docs", dir, minimalCfg())
+	defer m.Close()
+
+	h := m.Handler()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/spaces/docs", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/spaces/docs status = %d, want 200", rec.Code)
+	}
+
+	var meta SpaceMeta
+	if err := json.NewDecoder(rec.Body).Decode(&meta); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if meta.Name != "docs" {
+		t.Fatalf("space name = %q, want %q", meta.Name, "docs")
+	}
+}
+
+func TestHTTPGetSpaceNotFound(t *testing.T) {
+	m := NewManager(nil)
+	h := m.Handler()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/spaces/nonexistent", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("GET nonexistent space status = %d, want 404", rec.Code)
+	}
+}
+
+func TestHTTPDeleteSpace(t *testing.T) {
+	m := NewManager(nil)
+	dir := t.TempDir()
+	m.AddSpace("ephemeral", dir, minimalCfg())
+	defer m.Close()
+
+	h := m.Handler()
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/spaces/ephemeral", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("DELETE /api/spaces/ephemeral status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+
+	if _, ok := m.GetSpace("ephemeral"); ok {
+		t.Fatal("space should be removed after DELETE")
+	}
+}
+
+func TestHTTPDeleteSpaceNotFound(t *testing.T) {
+	m := NewManager(nil)
+	h := m.Handler()
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/spaces/ghost", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("DELETE nonexistent space status = %d, want 404", rec.Code)
+	}
+}
+
+func TestHTTPListSpacesReturnsAll(t *testing.T) {
+	m := NewManager(nil)
+	for _, name := range []string{"alpha", "beta", "gamma"} {
+		m.AddSpace(name, t.TempDir(), minimalCfg())
+	}
+	defer m.Close()
+
+	h := m.Handler()
+	req := httptest.NewRequest(http.MethodGet, "/api/spaces", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/spaces status = %d, want 200", rec.Code)
+	}
+
+	var resp struct {
+		Spaces []SpaceMeta `json:"spaces"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Spaces) != 3 {
+		t.Fatalf("expected 3 spaces, got %d", len(resp.Spaces))
+	}
+	names := make([]string, len(resp.Spaces))
+	for i, s := range resp.Spaces {
+		names[i] = s.Name
+	}
+	want := []string{"alpha", "beta", "gamma"}
+	for i, w := range want {
+		if names[i] != w {
+			t.Fatalf("space[%d] = %q, want %q", i, names[i], w)
 		}
 	}
 }

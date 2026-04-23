@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { getCurrentSpace } from "../lib/api";
 import {
   ChevronRight,
-  FileText,
+  Copy,
   File,
+  FileAxis3D,
   FileImage,
   FileVideo,
   FileAudio,
@@ -11,23 +12,71 @@ import {
   FileArchive,
   Folder,
   FolderOpen,
+  Move,
+  Plus,
+  Trash2,
 } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { api, type TreeEntry } from "@/lib/api";
-import { isMarkdown, stripTrailingSlash } from "@/lib/paths";
+import { isMarkdown, stem, stripTrailingSlash } from "@/lib/paths";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+} from "@/components/ui/context-menu";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 
 type Props = {
   activePath: string | null;
   onSelect: (path: string) => void;
   refreshKey?: number;
+  onCreateChild?: (folder: string) => void;
+  onDeleted?: () => void;
+  onDuplicated?: (newPath: string) => void;
+  onMoved?: (newPath: string) => void;
 };
 
-// Lightweight custom tree: react-complex-tree brings styling + keyboard handling
-// we don't need at this scale, and writing ~100 lines keeps the bundle tiny.
-export function KiwiTree({ activePath, onSelect, refreshKey }: Props) {
+export function KiwiTree({ activePath, onSelect, refreshKey, onCreateChild, onDeleted, onDuplicated, onMoved }: Props) {
   const [root, setRoot] = useState<TreeEntry | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set([""]));
+  const [dropTarget, setDropTarget] = useState<string | null>(null);
+  const dragPath = useRef<string | null>(null);
+  const [dupOpen, setDupOpen] = useState(false);
+  const [dupSource, setDupSource] = useState("");
+  const [dupTarget, setDupTarget] = useState("");
+  const [dupBusy, setDupBusy] = useState(false);
+
+  function openDupDialog(srcPath: string) {
+    setDupSource(srcPath);
+    setDupTarget(srcPath.replace(/\.md$/i, "-copy.md"));
+    setDupOpen(true);
+  }
+
+  function handleDuplicate() {
+    let target = dupTarget.trim();
+    if (!target) return;
+    if (!target.endsWith(".md")) target += ".md";
+    setDupBusy(true);
+    api.readFile(dupSource).then(({ content }) =>
+      api.writeFile(target, content).then(() => {
+        setDupOpen(false);
+        onDuplicated?.(target);
+      })
+    ).catch(() => {}).finally(() => setDupBusy(false));
+  }
 
   useEffect(() => {
     api
@@ -60,7 +109,30 @@ export function KiwiTree({ activePath, onSelect, refreshKey }: Props) {
   };
 
   return (
-    <div className="p-2 text-sm">
+    <div
+      className="p-2 text-sm"
+      onDragOver={(e) => {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "move";
+      }}
+      onDrop={(e) => {
+        e.preventDefault();
+        setDropTarget(null);
+        const src = dragPath.current;
+        if (!src || !src.includes("/")) return;
+        const fileName = src.split("/").pop()!;
+        const rootChildren = root?.children || [];
+        if (rootChildren.some((c) => c.name === fileName)) {
+          alert(`A file named "${fileName}" already exists at root.`);
+          return;
+        }
+        api.readFile(src).then(({ content }) =>
+          api.writeFile(fileName, content).then(() =>
+            api.deleteFile(src).then(() => onMoved?.(fileName))
+          )
+        ).catch(() => {});
+      }}
+    >
       {(root.children || []).map((child) => (
         <Node
           key={child.path}
@@ -70,8 +142,41 @@ export function KiwiTree({ activePath, onSelect, refreshKey }: Props) {
           expanded={expanded}
           onToggle={toggle}
           onSelect={onSelect}
+          onCreateChild={onCreateChild}
+          onDeleted={onDeleted}
+          openDupDialog={openDupDialog}
+          onMoved={onMoved}
+          dragPath={dragPath}
+          dropTarget={dropTarget}
+          setDropTarget={setDropTarget}
         />
       ))}
+
+      <Dialog open={dupOpen} onOpenChange={setDupOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Duplicate page</DialogTitle>
+            <DialogDescription>Enter the path for the new copy.</DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-2">
+            <Label htmlFor="tree-dup-path">New path</Label>
+            <Input
+              id="tree-dup-path"
+              autoFocus
+              value={dupTarget}
+              onChange={(e) => setDupTarget(e.target.value)}
+              className="font-mono"
+              onKeyDown={(e) => { if (e.key === "Enter") handleDuplicate(); }}
+            />
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDupOpen(false)}>Cancel</Button>
+            <Button onClick={handleDuplicate} disabled={dupBusy || !dupTarget.trim()}>
+              {dupBusy ? "Duplicating..." : "Duplicate"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
@@ -83,6 +188,13 @@ function Node({
   expanded,
   onToggle,
   onSelect,
+  onCreateChild,
+  onDeleted,
+  openDupDialog,
+  onMoved,
+  dragPath,
+  dropTarget,
+  setDropTarget,
 }: {
   entry: TreeEntry;
   depth: number;
@@ -90,6 +202,13 @@ function Node({
   expanded: Set<string>;
   onToggle: (p: string) => void;
   onSelect: (p: string) => void;
+  onCreateChild?: (folder: string) => void;
+  onDeleted?: () => void;
+  openDupDialog?: (srcPath: string) => void;
+  onMoved?: (newPath: string) => void;
+  dragPath: React.MutableRefObject<string | null>;
+  dropTarget: string | null;
+  setDropTarget: (path: string | null) => void;
 }) {
   const path = stripTrailingSlash(entry.path);
   const isOpen = expanded.has(path);
@@ -98,28 +217,129 @@ function Node({
   if (entry.isDir) {
     return (
       <div>
-        <button
-          type="button"
-          onClick={() => onToggle(path)}
-          className={cn(
-            "group w-full flex items-center gap-1.5 px-2 py-1 rounded-md text-left transition-colors",
-            "text-foreground/90 hover:bg-accent hover:text-accent-foreground",
-          )}
-          style={{ paddingLeft: 8 + depth * 12 }}
-        >
-          <ChevronRight
-            className={cn(
-              "h-3.5 w-3.5 text-muted-foreground shrink-0 transition-transform",
-              isOpen && "rotate-90",
-            )}
-          />
-          {isOpen ? (
-            <FolderOpen className="h-4 w-4 text-primary shrink-0" />
-          ) : (
-            <Folder className="h-4 w-4 text-muted-foreground shrink-0" />
-          )}
-          <span className="truncate">{entry.name}</span>
-        </button>
+        <ContextMenu>
+          <ContextMenuTrigger asChild>
+            <div
+              className={cn(
+                "group flex items-center gap-1.5 px-2 py-1 rounded-md transition-colors",
+                "text-foreground/90 hover:bg-accent hover:text-accent-foreground",
+                dropTarget === path && "ring-2 ring-primary bg-primary/10",
+              )}
+              style={{ paddingLeft: 8 + depth * 12 }}
+              onDragOver={(e) => {
+                e.preventDefault();
+                e.dataTransfer.dropEffect = "move";
+                setDropTarget(path);
+              }}
+              onDragLeave={() => {
+                if (dropTarget === path) setDropTarget(null);
+              }}
+              onDrop={(e) => {
+                e.preventDefault();
+                setDropTarget(null);
+                const src = dragPath.current;
+                if (!src || src === path) return;
+                const fileName = src.split("/").pop()!;
+                const dest = `${path}/${fileName}`;
+                if (src === dest) return;
+                api.readFile(src).then(({ content }) =>
+                  api.writeFile(dest, content).then(() =>
+                    api.deleteFile(src).then(() => onMoved?.(dest))
+                  )
+                ).catch(() => {});
+              }}
+            >
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onToggle(path);
+                }}
+                className="shrink-0 p-0.5"
+              >
+                <ChevronRight
+                  className={cn(
+                    "h-3.5 w-3.5 text-muted-foreground transition-transform",
+                    isOpen && "rotate-90",
+                  )}
+                />
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (!isOpen) onToggle(path);
+                  onSelect(path);
+                }}
+                className="flex items-center gap-1.5 flex-1 min-w-0 text-left"
+              >
+                {isOpen ? (
+                  <FolderOpen className="h-4 w-4 text-primary shrink-0" />
+                ) : (
+                  <Folder className="h-4 w-4 text-muted-foreground shrink-0" />
+                )}
+                <span className="truncate">{entry.name}</span>
+              </button>
+              {onCreateChild && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onCreateChild(path);
+                  }}
+                  className="opacity-0 group-hover:opacity-100 h-5 w-5 shrink-0 grid place-items-center rounded hover:bg-background/50 text-muted-foreground hover:text-foreground transition-opacity"
+                  title={`New page in ${entry.name}`}
+                >
+                  <Plus className="h-3 w-3" />
+                </button>
+              )}
+            </div>
+          </ContextMenuTrigger>
+          <ContextMenuContent>
+            <ContextMenuItem onClick={() => onCreateChild?.(path)}>
+              <Plus className="h-3.5 w-3.5" />
+              New page in {entry.name}
+            </ContextMenuItem>
+            <ContextMenuItem onClick={() => onSelect(path)}>
+              <File className="h-3.5 w-3.5" />
+              Open folder
+            </ContextMenuItem>
+            <ContextMenuSeparator />
+            <ContextMenuItem
+              onClick={() => {
+                const newName = prompt("Rename folder to:", entry.name);
+                if (!newName || newName === entry.name) return;
+                const parentDir = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
+                const newFolder = parentDir ? `${parentDir}/${newName}` : newName;
+                moveFolder(path, newFolder, entry).then(() => onMoved?.(newFolder)).catch(() => {});
+              }}
+            >
+              <Move className="h-3.5 w-3.5" />
+              Rename
+            </ContextMenuItem>
+            <ContextMenuItem
+              onClick={() => {
+                const newPath = prompt("Move folder to:", path);
+                if (!newPath || newPath === path) return;
+                moveFolder(path, newPath.replace(/\/+$/, ""), entry).then(() => onMoved?.(newPath)).catch(() => {});
+              }}
+            >
+              <Move className="h-3.5 w-3.5" />
+              Move
+            </ContextMenuItem>
+            <ContextMenuSeparator />
+            <ContextMenuItem
+              className="text-destructive focus:text-destructive"
+              onClick={() => {
+                const files = collectFiles(entry);
+                if (!confirm(`Delete folder "${entry.name}" and its ${files.length} file(s)?`)) return;
+                Promise.all(files.map((f) => api.deleteFile(f))).then(() => onDeleted?.()).catch(() => {});
+              }}
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+              Delete folder
+            </ContextMenuItem>
+          </ContextMenuContent>
+        </ContextMenu>
         {isOpen && entry.children && (
           <div>
             {entry.children.map((c) => (
@@ -131,6 +351,13 @@ function Node({
                 expanded={expanded}
                 onToggle={onToggle}
                 onSelect={onSelect}
+                onCreateChild={onCreateChild}
+                onDeleted={onDeleted}
+                openDupDialog={openDupDialog}
+                onMoved={onMoved}
+                dragPath={dragPath}
+                dropTarget={dropTarget}
+                setDropTarget={setDropTarget}
               />
             ))}
           </div>
@@ -139,10 +366,6 @@ function Node({
     );
   }
 
-  // Non-markdown entries are assets (images, PDFs, etc.) — they open as raw
-  // downloads/previews rather than Kiwi pages. A plain `<a>` lets the browser
-  // decide (inline for images, attachment for unknown MIMEs) and avoids
-  // wiring a second navigation path through the React tree.
   if (!isMarkdown(path)) {
     return (
       <a
@@ -162,20 +385,96 @@ function Node({
   }
 
   return (
-    <button
-      type="button"
-      onClick={() => onSelect(path)}
-      className={cn(
-        "w-full flex items-center gap-1.5 px-2 py-1 rounded-md text-left transition-colors",
-        "hover:bg-accent hover:text-accent-foreground",
-        isActive && "bg-accent text-accent-foreground font-medium",
-      )}
-      style={{ paddingLeft: 8 + depth * 12 + 14 }}
-    >
-      <FileText className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
-      <span className="truncate">{entry.name}</span>
-    </button>
+    <ContextMenu>
+      <ContextMenuTrigger asChild>
+        <button
+          type="button"
+          onClick={() => onSelect(path)}
+          draggable
+          onDragStart={(e) => {
+            dragPath.current = path;
+            e.dataTransfer.effectAllowed = "move";
+            e.dataTransfer.setData("text/plain", path);
+          }}
+          onDragEnd={() => {
+            dragPath.current = null;
+            setDropTarget(null);
+          }}
+          className={cn(
+            "w-full flex items-center gap-1.5 px-2 py-1 rounded-md text-left transition-colors",
+            "hover:bg-accent hover:text-accent-foreground",
+            isActive && "bg-accent text-accent-foreground font-medium",
+          )}
+          style={{ paddingLeft: 8 + depth * 12 + 14 }}
+        >
+          <File className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+          <span className="truncate">{stem(entry.name)}</span>
+        </button>
+      </ContextMenuTrigger>
+      <ContextMenuContent>
+        <ContextMenuItem onClick={() => onSelect(path)}>
+          <File className="h-3.5 w-3.5" />
+          Open
+        </ContextMenuItem>
+        <ContextMenuSeparator />
+        <ContextMenuItem onClick={() => openDupDialog?.(path)}>
+          <Copy className="h-3.5 w-3.5" />
+          Duplicate
+        </ContextMenuItem>
+        <ContextMenuItem
+          onClick={() => {
+            const newPath = prompt("Move to path:", path);
+            if (newPath && newPath !== path) {
+              const finalPath = newPath.endsWith(".md") ? newPath : newPath + ".md";
+              api.readFile(path).then(({ content }) =>
+                api.writeFile(finalPath, content).then(() =>
+                  api.deleteFile(path).then(() => onMoved?.(finalPath))
+                )
+              ).catch(() => {});
+            }
+          }}
+        >
+          <Move className="h-3.5 w-3.5" />
+          Move / Rename
+        </ContextMenuItem>
+        <ContextMenuSeparator />
+        <ContextMenuItem
+          className="text-destructive focus:text-destructive"
+          onClick={() => {
+            if (confirm(`Delete "${stem(entry.name)}"?`)) {
+              api
+                .deleteFile(path)
+                .then(() => onDeleted?.())
+                .catch(() => {});
+            }
+          }}
+        >
+          <Trash2 className="h-3.5 w-3.5" />
+          Delete
+        </ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
   );
+}
+
+function collectFiles(entry: TreeEntry): string[] {
+  const out: string[] = [];
+  for (const c of entry.children || []) {
+    if (c.isDir) out.push(...collectFiles(c));
+    else out.push(c.path);
+  }
+  return out;
+}
+
+async function moveFolder(oldPath: string, newPath: string, entry: TreeEntry): Promise<void> {
+  const files = collectFiles(entry);
+  for (const f of files) {
+    const rel = f.slice(oldPath.length);
+    const target = newPath + rel;
+    const { content } = await api.readFile(f);
+    await api.writeFile(target, content);
+    await api.deleteFile(f);
+  }
 }
 
 function AssetIcon({ name }: { name: string }) {
@@ -191,5 +490,5 @@ function AssetIcon({ name }: { name: string }) {
     return <FileArchive className={cls} />;
   if (["js", "ts", "tsx", "jsx", "py", "go", "rs", "json", "yaml", "yml", "toml"].includes(ext))
     return <FileCode className={cls} />;
-  return <File className={cls} />;
+  return <FileAxis3D className={cls} />;
 }

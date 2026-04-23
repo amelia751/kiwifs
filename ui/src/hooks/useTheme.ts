@@ -4,14 +4,20 @@ import {
   removeKiwiTheme,
   type KiwiThemeOverrides,
 } from "../lib/kiwiTheme";
-import { api } from "../lib/api";
+import { api, getCurrentSpace, onSpaceChange } from "../lib/api";
 import { presets, presetToOverrides, findPreset } from "../themes";
 
 export type Theme = "light" | "dark";
 
 const LS_THEME = "kiwifs-theme";
-const LS_PRESET = "kiwifs-preset";
-const LS_CUSTOM_THEME = "kiwifs-custom-theme";
+
+function spaceKey(base: string): string {
+  const space = getCurrentSpace();
+  return space && space !== "default" ? `${base}:${space}` : base;
+}
+
+function lsPreset(): string { return spaceKey("kiwifs-preset"); }
+function lsCustomTheme(): string { return spaceKey("kiwifs-custom-theme"); }
 
 function readLS(key: string, fallback: string): string {
   try {
@@ -31,7 +37,7 @@ function writeLS(key: string, val: string) {
 
 export function getCustomTheme(): KiwiThemeOverrides | null {
   try {
-    const raw = localStorage.getItem(LS_CUSTOM_THEME);
+    const raw = localStorage.getItem(lsCustomTheme());
     if (!raw) return null;
     return JSON.parse(raw);
   } catch {
@@ -41,10 +47,10 @@ export function getCustomTheme(): KiwiThemeOverrides | null {
 
 export function setCustomTheme(t: KiwiThemeOverrides | null) {
   if (t) {
-    writeLS(LS_CUSTOM_THEME, JSON.stringify(t));
+    writeLS(lsCustomTheme(), JSON.stringify(t));
   } else {
     try {
-      localStorage.removeItem(LS_CUSTOM_THEME);
+      localStorage.removeItem(lsCustomTheme());
     } catch {
       /* ignore */
     }
@@ -63,7 +69,7 @@ export function useTheme(): {
     return document.documentElement.classList.contains("dark") ? "dark" : "light";
   });
 
-  const [preset, setPresetState] = useState(() => readLS(LS_PRESET, "Kiwi"));
+  const [preset, setPresetState] = useState(() => readLS(lsPreset(), "Kiwi"));
 
   useEffect(() => {
     const root = document.documentElement;
@@ -82,7 +88,7 @@ export function useTheme(): {
       return;
     }
 
-    const saved = readLS(LS_PRESET, "");
+    const saved = readLS(lsPreset(), "");
     if (saved) return;
 
     api.getTheme().then((data) => {
@@ -115,6 +121,40 @@ export function useTheme(): {
     }
   }, [preset]);
 
+  useEffect(() => {
+    return onSpaceChange(() => {
+      const custom = getCustomTheme();
+      if (custom) {
+        applyKiwiTheme(custom);
+        return;
+      }
+      const saved = readLS(lsPreset(), "");
+      if (saved) {
+        setPresetState(saved);
+        const found = findPreset(saved);
+        if (found) applyKiwiTheme(presetToOverrides(found));
+        else removeKiwiTheme();
+        return;
+      }
+      api.getTheme().then((data) => {
+        const name = data?.preset as string | undefined;
+        if (name) {
+          const found = findPreset(name);
+          if (found) {
+            setPresetState(name);
+            applyKiwiTheme(presetToOverrides(found));
+            return;
+          }
+        }
+        if (data?.light || data?.dark) {
+          applyKiwiTheme(data as KiwiThemeOverrides);
+        } else {
+          removeKiwiTheme();
+        }
+      }).catch(() => {});
+    });
+  }, []);
+
   const toggleTheme = useCallback(
     () => setTheme((t) => (t === "dark" ? "light" : "dark")),
     [],
@@ -123,7 +163,7 @@ export function useTheme(): {
   const setPreset = useCallback((name: string) => {
     setCustomTheme(null);
     setPresetState(name);
-    writeLS(LS_PRESET, name);
+    writeLS(lsPreset(), name);
   }, []);
 
   return { theme, toggleTheme, preset, setPreset, presets };

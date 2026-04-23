@@ -609,6 +609,40 @@ func (s *SQLite) Backlinks(ctx context.Context, target string) ([]links.Entry, e
 	return out, rows.Err()
 }
 
+// FilterByDate returns the subset of paths whose file_meta.updated_at is after
+// the given cutoff. Single query against the indexed table — no stat calls.
+func (s *SQLite) FilterByDate(ctx context.Context, paths []string, after time.Time) ([]string, error) {
+	if len(paths) == 0 {
+		return nil, nil
+	}
+	cutoff := after.UTC().Format(time.RFC3339)
+	placeholders := make([]string, len(paths))
+	args := make([]any, len(paths)+1)
+	for i, p := range paths {
+		placeholders[i] = "?"
+		args[i] = p
+	}
+	args[len(paths)] = cutoff
+	q := fmt.Sprintf(
+		`SELECT path FROM file_meta WHERE path IN (%s) AND updated_at > ?`,
+		strings.Join(placeholders, ","),
+	)
+	rows, err := s.readDB.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
 // ─── Internals ──────────────────────────────────────────────────────────────
 
 // reindexBatchSize caps the number of files per reindex transaction. A

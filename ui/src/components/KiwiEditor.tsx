@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BlockNoteEditor, filterSuggestionItems } from "@blocknote/core";
 import {
+  FormattingToolbarController,
   getDefaultReactSlashMenuItems,
   SuggestionMenuController,
   useCreateBlockNote,
@@ -8,11 +9,56 @@ import {
 import { BlockNoteView } from "@blocknote/mantine";
 import "@blocknote/core/fonts/inter.css";
 import "@blocknote/mantine/style.css";
-import { Check, Circle, Info, Link as LinkIcon, ListTree, Loader2, Save, TriangleAlert, User, X, XCircle } from "lucide-react";
-import { api } from "@/lib/api";
+import { Check, ChevronDown, ChevronRight, Circle, Info, Link as LinkIcon, ListTree, Loader2, Save, TriangleAlert, User, X, XCircle } from "lucide-react";
+import { Plugin, PluginKey } from "prosemirror-state";
+import { Decoration, DecorationSet } from "prosemirror-view";
+import matter from "gray-matter";
+import { api, type TreeEntry } from "@/lib/api";
 import { Button } from "@/components/ui/button";
-import { dirOf } from "@/lib/paths";
+import { Textarea } from "@/components/ui/textarea";
+import { dirOf, stem, titleize } from "@/lib/paths";
+import { KiwiBreadcrumb } from "./KiwiBreadcrumb";
 import { formatDistanceToNow } from "date-fns";
+
+const wikiLinkPluginKey = new PluginKey("kiwi-wiki-links");
+
+function wikiLinkDecoPlugin() {
+  return new Plugin({
+    key: wikiLinkPluginKey,
+    state: {
+      init(_, state) {
+        return buildWikiDecos(state.doc);
+      },
+      apply(tr, old) {
+        if (!tr.docChanged) return old;
+        return buildWikiDecos(tr.doc);
+      },
+    },
+    props: {
+      decorations(state) {
+        return wikiLinkPluginKey.getState(state);
+      },
+    },
+  });
+}
+
+function buildWikiDecos(doc: any): DecorationSet {
+  const decos: Decoration[] = [];
+  const re = /\[\[([^\]]+)\]\]/g;
+  doc.descendants((node: any, pos: number) => {
+    if (!node.isText) return;
+    const text = node.text || "";
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) {
+      const from = pos + m.index;
+      const to = from + m[0].length;
+      decos.push(
+        Decoration.inline(from, to, { class: "kiwi-editor-wikilink" })
+      );
+    }
+  });
+  return DecorationSet.create(doc, decos);
+}
 
 type SaveStatus = "clean" | "dirty" | "saving" | "saved" | "error";
 
@@ -20,14 +66,14 @@ type SaveHandle = { save: () => Promise<void> };
 
 type Props = {
   path: string;
+  tree?: import("@/lib/api").TreeEntry | null;
   onClose: () => void;
   onSaved: (path: string) => void;
-  // Exposes the save action upward so a global Cmd+S can fire it without
-  // requiring focus inside the editor. Cleared on unmount.
+  onNavigate?: (path: string) => void;
   saveRef?: React.MutableRefObject<SaveHandle | null>;
 };
 
-export function KiwiEditor({ path, onClose, onSaved, saveRef }: Props) {
+export function KiwiEditor({ path, tree, onClose, onSaved, onNavigate, saveRef }: Props) {
   const [initialMd, setInitialMd] = useState<string | null>(null);
   const etagRef = useRef<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -79,6 +125,7 @@ export function KiwiEditor({ path, onClose, onSaved, saveRef }: Props) {
   return (
     <EditorInner
       path={path}
+      tree={tree}
       initialMd={initialMd}
       etagRef={etagRef}
       isDark={isDark}
@@ -87,6 +134,7 @@ export function KiwiEditor({ path, onClose, onSaved, saveRef }: Props) {
       setError={setError}
       onClose={onClose}
       onSaved={onSaved}
+      onNavigate={onNavigate}
       saveRef={saveRef}
     />
   );
@@ -94,6 +142,7 @@ export function KiwiEditor({ path, onClose, onSaved, saveRef }: Props) {
 
 function EditorInner({
   path,
+  tree,
   initialMd,
   etagRef,
   isDark,
@@ -102,9 +151,11 @@ function EditorInner({
   setError,
   onClose,
   onSaved,
+  onNavigate,
   saveRef,
 }: {
   path: string;
+  tree?: import("@/lib/api").TreeEntry | null;
   initialMd: string;
   etagRef: React.MutableRefObject<string | null>;
   isDark: boolean;
@@ -113,12 +164,34 @@ function EditorInner({
   setError: (v: string | null) => void;
   onClose: () => void;
   onSaved: (p: string) => void;
+  onNavigate?: (path: string) => void;
   saveRef?: React.MutableRefObject<SaveHandle | null>;
 }) {
   const [ready, setReady] = useState(false);
   const [saveStatus, setSaveStatus] = useState<SaveStatus>("clean");
   const autoSaveTimer = useRef<number | null>(null);
   const savedFlashTimer = useRef<number | null>(null);
+  const [fmOpen, setFmOpen] = useState(false);
+  const [fmText, setFmText] = useState<string>(() => {
+    try {
+      const parsed = matter(initialMd);
+      const raw = parsed.matter?.trim();
+      return raw || "";
+    } catch { return ""; }
+  });
+  const bodyOnly = useMemo(() => {
+    try {
+      const parsed = matter(initialMd);
+      let body = parsed.content;
+      if (typeof parsed.data?.title === "string") {
+        const h1Match = body.match(/^\s*#\s+(.+)\n?/);
+        if (h1Match && h1Match[1].trim() === parsed.data.title.trim()) {
+          body = body.replace(/^\s*#\s+.+\n?/, "");
+        }
+      }
+      return body;
+    } catch { return initialMd; }
+  }, [initialMd]);
   const [lastEdit, setLastEdit] = useState<{ author: string; date: string } | null>(null);
 
   useEffect(() => {
@@ -139,14 +212,34 @@ function EditorInner({
     [path],
   );
 
-  const editorOptions = useMemo(() => ({ uploadFile }), [uploadFile]);
+  const editorOptions = useMemo(
+    () => ({
+      uploadFile,
+      _tiptapOptions: {
+        extensions: [] as any[],
+      },
+    }),
+    [uploadFile],
+  );
   const editor = useCreateBlockNote(editorOptions);
+
+  useEffect(() => {
+    if (!editor) return;
+    const pm = (editor as any)._tiptapEditor?.view;
+    if (!pm) return;
+    const state = pm.state;
+    if (state.plugins.some((p: any) => p.key === (wikiLinkPluginKey as any).key)) return;
+    const newState = state.reconfigure({
+      plugins: [...state.plugins, wikiLinkDecoPlugin()],
+    });
+    pm.updateState(newState);
+  }, [editor]);
 
   useEffect(() => {
     if (!editor) return;
     let cancelled = false;
     (async () => {
-      const blocks = await editor.tryParseMarkdownToBlocks(initialMd);
+      const blocks = await editor.tryParseMarkdownToBlocks(bodyOnly);
       if (cancelled) return;
       if (blocks && blocks.length > 0) {
         editor.replaceBlocks(editor.document, blocks);
@@ -165,7 +258,10 @@ function EditorInner({
     setSaveStatus("saving");
     setError(null);
     try {
-      const md = await editor.blocksToMarkdownLossy(editor.document);
+      let md = await editor.blocksToMarkdownLossy(editor.document);
+      if (fmText.trim()) {
+        md = "---\n" + fmText.trim() + "\n---\n\n" + md;
+      }
       const res = await api.writeFile(path, md, etagRef.current || undefined);
       etagRef.current = res.etag ? `"${res.etag}"` : null;
       setSaveStatus("saved");
@@ -203,61 +299,158 @@ function EditorInner({
     return () => { saveRef.current = null; };
   }, [saveRef]);
 
+  const fmTitle = useMemo(() => {
+    try {
+      const parsed = matter(initialMd);
+      if (typeof parsed.data?.title === "string") return parsed.data.title;
+    } catch {}
+    return null;
+  }, [initialMd]);
+
   return (
     <div className="flex flex-col h-full">
-      <div className="flex items-center justify-between px-8 py-3 border-b border-border">
-        <div className="flex items-center gap-2 min-w-0">
-          <div className="text-sm text-muted-foreground font-mono truncate">
-            {path}
+      {/* ── Sticky breadcrumb — matches KiwiPage structure ── */}
+      <div className="sticky top-0 z-10 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/80 border-b border-border shrink-0">
+        <div className="px-8 py-2 max-w-6xl mx-auto">
+          {onNavigate
+            ? <KiwiBreadcrumb path={path} onNavigate={onNavigate} />
+            : <div className="text-sm text-muted-foreground font-mono truncate">{path}</div>}
+        </div>
+      </div>
+
+      {/* ── Scrollable content ── */}
+      <div className="flex-1 overflow-auto kiwi-scroll">
+        <div className="max-w-6xl mx-auto px-8 py-6">
+          {/* ── Page header zone — matches KiwiPage structure ── */}
+          <div className="mb-6">
+            <div className="flex items-start justify-between gap-4">
+              <div className="min-w-0">
+                <h1 className="text-2xl font-bold tracking-tight text-foreground leading-tight">
+                  {fmTitle || titleize(path)}
+                </h1>
+                <div className="flex items-center gap-2 mt-2">
+                  <SaveIndicator status={saveStatus} />
+                </div>
+              </div>
+              <div className="flex items-center gap-2 shrink-0 pt-1">
+                <Button
+                  onClick={() => onSaveRef.current({ close: true })}
+                  disabled={saving || !ready || saveStatus === "clean"}
+                  size="sm"
+                  variant={saveStatus === "dirty" ? "default" : "outline"}
+                >
+                  <Save className="h-3.5 w-3.5" />
+                  {saving ? "Saving…" : "Save & Close"}
+                </Button>
+                <Button variant="outline" size="sm" onClick={onClose}>
+                  <X className="h-3.5 w-3.5" /> Close
+                </Button>
+              </div>
+            </div>
+
+            {/* ── Metadata bar ── */}
+            {lastEdit && (
+              <div className="flex items-center gap-3 mt-3 text-xs text-muted-foreground">
+                <span className="flex items-center gap-1">
+                  <User className="h-3 w-3" />
+                  Last edited by {lastEdit.author} {relativeTime(lastEdit.date)}
+                </span>
+              </div>
+            )}
           </div>
-          <SaveIndicator status={saveStatus} />
-        </div>
-        <div className="flex items-center gap-2">
-          <Button
-            onClick={() => onSaveRef.current({ close: true })}
-            disabled={saving || !ready || saveStatus === "clean"}
-            size="sm"
-            variant={saveStatus === "dirty" ? "default" : "outline"}
-          >
-            <Save className="h-3.5 w-3.5" />
-            {saving ? "Saving…" : "Save"}
-          </Button>
-          <Button variant="outline" size="sm" onClick={onClose}>
-            <X className="h-3.5 w-3.5" /> Close
-          </Button>
-        </div>
-      </div>
-      <div className="flex-1 overflow-auto kiwi-scroll py-6 px-4">
-        <div className="max-w-3xl mx-auto kiwi-blocknote min-h-[50vh]">
-          {editor && (
-            <BlockNoteView
-              editor={editor as BlockNoteEditor}
-              theme={isDark ? "dark" : "light"}
-              slashMenu={false}
-              onChange={markDirty}
+
+          {/* ── Frontmatter section ── */}
+          <div className="max-w-3xl mb-4">
+            <button
+              type="button"
+              onClick={() => setFmOpen((v) => !v)}
+              className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
             >
-              <SuggestionMenuController
-                triggerCharacter="/"
-                getItems={async (query) =>
-                  filterSuggestionItems(
-                    [
-                      ...getDefaultReactSlashMenuItems(editor as BlockNoteEditor),
-                      ...kiwiSlashItems(editor as BlockNoteEditor),
-                    ],
-                    query
-                  )
-                }
+              {fmOpen ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+              Frontmatter
+              {fmText.trim() && <span className="ml-1 text-[10px] opacity-60">(has data)</span>}
+            </button>
+            {fmOpen && (
+              <Textarea
+                value={fmText}
+                onChange={(e) => { setFmText(e.target.value); markDirty(); }}
+                placeholder={"title: My Page\ntags:\n  - draft"}
+                className="mt-2 font-mono text-xs min-h-[80px] resize-y"
+                rows={Math.max(3, fmText.split("\n").length)}
               />
-            </BlockNoteView>
-          )}
+            )}
+          </div>
+
+          {/* ── Editor content zone ── */}
+          <div className="max-w-3xl kiwi-blocknote min-h-[50vh]">
+            {editor && (
+              <BlockNoteView
+                editor={editor as BlockNoteEditor}
+                theme={isDark ? "dark" : "light"}
+                slashMenu={false}
+                formattingToolbar={false}
+                onChange={markDirty}
+              >
+                <FormattingToolbarController />
+                <SuggestionMenuController
+                  triggerCharacter="/"
+                  getItems={async (query) =>
+                    filterSuggestionItems(
+                      [
+                        ...getDefaultReactSlashMenuItems(editor as BlockNoteEditor),
+                        ...kiwiSlashItems(editor as BlockNoteEditor),
+                      ],
+                      query
+                    )
+                  }
+                />
+                <SuggestionMenuController
+                  triggerCharacter="["
+                  getItems={async (query) => {
+                    const pm = (editor as any)._tiptapEditor;
+                    if (pm?.view) {
+                      const { state } = pm.view;
+                      const pos = state.selection.from;
+                      const checkPos = pos - query.length - 2;
+                      if (checkPos < 0 || state.doc.textBetween(checkPos, checkPos + 1) !== "[") {
+                        return [];
+                      }
+                    }
+                    return filterSuggestionItems(
+                      collectPages(tree).map((p) => {
+                        const pageName = p.replace(/\.md$/i, "");
+                        return {
+                          title: titleize(p),
+                          subtext: p,
+                          aliases: [stem(p), p],
+                          group: "Page link",
+                          icon: <LinkIcon size={18} />,
+                          onItemClick: () => {
+                            queueMicrotask(() => {
+                              const ttp = (editor as any)._tiptapEditor;
+                              if (!ttp?.view) return;
+                              const { state } = ttp.view;
+                              const pos = state.selection.from;
+                              if (pos > 0 && state.doc.textBetween(pos - 1, pos) === "[") {
+                                ttp.view.dispatch(
+                                  state.tr.delete(pos - 1, pos).insertText(`[[${pageName}]]`, pos - 1)
+                                );
+                              } else {
+                                ttp.view.dispatch(state.tr.insertText(`[[${pageName}]]`, pos));
+                              }
+                            });
+                          },
+                        };
+                      }),
+                      query
+                    );
+                  }}
+                />
+              </BlockNoteView>
+            )}
+          </div>
         </div>
       </div>
-      {lastEdit && (
-        <div className="px-8 py-2 border-t border-border text-xs text-muted-foreground flex items-center gap-2">
-          <User className="h-3 w-3" />
-          Last edited by {lastEdit.author} {relativeTime(lastEdit.date)}
-        </div>
-      )}
     </div>
   );
 }
@@ -361,4 +554,17 @@ function kiwiSlashItems(editor: BlockNoteEditor) {
       onItemClick: () => insertParagraph("<!-- toc -->"),
     },
   ];
+}
+
+function collectPages(tree: TreeEntry | null | undefined): string[] {
+  if (!tree) return [];
+  const pages: string[] = [];
+  function walk(node: TreeEntry) {
+    if (!node.isDir && node.path.toLowerCase().endsWith(".md")) {
+      pages.push(node.path);
+    }
+    if (node.children) node.children.forEach(walk);
+  }
+  walk(tree);
+  return pages;
 }

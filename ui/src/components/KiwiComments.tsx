@@ -5,7 +5,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { CheckCircle, Circle, MessageSquare, Plus, Trash2 } from "lucide-react";
+import { CheckCircle, Circle, Plus, Trash2 } from "lucide-react";
 import { api, type Comment, type CommentAnchor } from "@/lib/api";
 import {
   anchorFromSelection,
@@ -19,7 +19,7 @@ import {
   PopoverAnchor,
   PopoverContent,
 } from "@/components/ui/popover";
-import { Separator } from "@/components/ui/separator";
+
 import { Textarea } from "@/components/ui/textarea";
 
 type Props = {
@@ -345,75 +345,59 @@ function CommentsList({
 }) {
   if (comments.length === 0) {
     return (
-      <div className="mt-12">
-        <Separator className="mb-4" />
-        <div className="text-sm text-muted-foreground">
-          <div className="flex items-center gap-2 mb-1">
-            <MessageSquare className="h-4 w-4" />
-            <span className="font-medium text-foreground">Comments</span>
-          </div>
-          <div>Select text to add an inline comment.</div>
-        </div>
+      <div className="text-sm text-muted-foreground">
+        Select text in the page to add an inline comment.
       </div>
     );
   }
   return (
-    <div className="mt-12">
-      <Separator className="mb-4" />
-      <div className="text-sm">
-        <div className="flex items-center gap-2 mb-3">
-          <MessageSquare className="h-4 w-4" />
-          <span className="font-medium">
-            {comments.length} comment{comments.length === 1 ? "" : "s"}
-          </span>
-        </div>
-        <ul className="space-y-3">
-          {comments.map((c) => (
-            <li key={c.id}>
-              <Card className={“p-3” + (c.resolved ? “ opacity-60” : “”)}>
-                <div className=”flex items-start gap-2”>
-                  <button
-                    type=”button”
-                    onClick={() => onFocus(c)}
-                    className=”flex-1 text-left”
-                  >
-                    <div className=”text-xs text-muted-foreground mb-1 flex items-center gap-1.5”>
-                      <span>{c.author} · {formatDate(c.createdAt)}</span>
-                      {c.resolved && (
-                        <span className=”text-green-500 flex items-center gap-0.5”>
-                          <CheckCircle className=”h-3 w-3” /> Resolved
-                        </span>
-                      )}
-                    </div>
-                    <div className=”text-xs italic text-muted-foreground mb-1.5”>
-                      “{truncate(c.anchor.quote, 120)}”
-                    </div>
-                    <div className={“whitespace-pre-wrap” + (c.resolved ? “ line-through” : “”)}>{c.body}</div>
-                  </button>
-                  <Button
-                    variant=”ghost”
-                    size=”icon”
-                    onClick={() => onToggleResolve(c.id)}
-                    title={c.resolved ? “Unresolve” : “Resolve”}
-                    className=”h-7 w-7 text-muted-foreground”
-                  >
-                    {c.resolved ? <Circle className=”h-3.5 w-3.5” /> : <CheckCircle className=”h-3.5 w-3.5” />}
-                  </Button>
-                  <Button
-                    variant=”ghost”
-                    size=”icon”
-                    onClick={() => onDelete(c.id)}
-                    title=”Delete”
-                    className=”h-7 w-7 text-muted-foreground hover:text-destructive”
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </Button>
-                </div>
-              </Card>
-            </li>
-          ))}
-        </ul>
-      </div>
+    <div className="text-sm">
+      <ul className="space-y-3">
+        {comments.map((c) => (
+          <li key={c.id}>
+            <Card className={"p-3" + (c.resolved ? " opacity-60" : "")}>
+              <div className="flex items-start gap-2">
+                <button
+                  type="button"
+                  onClick={() => onFocus(c)}
+                  className="flex-1 text-left"
+                >
+                  <div className="text-xs text-muted-foreground mb-1 flex items-center gap-1.5">
+                    <span>{c.author} · {formatDate(c.createdAt)}</span>
+                    {c.resolved && (
+                      <span className="text-green-500 flex items-center gap-0.5">
+                        <CheckCircle className="h-3 w-3" /> Resolved
+                      </span>
+                    )}
+                  </div>
+                  <div className="text-xs italic text-muted-foreground mb-1.5">
+                    "{truncate(c.anchor.quote, 120)}"
+                  </div>
+                  <div className={"whitespace-pre-wrap" + (c.resolved ? " line-through" : "")}>{c.body}</div>
+                </button>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={() => onToggleResolve(c.id)}
+                  title={c.resolved ? "Unresolve" : "Resolve"}
+                  className="h-7 w-7 text-muted-foreground"
+                >
+                  {c.resolved ? <Circle className="h-3.5 w-3.5" /> : <CheckCircle className="h-3.5 w-3.5" />}
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={() => onDelete(c.id)}
+                  title="Delete"
+                  className="h-7 w-7 text-muted-foreground hover:text-destructive"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+            </Card>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

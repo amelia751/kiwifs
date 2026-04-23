@@ -1,6 +1,9 @@
 package search
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // Match is a single line match within a file.
 type Match struct {
@@ -51,6 +54,13 @@ type Searcher interface {
 	Reindex(ctx context.Context) (int, error)
 	// Close releases any resources (open DB handles, etc.). No-op is fine.
 	Close() error
+}
+
+// DateFilterer is an optional interface that searchers can implement to
+// filter result paths by modification date using indexed data instead of
+// per-file stat calls.
+type DateFilterer interface {
+	FilterByDate(ctx context.Context, paths []string, after time.Time) ([]string, error)
 }
 
 // NormalizeLimit clamps a caller-supplied limit into [1, MaxSearchLimit].

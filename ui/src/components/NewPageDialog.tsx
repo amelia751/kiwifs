@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { FileText, Sparkles } from "lucide-react";
+import { File, Sparkles } from "lucide-react";
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import {
@@ -20,9 +20,10 @@ type Props = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onCreated: (path: string) => void;
+  defaultFolder?: string;
 };
 
-export function NewPageDialog({ open, onOpenChange, onCreated }: Props) {
+export function NewPageDialog({ open, onOpenChange, onCreated, defaultFolder }: Props) {
   const [path, setPath] = useState("");
   const [templates, setTemplates] = useState<Template[]>([]);
   const [selected, setSelected] = useState<string>("");
@@ -35,6 +36,10 @@ export function NewPageDialog({ open, onOpenChange, onCreated }: Props) {
       setSelected("");
       setError(null);
       return;
+    }
+    if (defaultFolder) {
+      const prefix = defaultFolder.endsWith("/") ? defaultFolder : defaultFolder + "/";
+      setPath(prefix);
     }
     api
       .listTemplates()
@@ -155,7 +160,7 @@ function TemplateRow({
         active && "bg-accent text-accent-foreground font-medium",
       )}
     >
-      <FileText className="h-3.5 w-3.5 text-muted-foreground" />
+      <File className="h-3.5 w-3.5 text-muted-foreground" />
       <span>{label}</span>
     </button>
   );
