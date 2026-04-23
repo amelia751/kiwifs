@@ -1,0 +1,52 @@
+{
+  "name": "kiwifs",
+  "version": "0.1.0",
+  "description": "KiwiFS — The Knowledge Filesystem. Agents write with cat. Humans read in the web UI. Same files.",
+  "main": "index.js",
+  "bin": {
+    "kiwifs": "./bin/kiwifs.js"
+  },
+  "scripts": {
+    "postinstall": "node scripts/install-binary.js",
+    "test": "echo \"No tests yet\" && exit 0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kiwifs/kiwifs.git"
+  },
+  "keywords": [
+    "knowledge",
+    "filesystem",
+    "wiki",
+    "markdown",
+    "agent",
+    "ai",
+    "obsidian",
+    "confluence",
+    "git"
+  ],
+  "author": "KiwiFS Contributors",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/kiwifs/kiwifs/issues"
+  },
+  "homepage": "https://github.com/kiwifs/kiwifs#readme",
+  "files": [
+    "bin/",
+    "scripts/",
+    "index.js",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ]
+}

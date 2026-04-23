@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -8,6 +9,11 @@ import (
 )
 
 // Local implements Storage over a local directory.
+//
+// Methods accept context.Context to satisfy the interface but currently
+// don't honour it — Go's stdlib file ops aren't cancellable. That's fine
+// for a local FS where every op completes in microseconds; the parameter
+// is here so a swap to a network-backed Storage doesn't churn callers.
 type Local struct {
 	root string
 }
@@ -25,9 +31,10 @@ func NewLocal(root string) (*Local, error) {
 	return &Local{root: abs}, nil
 }
 
-// hidden returns true for internal dirs that should not be exposed via the API.
+// hidden returns true for internal dirs that should not be exposed via the
+// API. Any leading-dot name is hidden, which already covers .git and .kiwi.
 func hidden(name string) bool {
-	return strings.HasPrefix(name, ".") || name == ".git" || name == ".kiwi"
+	return strings.HasPrefix(name, ".")
 }
 
 func (l *Local) AbsPath(path string) string {
@@ -45,7 +52,7 @@ func (l *Local) guardPath(path string) (string, error) {
 	return abs, nil
 }
 
-func (l *Local) Read(path string) ([]byte, error) {
+func (l *Local) Read(_ context.Context, path string) ([]byte, error) {
 	abs, err := l.guardPath(path)
 	if err != nil {
 		return nil, err
@@ -53,7 +60,7 @@ func (l *Local) Read(path string) ([]byte, error) {
 	return os.ReadFile(abs)
 }
 
-func (l *Local) Write(path string, content []byte) error {
+func (l *Local) Write(_ context.Context, path string, content []byte) error {
 	abs, err := l.guardPath(path)
 	if err != nil {
 		return err
@@ -64,7 +71,7 @@ func (l *Local) Write(path string, content []byte) error {
 	return os.WriteFile(abs, content, 0644)
 }
 
-func (l *Local) Delete(path string) error {
+func (l *Local) Delete(_ context.Context, path string) error {
 	abs, err := l.guardPath(path)
 	if err != nil {
 		return err
@@ -72,7 +79,7 @@ func (l *Local) Delete(path string) error {
 	return os.Remove(abs)
 }
 
-func (l *Local) List(path string) ([]Entry, error) {
+func (l *Local) List(_ context.Context, path string) ([]Entry, error) {
 	abs, err := l.guardPath(path)
 	if err != nil {
 		return nil, err
@@ -114,7 +121,7 @@ func (l *Local) List(path string) ([]Entry, error) {
 	return result, nil
 }
 
-func (l *Local) Stat(path string) (*Entry, error) {
+func (l *Local) Stat(_ context.Context, path string) (*Entry, error) {
 	abs, err := l.guardPath(path)
 	if err != nil {
 		return nil, err
@@ -132,7 +139,7 @@ func (l *Local) Stat(path string) (*Entry, error) {
 	}, nil
 }
 
-func (l *Local) Exists(path string) bool {
+func (l *Local) Exists(_ context.Context, path string) bool {
 	abs, err := l.guardPath(path)
 	if err != nil {
 		return false

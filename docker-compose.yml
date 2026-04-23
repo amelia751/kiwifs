@@ -1,0 +1,52 @@
+services:
+  # KiwiFS server. Point `volumes:` at a local folder to persist knowledge
+  # outside the container. Build from the repo Dockerfile so the embedded
+  # UI is always in sync with the backend.
+  kiwifs:
+    build:
+      context: .
+    image: kiwifs
+    ports:
+      - "3333:3333"  # REST API + embedded UI
+      # Uncomment to expose the extra protocols:
+      # - "2049:2049"  # NFS   (requires --nfs)
+      # - "3334:3334"  # S3    (requires --s3)
+      # - "3335:3335"  # WebDAV (requires --webdav)
+    volumes:
+      - ./knowledge:/data
+    environment:
+      # Pgvector-backed semantic search (see [search.vector] in config.toml).
+      # Leave these unset to run without semantic search.
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      KIWI_PGVECTOR_DSN: postgresql://kiwi:kiwi@db:5432/kiwi
+    command:
+      - serve
+      - --root=/data
+      - --port=3333
+      - --host=0.0.0.0
+      - --search=sqlite
+      - --versioning=git
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Optional pgvector sidecar. Only used when [search.vector] is enabled in
+  # .kiwi/config.toml with provider = "pgvector".
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: kiwi
+      POSTGRES_PASSWORD: kiwi
+      POSTGRES_DB: kiwi
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kiwi -d kiwi"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  pgdata:

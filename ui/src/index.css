@@ -1,0 +1,153 @@
+@import "./styles/kiwi-theme.css";
+@import "katex/dist/katex.min.css";
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-feature-settings: "cv11", "ss01";
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+}
+
+/* ─── Prose (markdown body) ─── */
+.kiwi-prose {
+  @apply text-foreground leading-7;
+}
+.kiwi-prose h1 {
+  @apply text-3xl font-bold tracking-tight mt-8 mb-4 scroll-mt-20;
+}
+.kiwi-prose h2 {
+  @apply text-2xl font-semibold tracking-tight mt-8 mb-3 pb-1 border-b border-border scroll-mt-20;
+}
+.kiwi-prose h3 {
+  @apply text-xl font-semibold tracking-tight mt-6 mb-2 scroll-mt-20;
+}
+.kiwi-prose h4 {
+  @apply text-lg font-semibold mt-5 mb-2 scroll-mt-20;
+}
+.kiwi-prose p {
+  @apply my-3 text-foreground/90;
+}
+.kiwi-prose a {
+  @apply text-foreground font-medium underline underline-offset-4 decoration-primary/60;
+  transition: opacity 0.15s ease;
+}
+.kiwi-prose a:hover {
+  @apply decoration-primary;
+  opacity: var(--link-hover-opacity);
+}
+.kiwi-prose ul {
+  @apply list-disc pl-6 my-3 space-y-1;
+}
+.kiwi-prose ol {
+  @apply list-decimal pl-6 my-3 space-y-1;
+}
+.kiwi-prose blockquote {
+  @apply border-l-4 border-primary/40 pl-4 my-4 text-muted-foreground italic;
+}
+.kiwi-prose code {
+  @apply bg-muted text-foreground rounded-md px-1.5 py-0.5 text-[0.875em] font-mono;
+}
+.kiwi-prose pre {
+  @apply bg-muted rounded-lg p-4 my-4 overflow-x-auto;
+}
+.kiwi-prose pre code {
+  @apply bg-transparent p-0 text-sm;
+}
+.kiwi-prose table {
+  @apply w-full my-4 text-sm border-collapse;
+}
+.kiwi-prose th,
+.kiwi-prose td {
+  @apply border border-border px-3 py-2 text-left align-top;
+}
+.kiwi-prose th {
+  @apply bg-muted font-semibold;
+}
+.kiwi-prose hr {
+  @apply my-8 border-border;
+}
+.kiwi-prose img {
+  @apply rounded-lg max-w-full;
+}
+.kiwi-prose .kiwi-zoom {
+  @apply inline-block;
+}
+.kiwi-prose .kiwi-zoom img {
+  @apply cursor-zoom-in;
+}
+.kiwi-prose .wiki-link {
+  @apply text-foreground font-medium no-underline border-b-2 border-primary/50 hover:border-primary transition-colors;
+}
+.kiwi-prose .wiki-link-missing {
+  @apply text-muted-foreground border-b border-dotted border-muted-foreground/50 hover:text-foreground cursor-pointer transition-colors;
+}
+.kiwi-prose .kiwi-frontmatter {
+  @apply flex flex-wrap gap-1.5 mb-4;
+}
+.kiwi-prose .kiwi-callout {
+  @apply border-l-4 border-l-primary/40 border-y-transparent border-r-transparent rounded-r-lg bg-muted/60 px-4 py-3 my-4;
+}
+.kiwi-prose .kiwi-callout-info {
+  @apply border-l-primary/50;
+}
+.kiwi-prose .kiwi-callout-warn {
+  @apply border-l-foreground/40;
+}
+.kiwi-prose .kiwi-callout-error {
+  @apply border-l-destructive/50;
+}
+.kiwi-prose .kiwi-comment-mark {
+  @apply bg-primary/10 text-foreground rounded-sm cursor-pointer;
+}
+.kiwi-prose .kiwi-comment-mark:hover {
+  @apply bg-primary/20;
+}
+
+/* ─── Search snippet highlights ─── */
+.kiwi-search-snippet mark {
+  @apply bg-primary/15 text-foreground rounded-sm px-0.5;
+}
+
+/* ─── Shiki code blocks ─── */
+.kiwi-shiki {
+  @apply border border-border rounded-lg;
+  filter: var(--kiwi-shiki-filter);
+}
+
+/* ─── Scrollbar ─── */
+.kiwi-scroll::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.kiwi-scroll::-webkit-scrollbar-thumb {
+  @apply bg-border/60 rounded-full;
+}
+.kiwi-scroll::-webkit-scrollbar-thumb:hover {
+  @apply bg-border;
+}
+
+/* ─── BlockNote editor ─── */
+.kiwi-blocknote
+  :is(
+    .bn-block-content.ProseMirror-selectednode > *,
+    .ProseMirror-selectednode > .bn-block-content > *
+  ) {
+  outline: 2px solid hsl(var(--ring)) !important;
+}
+.kiwi-blocknote {
+  filter: var(--kiwi-blocknote-filter);
+}

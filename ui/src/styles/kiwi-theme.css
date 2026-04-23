@@ -1,0 +1,118 @@
+/**
+ * KiwiFS UI — central theme
+ *
+ * Clean light/dark surfaces, chartreuse primary, generous radius, minimal chrome.
+ * All design tokens live here. Components use Tailwind (hsl(var(--*))) or
+ * getComputedStyle for --kiwi-graph-* (WebGL). Edit this file to retheme the app.
+ */
+
+/* ─── Light ─── */
+:root {
+  --background: 0 0% 100%;
+  --foreground: 0 0% 9%;
+  --card: 0 0% 100%;
+  --card-foreground: 0 0% 9%;
+  --popover: 0 0% 100%;
+  --popover-foreground: 0 0% 9%;
+
+  /* Primary / brand CTA */
+  --primary: 65 80% 55%;
+  --primary-foreground: 0 0% 9%;
+  --primary-hover: 65 80% 48%;
+
+  --secondary: 0 0% 96%;
+  --secondary-foreground: 0 0% 9%;
+  --secondary-hover: 0 0% 91%;
+
+  --muted: 0 0% 96%;
+  --muted-foreground: 0 0% 45%;
+
+  --accent: 0 0% 96%;
+  --accent-foreground: 0 0% 9%;
+  --accent-hover: 0 0% 91%;
+
+  --destructive: 0 84% 60%;
+  --destructive-foreground: 0 0% 98%;
+  --destructive-hover: 0 84% 52%;
+
+  --border: 0 0% 90%;
+  --input: 0 0% 90%;
+  --ring: 65 80% 55%;
+
+  --radius: 0.625rem;
+
+  --ghost-hover-foreground: 0 0% 9%;
+  --link-hover-opacity: 0.75;
+
+  --kiwi-shiki-filter: none;
+  --kiwi-blocknote-filter: none;
+
+  /* Graph (hex — read by readKiwiGraphTheme()) */
+  --kiwi-graph-default-node: #8a8a8a;
+  --kiwi-graph-edge: #d4d4d4;
+  --kiwi-graph-node-dim: #e5e5e5;
+  --kiwi-graph-edge-ghost: #f0f0f0;
+  --kiwi-graph-edge-strong: #666666;
+  --kiwi-graph-palette-0: #555555;
+  --kiwi-graph-palette-1: #666666;
+  --kiwi-graph-palette-2: #777777;
+  --kiwi-graph-palette-3: #888888;
+  --kiwi-graph-palette-4: #999999;
+  --kiwi-graph-palette-5: #5e5e5e;
+  --kiwi-graph-palette-6: #707070;
+  --kiwi-graph-palette-7: #808080;
+  --kiwi-graph-palette-8: #909090;
+  --kiwi-graph-palette-9: #a0a0a0;
+}
+
+/* ─── Dark ─── */
+.dark {
+  --background: 0 0% 5%;
+  --foreground: 0 0% 95%;
+  --card: 0 0% 7%;
+  --card-foreground: 0 0% 95%;
+  --popover: 0 0% 7%;
+  --popover-foreground: 0 0% 95%;
+
+  --primary: 65 80% 62%;
+  --primary-foreground: 0 0% 5%;
+  --primary-hover: 65 80% 54%;
+
+  --secondary: 0 0% 12%;
+  --secondary-foreground: 0 0% 95%;
+  --secondary-hover: 0 0% 18%;
+
+  --muted: 0 0% 12%;
+  --muted-foreground: 0 0% 55%;
+
+  --accent: 0 0% 12%;
+  --accent-foreground: 0 0% 95%;
+  --accent-hover: 0 0% 18%;
+
+  --destructive: 0 70% 45%;
+  --destructive-foreground: 0 0% 95%;
+  --destructive-hover: 0 70% 38%;
+
+  --border: 0 0% 15%;
+  --input: 0 0% 15%;
+  --ring: 65 80% 62%;
+
+  --ghost-hover-foreground: 0 0% 95%;
+  --link-hover-opacity: 0.85;
+
+  --kiwi-graph-default-node: #808080;
+  --kiwi-graph-edge: #555555;
+  --kiwi-graph-node-dim: #3a3a3a;
+  --kiwi-graph-edge-ghost: #2a2a2a;
+  --kiwi-graph-edge-strong: #aaaaaa;
+  --kiwi-graph-palette-0: #8a8a8a;
+  --kiwi-graph-palette-1: #929292;
+  --kiwi-graph-palette-2: #9a9a9a;
+  --kiwi-graph-palette-3: #7a7a7a;
+  --kiwi-graph-palette-4: #828282;
+  --kiwi-graph-palette-5: #6a6a6a;
+  --kiwi-graph-palette-6: #727272;
+  --kiwi-graph-palette-7: #959595;
+  --kiwi-graph-palette-8: #858585;
+  --kiwi-graph-palette-9: #7d7d7d;
+}

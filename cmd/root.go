@@ -7,6 +7,9 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// Version is set by main.go during initialization
+var Version = "dev"
+
 var rootCmd = &cobra.Command{
 	Use:   "kiwifs",
 	Short: "KiwiFS — the knowledge filesystem",
@@ -17,6 +20,8 @@ One binary. Storage-agnostic. Git-versioned. Embeddable.`,
 }
 
 func Execute() {
+	// Set version here to ensure it's picked up after ldflags have been applied
+	rootCmd.Version = Version
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -26,4 +31,5 @@ func Execute() {
 func init() {
 	rootCmd.AddCommand(serveCmd)
 	rootCmd.AddCommand(initCmd)
+	rootCmd.AddCommand(mountCmd)
 }
