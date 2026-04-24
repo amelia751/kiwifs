@@ -38,9 +38,9 @@ Your data must survive anything — process crash, container kill, host failure.
 
 - [ ] **Atomic file writes** — temp-file-then-rename in storage layer, eliminates torn writes on crash
 - [ ] **Track `.kiwi/` user data in git** — comments, config, templates are user-created data that must not be silently lost
-- [ ] **`[backup]` config** — `remote = "git@github.com:user/kb.git"`, `interval = "5m"`, background goroutine pushes to any git remote
-- [ ] **`kiwifs backup`** — one-shot CLI command for manual push, cron jobs, pre-maintenance scripts
-- [ ] **`kiwifs restore`** — `git clone` + auto-reindex, one command to recover from any git remote
+- [x] **`[backup]` config** — `remote = "git@github.com:user/kb.git"`, `interval = "5m"`, background goroutine pushes to any git remote
+- [x] **`kiwifs backup`** — one-shot CLI command for manual push, cron jobs, pre-maintenance scripts
+- [x] **`kiwifs restore`** — `git clone` + auto-reindex, one command to recover from any git remote
 - [ ] **Uncommitted path tracking** — if git commit fails after file write, track and retry so history is never silently lost
 
 ---

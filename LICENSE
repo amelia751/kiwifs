@@ -24,8 +24,7 @@ Additional Use Grant: You may make production use of the Licensed Work,
                         (c) offering consulting, support, or integration
                             services around the Licensed Work.
 Change Date:          Four years from the date of each release of the
-                      Licensed Work. The Change Date for each version is
-                      specified at https://kiwifs.dev/license.
+                      Licensed Work.
 Change License:       Apache License, Version 2.0
 
 For information about alternative licensing arrangements for the Licensed
@@ -77,3 +76,25 @@ AN "AS IS" BASIS. LICENSOR HEREBY DISCLAIMS ALL WARRANTIES AND CONDITIONS,
 EXPRESS OR IMPLIED, INCLUDING (WITHOUT LIMITATION) WARRANTIES OF
 MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, NON-INFRINGEMENT, AND
 TITLE.
+
+-----------------------------------------------------------------------------
+
+Trademark Notice
+
+"KiwiFS", the KiwiFS logo, and associated trade dress are trademarks of the
+KiwiFS Authors. You may not use these marks in any manner that is likely to
+cause confusion about the source or origin of a product or service, including
+but not limited to:
+
+  - using "KiwiFS", "Kiwi FS", or confusingly similar names as the name
+    of a derivative work, fork, or reimplementation;
+  - using the KiwiFS logo or trade dress in promotional materials for a
+    competing product;
+  - implying endorsement, sponsorship, or affiliation with the KiwiFS
+    project without prior written consent.
+
+Fair use of the name for truthful, descriptive purposes (e.g., "compatible
+with KiwiFS", "based on the KiwiFS architecture") is permitted provided it
+does not imply endorsement.
+
+For trademark use inquiries, contact: amelia.anh.lam@gmail.com

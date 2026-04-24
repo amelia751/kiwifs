@@ -33,18 +33,17 @@ Just the binary. KiwiFS is a single statically-linked Go binary with zero runtim
 ### How do I install it?
 
 ```bash
-# Binary (macOS, Linux)
-curl -fsSL https://kiwifs.dev/install.sh | sh
+# From source (requires Go 1.25+ and Node.js 20+)
+git clone https://github.com/amelia751/kiwifs.git && cd kiwifs
+cd ui && npm install && npm run build && cd ..
+go build -o kiwifs .
 
-# npm (downloads the right binary for your platform)
-npx kiwifs serve --root ./knowledge
-
-# Docker
-docker run -v ./knowledge:/data -p 3333:3333 kiwifs/kiwifs
-
-# From source
-go install github.com/kiwifs/kiwifs@latest
+# Docker (build locally)
+docker build -t kiwifs .
+docker run -v ./knowledge:/data -p 3333:3333 kiwifs
 ```
+
+Pre-built binaries, npm package (`npx kiwifs`), and Docker Hub images are planned for the first public release.
 
 ### What's in `.kiwi/`?
 
@@ -99,7 +98,7 @@ Three tiers, configurable at startup:
 
 ### Can I run vector search without an API key?
 
-Yes. Use the ONNX embedder (`provider = "onnx"`) with sqlite-vec as the vector store. Everything runs locally inside the binary — no external API calls, fully offline.
+Yes. Use Ollama (`provider = "ollama"`) with sqlite-vec as the vector store. Ollama runs locally on your machine, and sqlite-vec is embedded in the binary — no external API calls, fully offline.
 
 ### How do I rebuild the search index?
 
@@ -115,7 +114,7 @@ This rebuilds FTS5, vector embeddings, metadata, and wiki link indexes from the 
 
 ### Can I embed the UI in my own app?
 
-The web UI ships as React components (`<KiwiTree />`, `<KiwiPage />`, `<KiwiEditor />`, `<KiwiSearch />`, `<KiwiGraph />`). A standalone `kiwifs-ui` npm package is on the roadmap — see [ROADMAP.md](ROADMAP.md).
+The web UI is built as React components (`<KiwiTree />`, `<KiwiPage />`, `<KiwiEditor />`, `<KiwiSearch />`, `<KiwiGraph />`), currently embedded in the binary via `go:embed`. A standalone `kiwifs-ui` npm package for embedding in your own React app is on the roadmap — see [ROADMAP.md](ROADMAP.md).
 
 ### Can I customize the theme?
 
@@ -157,7 +156,8 @@ Every write is an atomic git commit. If KiwiFS crashes, git's reflog provides cr
 Your knowledge base is a folder of markdown files with a `.git` directory. You can:
 
 - `git push` to any git remote (GitHub, GitLab, your own server)
-- `kiwifs backup` to push to a configured remote on a schedule
+- `kiwifs backup` for one-shot push to a configured git remote
+- Configure `[backup]` in `.kiwi/config.toml` for automatic scheduled pushes
 - `aws s3 sync` via the S3 protocol
 - Plain `rsync` or `cp` — the files are the truth
 
@@ -172,10 +172,14 @@ Import tooling (`kiwifs import --from obsidian|notion|confluence`) is on the [ro
 ### What's the recommended production setup?
 
 ```bash
+# Build the image
+docker build -t kiwifs .
+
+# Run with persistent storage
 docker run -d --restart always \
   -v /data/knowledge:/data \
   -p 3333:3333 \
-  kiwifs/kiwifs serve --root /data --search sqlite --versioning git
+  kiwifs serve --root /data --search sqlite --versioning git
 ```
 
 For persistent vector search with pgvector, see the `docker-compose.yml` in the repo.

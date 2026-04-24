@@ -35,7 +35,7 @@ case "$ARCH" in
 esac
 
 # Get latest version from GitHub releases
-LATEST_VERSION=$(curl -s https://api.github.com/repos/kiwifs/kiwifs/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+LATEST_VERSION=$(curl -s https://api.github.com/repos/amelia751/kiwifs/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
 
 if [ -z "$LATEST_VERSION" ]; then
   echo "Error: Could not determine latest version"
@@ -45,7 +45,7 @@ fi
 echo "Installing KiwiFS $LATEST_VERSION for $OS/$ARCH..."
 
 # Download URL
-DOWNLOAD_URL="https://github.com/kiwifs/kiwifs/releases/download/${LATEST_VERSION}/kiwifs-${OS}-${ARCH}.tar.gz"
+DOWNLOAD_URL="https://github.com/amelia751/kiwifs/releases/download/${LATEST_VERSION}/kiwifs-${OS}-${ARCH}.tar.gz"
 
 # Temporary directory
 TMP_DIR=$(mktemp -d)
@@ -94,4 +94,4 @@ echo "Get started:"
 echo "  kiwifs init ~/my-knowledge"
 echo "  kiwifs serve --root ~/my-knowledge --port 3333"
 echo ""
-echo "Documentation: https://github.com/kiwifs/kiwifs"
+echo "Documentation: https://github.com/amelia751/kiwifs"

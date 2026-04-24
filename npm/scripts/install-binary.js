@@ -34,7 +34,7 @@ function getLatestVersion() {
   return new Promise((resolve, reject) => {
     const options = {
       hostname: 'api.github.com',
-      path: '/repos/kiwifs/kiwifs/releases/latest',
+      path: '/repos/amelia751/kiwifs/releases/latest',
       headers: {
         'User-Agent': 'kiwifs-npm-installer',
       },
@@ -58,7 +58,7 @@ function getLatestVersion() {
 // Download binary
 function downloadBinary(version) {
   const filename = `kiwifs-${kiwiPlatform}-${kiwiArch}.tar.gz`;
-  const url = `https://github.com/kiwifs/kiwifs/releases/download/${version}/${filename}`;
+  const url = `https://github.com/amelia751/kiwifs/releases/download/${version}/${filename}`;
   const binDir = path.join(__dirname, '..', 'bin');
   const tarPath = path.join(binDir, filename);
 

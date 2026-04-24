@@ -4,7 +4,9 @@ A filesystem-based knowledge system. Agents write with `cat`. Humans read in the
 
 One binary. Storage-agnostic. Git-versioned. Embeddable.
 
-## Installation
+> **Note:** This npm package is not yet published. For now, build from source — see the [main README](https://github.com/amelia751/kiwifs).
+
+## Installation (once published)
 
 ### Global install
 
@@ -31,24 +33,6 @@ kiwifs serve --root ~/my-knowledge --port 3333
 
 # Mount a remote KiwiFS as a local folder (FUSE)
 kiwifs mount --remote http://localhost:3333 ~/mounted-knowledge
-```
-
-### Programmatic API
-
-```javascript
-const kiwifs = require('kiwifs');
-
-// Start a server programmatically
-const server = kiwifs.serve({
-  root: './knowledge',
-  port: 3333,
-  search: 'sqlite',
-  versioning: 'git',
-});
-
-// Or run arbitrary commands
-const result = await kiwifs.run(['init', './my-knowledge']);
-console.log(result.stdout);
 ```
 
 ## Protocols
@@ -101,9 +85,8 @@ strategy = "git"  # or "cow" or "none"
 
 ## Documentation
 
-- [GitHub](https://github.com/kiwifs/kiwifs)
-- [Full Documentation](https://github.com/kiwifs/kiwifs/blob/main/kiwifs.md)
+- [GitHub](https://github.com/amelia751/kiwifs)
 
 ## License
 
-MIT
+[BSL 1.1](https://github.com/amelia751/kiwifs/blob/main/LICENSE)

@@ -21,14 +21,10 @@
 </p>
 
 ```bash
-curl -fsSL https://kiwifs.dev/install.sh | sh
-kiwifs serve --root ./knowledge
+git clone https://github.com/amelia751/kiwifs.git && cd kiwifs
+cd ui && npm install && npm run build && cd ..
+go build -o kiwifs . && ./kiwifs serve --root ./knowledge
 # Open http://localhost:3333
-```
-
-```bash
-npx kiwifs serve --root ./knowledge    # or via npm
-docker run -v ./knowledge:/data -p 3333:3333 kiwifs/kiwifs   # or Docker
 ```
 
 ---
@@ -147,7 +143,7 @@ ls /kiwi/reports/
 echo "# New finding" > /kiwi/reports/finding-042.md
 ```
 
-When a real mount isn't available, KiwiFS translates `cat`/`grep`/`ls` into API calls transparently. The agent doesn't know the difference.
+When a real mount isn't available, agents use the REST API or MCP tools instead.
 
 ### MCP (Model Context Protocol)
 
@@ -188,9 +184,9 @@ Vector search is pluggable — mix any embedder with any vector store:
 
 | Embedder | Vector Store |
 |---|---|
-| OpenAI, Ollama, ONNX, Cohere, Vertex AI, Bedrock, Azure, custom | sqlite-vec (default), Qdrant, pgvector, Pinecone, Weaviate, Milvus |
+| OpenAI, Ollama, Cohere, Vertex AI, Bedrock, custom HTTP | sqlite-vec (default), Qdrant, pgvector, Pinecone, Weaviate, Milvus |
 
-Default (sqlite-vec + OpenAI) needs one env var and zero infrastructure. For fully offline setups: ONNX + sqlite-vec, everything in the single binary.
+Default (sqlite-vec + OpenAI) needs one env var and zero infrastructure. For fully offline setups: Ollama + sqlite-vec, everything runs locally.
 
 ### Git versioning
 
@@ -296,15 +292,13 @@ All commands support `--help` for full flag reference.
 ### 1. Install
 
 ```bash
-# Binary (macOS, Linux)
-curl -fsSL https://kiwifs.dev/install.sh | sh
-
-# npm
-npm install -g kiwifs
-
-# Docker
-docker pull kiwifs/kiwifs
+# From source (requires Go 1.25+ and Node.js 20+)
+git clone https://github.com/amelia751/kiwifs.git && cd kiwifs
+cd ui && npm install && npm run build && cd ..
+go build -o kiwifs .
 ```
+
+<!-- Coming soon: curl installer, npm package, Docker image. See ROADMAP.md. -->
 
 ### 2. Initialize
 
@@ -357,18 +351,18 @@ engine = "sqlite"                # grep | sqlite | vector
 enabled = true
 
 [search.vector.embedder]
-provider = "openai"              # openai | ollama | onnx | cohere | custom
+provider = "openai"              # openai | ollama | cohere | bedrock | vertex | http
 model = "text-embedding-3-small"
 api_key = "${OPENAI_API_KEY}"
 
 [search.vector.store]
-provider = "sqlite-vec"          # sqlite-vec | qdrant | pgvector | pinecone
+provider = "sqlite-vec"          # sqlite-vec | qdrant | pgvector | pinecone | weaviate | milvus
 
 [versioning]
 strategy = "git"                 # git | cow | none
 
 [auth]
-type = "none"                    # none | apikey | oidc
+type = "none"                    # none | apikey | perspace | oidc
 ```
 
 CLI flags override config: `kiwifs serve --port 4000 --search sqlite --versioning git`.
@@ -380,37 +374,29 @@ CLI flags override config: `kiwifs serve --port 4000 --search sqlite --versionin
 ### Docker
 
 ```bash
-docker run -v ./knowledge:/data -p 3333:3333 kiwifs/kiwifs
+# Build locally (pre-built images coming soon)
+docker build -t kiwifs .
+docker run -v ./knowledge:/data -p 3333:3333 kiwifs
 ```
 
 ### Docker Compose (with vector search)
 
-```yaml
-services:
-  kiwifs:
-    image: kiwifs/kiwifs
-    volumes:
-      - ./knowledge:/data
-    ports:
-      - "3333:3333"
-    environment:
-      - KIWI_SEARCH=sqlite
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-
-  # Optional: add pgvector for scale
-  # db:
-  #   image: pgvector/pgvector:pg16
-```
+See `docker-compose.yml` in the repo for a ready-to-use setup with optional pgvector sidecar.
 
 ### Embedded in your app (Go library)
 
 ```go
 import "github.com/kiwifs/kiwifs/pkg/kiwi"
 
-k := kiwi.New("/data/knowledge", kiwi.WithSearch("sqlite"))
-content, _ := k.Read("concepts/auth.md")
-k.Write("reports/report-003.md", "# Report 003\n\n...", kiwi.Actor("my-agent"))
-results, _ := k.Search("payment timeout")
+srv, err := kiwi.New("/data/knowledge", kiwi.WithSearch("sqlite"))
+if err != nil { log.Fatal(err) }
+defer srv.Close()
+
+// Mount as an HTTP handler alongside your own routes
+mux.Handle("/knowledge/", http.StripPrefix("/knowledge", srv.Handler()))
+
+// Or run standalone
+log.Fatal(srv.ListenAndServe(":3333"))
 ```
 
 ### With NFS (Docker / Kubernetes)
@@ -474,7 +460,7 @@ Writes accept `X-Actor` (git attribution), `X-Provenance` (lineage tracking), an
 
 5. **Git as the WAL.** Instead of building a custom write-ahead log, every write is a git commit. Crash recovery, audit trail, tamper detection, replication — all for free.
 
-6. **Embeddable.** The web UI ships as React components (`<KiwiTree />`, `<KiwiPage />`, `<KiwiEditor />`, `<KiwiSearch />`) you can drop into your own app and theme with CSS variables.
+6. **Embeddable.** The Go library (`pkg/kiwi`) lets you embed KiwiFS in any Go application. The web UI components (`<KiwiTree />`, `<KiwiPage />`, `<KiwiEditor />`, `<KiwiSearch />`) are built for future standalone use as an npm package.
 
 ---
 
@@ -487,7 +473,7 @@ Writes accept `X-Actor` (git attribution), `X-Provenance` (lineage tracking), an
 | **Versioned** (git audit trail) | Yes | No | No | No | Limited | Plugin ($$$) |
 | **Searchable** (FTS + vector) | Yes | No | Chroma | Plugins | Yes | Yes |
 | **Single binary** | Yes | No | No | No | No | No (SaaS) |
-| **Embeddable** (React components) | Yes | No | No | No | No | No |
+| **Embeddable** (Go library) | Yes | No | No | No | No | No |
 | **Self-hosted** | Yes | Yes | Yes | N/A | Yes | No |
 | **Files are the truth** | Yes | DB is truth | DB is truth | Yes | Postgres | Proprietary DB |
 
@@ -551,3 +537,5 @@ Writes accept `X-Actor` (git attribution), `X-Provenance` (lineage tracking), an
 [Business Source License 1.1](LICENSE) — free to use, self-host, and modify. The only restriction: you can't offer KiwiFS as a commercial hosted service. Each release converts to Apache 2.0 after 4 years.
 
 If you want to offer KiwiFS as a managed service or need a commercial license, [get in touch](mailto:amelia.anh.lam@gmail.com).
+
+"KiwiFS" and the KiwiFS logo are trademarks of the KiwiFS Authors. See [LICENSE](LICENSE) for trademark usage guidelines.
