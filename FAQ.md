@@ -33,17 +33,24 @@ Just the binary. KiwiFS is a single statically-linked Go binary with zero runtim
 ### How do I install it?
 
 ```bash
-# From source (requires Go 1.25+ and Node.js 20+)
+# One-line install (macOS / Linux) — downloads the pre-built binary
+curl -fsSL https://raw.githubusercontent.com/amelia751/kiwifs/main/install.sh | sh
+```
+
+Or build from source (requires Go 1.25+ and Node.js 20+):
+
+```bash
 git clone https://github.com/amelia751/kiwifs.git && cd kiwifs
 cd ui && npm install && npm run build && cd ..
 go build -o kiwifs .
+```
 
-# Docker (build locally)
+Docker (build locally):
+
+```bash
 docker build -t kiwifs .
 docker run -v ./knowledge:/data -p 3333:3333 kiwifs
 ```
-
-Pre-built binaries, npm package (`npx kiwifs`), and Docker Hub images are planned for the first public release.
 
 ### What's in `.kiwi/`?
 

@@ -21,9 +21,8 @@
 </p>
 
 ```bash
-git clone https://github.com/amelia751/kiwifs.git && cd kiwifs
-cd ui && npm install && npm run build && cd ..
-go build -o kiwifs . && ./kiwifs serve --root ./knowledge
+curl -fsSL https://raw.githubusercontent.com/amelia751/kiwifs/main/install.sh | sh
+kiwifs init ./knowledge && kiwifs serve --root ./knowledge
 # Open http://localhost:3333
 ```
 
@@ -292,13 +291,17 @@ All commands support `--help` for full flag reference.
 ### 1. Install
 
 ```bash
-# From source (requires Go 1.25+ and Node.js 20+)
+# One-line install (macOS / Linux)
+curl -fsSL https://raw.githubusercontent.com/amelia751/kiwifs/main/install.sh | sh
+```
+
+Or build from source (requires Go 1.25+ and Node.js 20+):
+
+```bash
 git clone https://github.com/amelia751/kiwifs.git && cd kiwifs
 cd ui && npm install && npm run build && cd ..
 go build -o kiwifs .
 ```
-
-<!-- Coming soon: curl installer, npm package, Docker image. See ROADMAP.md. -->
 
 ### 2. Initialize
 
