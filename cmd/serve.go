@@ -287,6 +287,42 @@ func runServe(cmd *cobra.Command, args []string) error {
 	}
 	runHTTP("KiwiFS", &http.Server{Addr: addr, Handler: mgrHandler})
 
+	// SIGHUP → hot-reload auth from disk. Matches how nginx, haproxy, and
+	// Postgres reload their key material; operators rotating an API key
+	// can now do so without dropping an in-flight upload. We only swap
+	// auth config (safe behind an atomic pointer inside api.Server) —
+	// port changes / versioner swaps still require a restart because
+	// those are structural.
+	sighup := make(chan os.Signal, 1)
+	signal.Notify(sighup, syscall.SIGHUP)
+	g.Go(func() error {
+		for {
+			select {
+			case <-gctx.Done():
+				signal.Stop(sighup)
+				return nil
+			case <-sighup:
+				newCfg, err := config.Load(root)
+				if err != nil {
+					log.Printf("sighup: config reload failed (%v) — keeping old keys", err)
+					continue
+				}
+				for _, name := range spaceMgr.ListSpaces() {
+					sp, ok := spaceMgr.GetSpace(name)
+					if !ok || sp == nil || sp.Server == nil {
+						continue
+					}
+					// Each space sees a filtered subset of the global key
+					// list (per-space keys only apply to their own root),
+					// so use the same filter path as AddSpace.
+					filtered := spaces.FilterKeysForSpace(newCfg, name)
+					sp.Server.ReloadAuth(&filtered.Auth)
+				}
+				log.Printf("sighup: auth reloaded for %d space(s)", len(spaceMgr.ListSpaces()))
+			}
+		}
+	})
+
 	// Signal-triggered context cancellation propagates through gctx once
 	// any server returns an error OR the signal fires. Wait returns the
 	// first non-nil error — or nil on a clean shutdown.

@@ -10,6 +10,7 @@ import (
 	"mime"
 	"net/http"
 	"os"
+	pathpkg "path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -20,13 +21,17 @@ import (
 	"github.com/kiwifs/kiwifs/internal/comments"
 	"github.com/kiwifs/kiwifs/internal/config"
 	"github.com/kiwifs/kiwifs/internal/events"
+	"github.com/kiwifs/kiwifs/internal/janitor"
 	"github.com/kiwifs/kiwifs/internal/links"
 	"github.com/kiwifs/kiwifs/internal/markdown"
 	"github.com/kiwifs/kiwifs/internal/pipeline"
+	"github.com/kiwifs/kiwifs/internal/presence"
+	"github.com/kiwifs/kiwifs/internal/rbac"
 	"github.com/kiwifs/kiwifs/internal/search"
 	"github.com/kiwifs/kiwifs/internal/storage"
 	"github.com/kiwifs/kiwifs/internal/vectorstore"
 	"github.com/kiwifs/kiwifs/internal/versioning"
+	"github.com/kiwifs/kiwifs/internal/workflow"
 	"github.com/labstack/echo/v4"
 	"golang.org/x/sync/singleflight"
 )
@@ -45,9 +50,25 @@ type Handlers struct {
 	pipe      *pipeline.Pipeline
 	vectors   *vectorstore.Service // nil when vector search is disabled
 	comments  *comments.Store
+	shares    *rbac.ShareStore
+	presence  *presence.Tracker
 	assets    config.AssetsConfig
 	ui        config.UIConfig
 	root      string
+
+	// janitorSched, when set, hands the /janitor endpoint a cached
+	// result from the last scheduled run so an admin opening the panel
+	// doesn't wait for a full scan to complete. When nil, /janitor falls
+	// back to an on-demand scan (the historical behaviour).
+	janitorSched *janitor.Scheduler
+	// janitorStaleDays overrides the legacy hard-coded 90-day staleness
+	// threshold. Zero falls back to the 90-day default so older callers
+	// see no behaviour change.
+	janitorStaleDays int
+
+	// reminders, when set, lets /workflow/reminders answer from the
+	// scheduler's cache instead of walking the workspace on every hit.
+	reminders *workflow.ReminderScheduler
 
 	// graphCache stores the last-computed /graph response; pipeline
 	// invalidation callbacks nil it out on every write. atomic.Pointer is
@@ -67,9 +88,101 @@ func (h *Handlers) invalidateGraphCache() {
 	h.graphCache.Store(nil)
 }
 
-// Health godoc
+// Health godoc. Returns 200 with a small JSON status body so load
+// balancers can use it for liveness probes.
 func (h *Handlers) Health(c echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// Healthz is the standard Kubernetes-style liveness probe endpoint.
+// Identical payload to /health but intentionally duplicated so cluster
+// manifests that follow the "/healthz is required" convention work
+// without an Ingress rewrite.
+func (h *Handlers) Healthz(c echo.Context) error {
+	return c.JSON(http.StatusOK, map[string]any{
+		"status":  "ok",
+		"uptime":  time.Since(startedAt).String(),
+		"version": buildVersion,
+	})
+}
+
+// Readyz checks that the core subsystems (storage, search) are actually
+// ready to serve traffic, not just that the HTTP server is alive. Fresh
+// installs stream a full FTS5 backfill at startup; /healthz lies "OK"
+// while search is still building, but /readyz stays 503 until the store
+// can list its root. K8s rolling updates should point at /readyz.
+func (h *Handlers) Readyz(c echo.Context) error {
+	if h.store == nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{"status": "no-store"})
+	}
+	ctx, cancel := context.WithTimeout(c.Request().Context(), 500*time.Millisecond)
+	defer cancel()
+	if _, err := h.store.Stat(ctx, ""); err != nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{
+			"status": "storage-unreachable",
+			"error":  err.Error(),
+		})
+	}
+	return c.JSON(http.StatusOK, map[string]string{"status": "ready"})
+}
+
+// Metrics emits Prometheus text format. The endpoint is intentionally
+// tiny — a handful of counters + gauges — so ops teams can scrape it
+// without pulling in a third-party metrics library. Counters are lifted
+// off atomic.Pointer[graphResponse] (cache hits) and the events hub
+// (subscriber count); the rest are sampled at request time.
+func (h *Handlers) Metrics(c echo.Context) error {
+	var b strings.Builder
+	fmt.Fprintf(&b, "# HELP kiwi_build_info Static build metadata.\n")
+	fmt.Fprintf(&b, "# TYPE kiwi_build_info gauge\n")
+	fmt.Fprintf(&b, "kiwi_build_info{version=%q} 1\n", buildVersion)
+
+	fmt.Fprintf(&b, "# HELP kiwi_uptime_seconds Seconds since server start.\n")
+	fmt.Fprintf(&b, "# TYPE kiwi_uptime_seconds gauge\n")
+	fmt.Fprintf(&b, "kiwi_uptime_seconds %.0f\n", time.Since(startedAt).Seconds())
+
+	if h.hub != nil {
+		fmt.Fprintf(&b, "# HELP kiwi_sse_subscribers Current SSE subscriber count.\n")
+		fmt.Fprintf(&b, "# TYPE kiwi_sse_subscribers gauge\n")
+		fmt.Fprintf(&b, "kiwi_sse_subscribers %d\n", h.hub.Count())
+	}
+	if h.presence != nil {
+		pages := len(h.presence.Snapshot())
+		fmt.Fprintf(&b, "# HELP kiwi_presence_pages Pages with at least one live viewer/editor.\n")
+		fmt.Fprintf(&b, "# TYPE kiwi_presence_pages gauge\n")
+		fmt.Fprintf(&b, "kiwi_presence_pages %d\n", pages)
+	}
+	if h.janitorSched != nil {
+		if r := h.janitorSched.LastResult(); r != nil {
+			fmt.Fprintf(&b, "# HELP kiwi_janitor_issues Total janitor issues at last scan.\n")
+			fmt.Fprintf(&b, "# TYPE kiwi_janitor_issues gauge\n")
+			fmt.Fprintf(&b, "kiwi_janitor_issues %d\n", len(r.Issues))
+		}
+	}
+	if h.reminders != nil {
+		fmt.Fprintf(&b, "# HELP kiwi_workflow_reminders Active workflow reminders.\n")
+		fmt.Fprintf(&b, "# TYPE kiwi_workflow_reminders gauge\n")
+		fmt.Fprintf(&b, "kiwi_workflow_reminders %d\n", len(h.reminders.Inbox()))
+	}
+
+	return c.Blob(http.StatusOK, "text/plain; version=0.0.4; charset=utf-8", []byte(b.String()))
+}
+
+// startedAt + buildVersion are process-wide so every Handlers instance
+// sees the same values. Overwritten via ldflags in production builds.
+var (
+	startedAt    = time.Now()
+	buildVersion = "dev"
+)
+
+// SetBuildVersion lets cmd/version.go plug the release string in at
+// startup so /metrics and /healthz report the running binary's real
+// version instead of "dev".
+func SetBuildVersion(v string) {
+	if v == "" {
+		return
+	}
+	buildVersion = v
 }
 
 // ─── Tree ────────────────────────────────────────────────────────────────────
@@ -630,7 +743,24 @@ func (h *Handlers) Search(c echo.Context) error {
 	}
 	limit := search.NormalizeLimit(parseIntParam(c, "limit", 0))
 	offset := search.NormalizeOffset(parseIntParam(c, "offset", 0))
-	results, err := h.searcher.Search(c.Request().Context(), q, limit, offset, "")
+	// Default-on trust boost: if the search backend supports it and the
+	// caller hasn't opted out with ?boost=none, apply a soft multiplier
+	// that pushes verified / source-of-truth / high-confidence pages up
+	// the rank list. A toggle for a safety feature only helps if people
+	// toggle it; most users never did, which meant the "verified" badge
+	// did nothing for typical search. Verified-exact searches continue
+	// to live on their own /search/verified endpoint for "show me only
+	// the canonical docs" use cases.
+	boost := c.QueryParam("boost")
+	var (
+		results []search.Result
+		err     error
+	)
+	if ts, ok := h.searcher.(search.TrustSearcher); ok && boost != "none" && boost != "off" {
+		results, err = ts.SearchBoosted(c.Request().Context(), q, limit, offset, "")
+	} else {
+		results, err = h.searcher.Search(c.Request().Context(), q, limit, offset, "")
+	}
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
@@ -704,6 +834,105 @@ func parseIntParam(c echo.Context, name string, fallback int) int {
 		return fallback
 	}
 	return n
+}
+
+// ─── Verified Search ─────────────────────────────────────────────────────
+
+// VerifiedSearch performs a trust-boosted search: pages with status=verified,
+// source-of-truth=true, or high confidence float to the top. Falls back to
+// normal Search when the backend doesn't support it.
+// GET /api/kiwi/search/verified?q=...&limit=20&offset=0
+func (h *Handlers) VerifiedSearch(c echo.Context) error {
+	q := c.QueryParam("q")
+	if q == "" {
+		return echo.NewHTTPError(http.StatusBadRequest, "q is required")
+	}
+	limit := search.NormalizeLimit(parseIntParam(c, "limit", 0))
+	offset := search.NormalizeOffset(parseIntParam(c, "offset", 0))
+
+	ts, ok := h.searcher.(search.TrustSearcher)
+	if !ok {
+		return echo.NewHTTPError(http.StatusNotImplemented, "verified search requires sqlite search backend")
+	}
+	results, err := ts.SearchVerified(c.Request().Context(), q, limit, offset, "")
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	if results == nil {
+		results = []search.Result{}
+	}
+	return c.JSON(http.StatusOK, searchResponse{
+		Query:   q,
+		Limit:   limit,
+		Offset:  offset,
+		Results: results,
+	})
+}
+
+// ─── Stale Pages ─────────────────────────────────────────────────────────
+
+type staleResponse struct {
+	StaleDays int                 `json:"staleDays"`
+	Count     int                 `json:"count"`
+	Results   []search.MetaResult `json:"results"`
+}
+
+// StalePages returns pages past their review date or not reviewed within a
+// configurable window.
+// GET /api/kiwi/stale?days=30
+func (h *Handlers) StalePages(c echo.Context) error {
+	sd, ok := h.searcher.(search.StaleDetector)
+	if !ok {
+		return echo.NewHTTPError(http.StatusNotImplemented, "stale detection requires sqlite search backend")
+	}
+	days := parseIntParam(c, "days", 30)
+	if days <= 0 {
+		days = 30
+	}
+	results, err := sd.StalePages(c.Request().Context(), days)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	if results == nil {
+		results = []search.MetaResult{}
+	}
+	return c.JSON(http.StatusOK, staleResponse{
+		StaleDays: days,
+		Count:     len(results),
+		Results:   results,
+	})
+}
+
+// ─── Contradictions ──────────────────────────────────────────────────────
+
+type contradictionsResponse struct {
+	Path  string   `json:"path"`
+	Paths []string `json:"contradictions"`
+}
+
+// Contradictions returns pages that share tags/topics with the given page
+// but have conflicting trust signals.
+// GET /api/kiwi/contradictions?path=concepts/auth.md
+func (h *Handlers) Contradictions(c echo.Context) error {
+	cd, ok := h.searcher.(search.ContradictionDetector)
+	if !ok {
+		return echo.NewHTTPError(http.StatusNotImplemented, "contradiction detection requires sqlite search backend")
+	}
+	path := c.QueryParam("path")
+	if path == "" {
+		return echo.NewHTTPError(http.StatusBadRequest, "path is required")
+	}
+	paths, err := cd.FindContradictions(c.Request().Context(), path)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	if paths == nil {
+		paths = []string{}
+	}
+	return c.JSON(http.StatusOK, contradictionsResponse{
+		Path:  path,
+		Paths: paths,
+	})
 }
 
 // ─── Semantic Search ─────────────────────────────────────────────────────────
@@ -1419,6 +1648,41 @@ func (h *Handlers) UIConfig(c echo.Context) error {
 	})
 }
 
+// ─── Janitor ─────────────────────────────────────────────────────────────────
+
+// Janitor runs (or returns a cached copy of) the knowledge-base health
+// scanner. The scheduled loop primes the cache on startup and every
+// h.janitor.interval after that; manual clients can still force a fresh
+// scan with ?fresh=1. Using the cache keeps the UI snappy — a large
+// workspace can take 10 s+ to scan.
+// GET /api/kiwi/janitor?staleDays=90&fresh=1
+func (h *Handlers) Janitor(c echo.Context) error {
+	defaultStale := h.janitorStaleDays
+	if defaultStale <= 0 {
+		defaultStale = 90
+	}
+	staleDays := parseIntParam(c, "staleDays", defaultStale)
+	fresh := c.QueryParam("fresh") == "1" || c.QueryParam("fresh") == "true"
+
+	if !fresh && h.janitorSched != nil && staleDays == defaultStale {
+		if cached := h.janitorSched.LastResult(); cached != nil {
+			// Let clients tell how old the cached report is so the UI
+			// can render a "scan ran 2 hours ago" hint.
+			if ls := h.janitorSched.LastScan(); !ls.IsZero() {
+				c.Response().Header().Set("X-Kiwi-Janitor-LastScan", ls.UTC().Format(time.RFC3339))
+			}
+			return c.JSON(http.StatusOK, cached)
+		}
+	}
+
+	scanner := janitor.New(h.root, h.store, h.searcher, staleDays)
+	result, err := scanner.Scan(c.Request().Context())
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
 // PutTheme saves theme overrides to .kiwi/theme.json.
 // PUT /api/kiwi/theme
 func (h *Handlers) PutTheme(c echo.Context) error {
@@ -1459,3 +1723,479 @@ func (h *Handlers) PutTheme(c echo.Context) error {
 	return c.JSON(http.StatusOK, theme)
 }
 
+// ─── Share Links ─────────────────────────────────────────────────────────────
+
+type createShareRequest struct {
+	Path      string `json:"path"`
+	ExpiresIn string `json:"expiresIn,omitempty"`
+	Password  string `json:"password,omitempty"`
+}
+
+// CreateShareLink generates a shareable public link for a page.
+// POST /api/kiwi/share
+func (h *Handlers) CreateShareLink(c echo.Context) error {
+	if h.shares == nil {
+		return echo.NewHTTPError(http.StatusNotImplemented, "share links not enabled")
+	}
+	var req createShareRequest
+	if err := c.Bind(&req); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid JSON body")
+	}
+	if req.Path == "" {
+		return echo.NewHTTPError(http.StatusBadRequest, "path is required")
+	}
+	if !h.store.Exists(c.Request().Context(), req.Path) {
+		return echo.NewHTTPError(http.StatusNotFound, "file not found")
+	}
+
+	var dur time.Duration
+	if req.ExpiresIn != "" {
+		d, err := time.ParseDuration(req.ExpiresIn)
+		if err != nil {
+			return echo.NewHTTPError(http.StatusBadRequest, "invalid expiresIn duration")
+		}
+		dur = d
+	}
+	actor := c.Request().Header.Get("X-Actor")
+	if actor == "" {
+		actor = pipeline.DefaultActor
+	}
+
+	link, err := h.shares.Create(req.Path, actor, dur, req.Password)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	return c.JSON(http.StatusOK, link)
+}
+
+// ListShareLinks returns share links for a path.
+// GET /api/kiwi/share?path=
+func (h *Handlers) ListShareLinks(c echo.Context) error {
+	if h.shares == nil {
+		return echo.NewHTTPError(http.StatusNotImplemented, "share links not enabled")
+	}
+	path := c.QueryParam("path")
+	if path == "" {
+		return echo.NewHTTPError(http.StatusBadRequest, "path is required")
+	}
+	links, err := h.shares.ListForPath(path)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	if links == nil {
+		links = []*rbac.ShareLink{}
+	}
+	return c.JSON(http.StatusOK, links)
+}
+
+// RevokeShareLink removes a share link by id.
+// DELETE /api/kiwi/share/:id
+func (h *Handlers) RevokeShareLink(c echo.Context) error {
+	if h.shares == nil {
+		return echo.NewHTTPError(http.StatusNotImplemented, "share links not enabled")
+	}
+	id := c.Param("id")
+	if id == "" {
+		return echo.NewHTTPError(http.StatusBadRequest, "id is required")
+	}
+	if err := h.shares.Revoke(id); err != nil {
+		return echo.NewHTTPError(http.StatusNotFound, err.Error())
+	}
+	return c.JSON(http.StatusOK, map[string]string{"revoked": id})
+}
+
+// PublicPage serves a page via a share link token (no auth required).
+// Supports password-protected links via ?password= or X-Share-Password header.
+// GET /api/kiwi/public/:token
+func (h *Handlers) PublicPage(c echo.Context) error {
+	if h.shares == nil {
+		return echo.NewHTTPError(http.StatusNotFound, "not found")
+	}
+	token := c.Param("token")
+	if token == "" {
+		return echo.NewHTTPError(http.StatusBadRequest, "token is required")
+	}
+	password := c.QueryParam("password")
+	if password == "" {
+		password = c.Request().Header.Get("X-Share-Password")
+	}
+	link, err := h.shares.Resolve(token, password)
+	if errors.Is(err, rbac.ErrInvalidPassword) {
+		// 401 + WWW-Authenticate so browsers prompt for the secret.
+		c.Response().Header().Set(echo.HeaderWWWAuthenticate, `Basic realm="kiwifs-share"`)
+		return echo.NewHTTPError(http.StatusUnauthorized, "password required")
+	}
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	if link == nil {
+		return echo.NewHTTPError(http.StatusNotFound, "link not found or expired")
+	}
+
+	content, err := h.store.Read(c.Request().Context(), link.Path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return echo.NewHTTPError(http.StatusNotFound, "file not found")
+		}
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	return c.Blob(http.StatusOK, detectContentType(link.Path, content), content)
+}
+
+// PublicFile serves a page with visibility:public in its frontmatter (no auth).
+// GET /api/kiwi/public/file?path=
+func (h *Handlers) PublicFile(c echo.Context) error {
+	raw := c.QueryParam("path")
+	if raw == "" {
+		return echo.NewHTTPError(http.StatusBadRequest, "path is required")
+	}
+	// Reject traversal attempts — the storage layer may not always catch them.
+	cleaned := pathpkg.Clean("/" + raw)
+	if cleaned == "/" || strings.HasPrefix(cleaned, "/..") {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid path")
+	}
+	cleaned = strings.TrimPrefix(cleaned, "/")
+
+	content, err := h.store.Read(c.Request().Context(), cleaned)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusNotFound, "not found")
+	}
+	if rbac.PageVisibility(content) != rbac.VisibilityPublic {
+		return echo.NewHTTPError(http.StatusNotFound, "not found")
+	}
+	return c.Blob(http.StatusOK, detectContentType(cleaned, content), content)
+}
+
+// PublicTree returns a tree of only public-visibility pages (no auth).
+// GET /api/kiwi/public/tree
+func (h *Handlers) PublicTree(c echo.Context) error {
+	path := c.QueryParam("path")
+	if path == "" {
+		path = "/"
+	}
+	tree, err := h.buildPublicTree(c.Request().Context(), path, maxTreeDepth)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return echo.NewHTTPError(http.StatusNotFound, "path not found")
+		}
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	return c.JSON(http.StatusOK, tree)
+}
+
+func (h *Handlers) buildPublicTree(ctx context.Context, path string, depth int) (*treeEntry, error) {
+	entries, err := h.store.List(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+
+	cleanPath := strings.Trim(path, "/")
+	displayName := filepath.Base(cleanPath)
+	if cleanPath == "" {
+		displayName = "/"
+	}
+	root := &treeEntry{
+		Path:  cleanPath,
+		Name:  displayName,
+		IsDir: true,
+	}
+
+	for _, e := range entries {
+		if e.IsDir {
+			if depth > 0 {
+				sub, err := h.buildPublicTree(ctx, e.Path, depth-1)
+				if err == nil && len(sub.Children) > 0 {
+					child := &treeEntry{
+						Path:     e.Path,
+						Name:     e.Name,
+						IsDir:    true,
+						Children: sub.Children,
+					}
+					root.Children = append(root.Children, child)
+				}
+			}
+			continue
+		}
+		content, rerr := h.store.Read(ctx, e.Path)
+		if rerr != nil {
+			continue
+		}
+		if rbac.PageVisibility(content) == rbac.VisibilityPublic {
+			root.Children = append(root.Children, &treeEntry{
+				Path: e.Path,
+				Name: e.Name,
+				Size: e.Size,
+			})
+		}
+	}
+	return root, nil
+}
+
+// ─── Workflow ────────────────────────────────────────────────────────────────
+
+// GetWorkflow returns parsed workflow metadata for a page.
+// GET /api/kiwi/workflow?path=
+func (h *Handlers) GetWorkflow(c echo.Context) error {
+	path := c.QueryParam("path")
+	if path == "" {
+		return echo.NewHTTPError(http.StatusBadRequest, "path is required")
+	}
+	content, err := h.store.Read(c.Request().Context(), path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return echo.NewHTTPError(http.StatusNotFound, "file not found")
+		}
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	wf, err := workflow.ParseWorkflow(content)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+	}
+	if wf == nil {
+		return echo.NewHTTPError(http.StatusNotFound, "no workflow metadata in this page")
+	}
+	return c.JSON(http.StatusOK, wf)
+}
+
+// ─── Frontmatter patch ────────────────────────────────────────────────────
+
+type patchMetaRequest struct {
+	Path    string         `json:"path"`
+	Updates map[string]any `json:"updates"`
+}
+
+// PatchMeta merges a set of frontmatter key/value updates into a page without
+// touching the body. A null value removes the key. Goes through the pipeline
+// so the meta index, git commit, and SSE watchers all stay in sync.
+// PATCH /api/kiwi/meta
+func (h *Handlers) PatchMeta(c echo.Context) error {
+	var req patchMetaRequest
+	if err := c.Bind(&req); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid JSON body")
+	}
+	if req.Path == "" {
+		return echo.NewHTTPError(http.StatusBadRequest, "path is required")
+	}
+	if len(req.Updates) == 0 {
+		return echo.NewHTTPError(http.StatusBadRequest, "updates is required")
+	}
+
+	content, err := h.store.Read(c.Request().Context(), req.Path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return echo.NewHTTPError(http.StatusNotFound, "file not found")
+		}
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+
+	updated, err := workflow.MergeFrontmatter(content, req.Updates)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+	}
+
+	actor := c.Request().Header.Get("X-Actor")
+	if actor == "" {
+		actor = pipeline.DefaultActor
+	}
+	res, err := h.pipe.Write(c.Request().Context(), req.Path, updated, actor)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	return c.JSON(http.StatusOK, map[string]string{
+		"path": res.Path,
+		"etag": res.ETag,
+	})
+}
+
+type updateTaskRequest struct {
+	Path   string              `json:"path"`
+	TaskID string              `json:"taskId"`
+	Status workflow.TaskStatus `json:"status"`
+}
+
+// UpdateTask updates a workflow task's status.
+// PATCH /api/kiwi/workflow/task
+func (h *Handlers) UpdateTask(c echo.Context) error {
+	var req updateTaskRequest
+	if err := c.Bind(&req); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid JSON body")
+	}
+	if req.Path == "" || req.TaskID == "" || req.Status == "" {
+		return echo.NewHTTPError(http.StatusBadRequest, "path, taskId, and status are required")
+	}
+
+	content, err := h.store.Read(c.Request().Context(), req.Path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return echo.NewHTTPError(http.StatusNotFound, "file not found")
+		}
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+
+	actor := c.Request().Header.Get("X-Actor")
+	if actor == "" {
+		actor = pipeline.DefaultActor
+	}
+
+	updated, err := workflow.UpdateTask(content, req.TaskID, req.Status, actor)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+	}
+
+	res, err := h.pipe.Write(c.Request().Context(), req.Path, updated, actor)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	return c.JSON(http.StatusOK, map[string]string{
+		"path": res.Path,
+		"etag": res.ETag,
+	})
+}
+
+type updateApprovalRequest struct {
+	Path    string                  `json:"path"`
+	Status  workflow.ApprovalStatus `json:"status"`
+	Comment string                  `json:"comment,omitempty"`
+}
+
+// UpdateApproval sets a workflow page's approval status.
+// PATCH /api/kiwi/workflow/approval
+func (h *Handlers) UpdateApproval(c echo.Context) error {
+	var req updateApprovalRequest
+	if err := c.Bind(&req); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid JSON body")
+	}
+	if req.Path == "" || req.Status == "" {
+		return echo.NewHTTPError(http.StatusBadRequest, "path and status are required")
+	}
+
+	content, err := h.store.Read(c.Request().Context(), req.Path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return echo.NewHTTPError(http.StatusNotFound, "file not found")
+		}
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+
+	actor := c.Request().Header.Get("X-Actor")
+	if actor == "" {
+		actor = pipeline.DefaultActor
+	}
+
+	updated, err := workflow.UpdateApproval(content, req.Status, actor, req.Comment)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+	}
+
+	res, err := h.pipe.Write(c.Request().Context(), req.Path, updated, actor)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	return c.JSON(http.StatusOK, map[string]string{
+		"path": res.Path,
+		"etag": res.ETag,
+	})
+}
+
+// WorkflowReminders returns the cached list of overdue tasks, approvals,
+// and pages from the reminder scheduler. Clients poll this to render
+// an "inbox" panel; the SSE workflow.reminder event provides push
+// updates between polls.
+// GET /api/kiwi/workflow/reminders
+func (h *Handlers) WorkflowReminders(c echo.Context) error {
+	if h.reminders == nil {
+		return c.JSON(http.StatusOK, map[string]any{
+			"reminders": []workflow.Reminder{},
+			"lastScan":  nil,
+		})
+	}
+	return c.JSON(http.StatusOK, map[string]any{
+		"reminders": h.reminders.Inbox(),
+		"lastScan":  h.reminders.LastScan().UTC().Format(time.RFC3339),
+	})
+}
+
+// ─── Presence ────────────────────────────────────────────────────────────────
+
+type presenceRequest struct {
+	Path string `json:"path"`
+	Role string `json:"role"`
+}
+
+// PresenceHeartbeat records that the caller is still active on a page
+// and returns the current live viewer/editor list. Clients should call
+// this every ~10s while the page is open. Broadcasts a "presence" SSE
+// event so other tabs see the updated set without polling.
+// POST /api/kiwi/presence
+func (h *Handlers) PresenceHeartbeat(c echo.Context) error {
+	if h.presence == nil {
+		return echo.NewHTTPError(http.StatusServiceUnavailable, "presence disabled")
+	}
+	var req presenceRequest
+	if err := c.Bind(&req); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid JSON body")
+	}
+	if req.Path == "" {
+		return echo.NewHTTPError(http.StatusBadRequest, "path is required")
+	}
+	actor := c.Request().Header.Get("X-Actor")
+	if actor == "" {
+		actor = pipeline.DefaultActor
+	}
+	role := presence.RoleViewer
+	if strings.EqualFold(req.Role, "editor") {
+		role = presence.RoleEditor
+	}
+	live := h.presence.Heartbeat(req.Path, actor, role)
+	h.hub.Broadcast(events.Event{
+		Op:    "presence",
+		Path:  req.Path,
+		Actor: actor,
+		Extra: map[string]any{"viewers": live},
+	})
+	return c.JSON(http.StatusOK, map[string]any{
+		"path":    req.Path,
+		"viewers": live,
+	})
+}
+
+// PresenceList returns the current live viewer/editor list for a page.
+// GET /api/kiwi/presence?path=...
+func (h *Handlers) PresenceList(c echo.Context) error {
+	if h.presence == nil {
+		return c.JSON(http.StatusOK, map[string]any{"viewers": []presence.Entry{}})
+	}
+	path := c.QueryParam("path")
+	if path == "" {
+		return echo.NewHTTPError(http.StatusBadRequest, "path is required")
+	}
+	return c.JSON(http.StatusOK, map[string]any{
+		"path":    path,
+		"viewers": h.presence.List(path),
+	})
+}
+
+// PresenceLeave removes the caller from a page's presence list — fired
+// by the UI on page navigation / tab close via navigator.sendBeacon.
+// DELETE /api/kiwi/presence?path=...
+func (h *Handlers) PresenceLeave(c echo.Context) error {
+	if h.presence == nil {
+		return c.NoContent(http.StatusNoContent)
+	}
+	path := c.QueryParam("path")
+	if path == "" {
+		return echo.NewHTTPError(http.StatusBadRequest, "path is required")
+	}
+	actor := c.Request().Header.Get("X-Actor")
+	if actor == "" {
+		actor = pipeline.DefaultActor
+	}
+	live := h.presence.Leave(path, actor)
+	h.hub.Broadcast(events.Event{
+		Op:    "presence",
+		Path:  path,
+		Actor: actor,
+		Extra: map[string]any{"viewers": live},
+	})
+	return c.NoContent(http.StatusNoContent)
+}

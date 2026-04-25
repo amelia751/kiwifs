@@ -10,13 +10,18 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/kiwifs/kiwifs/internal/comments"
 	"github.com/kiwifs/kiwifs/internal/config"
 	"github.com/kiwifs/kiwifs/internal/events"
+	"github.com/kiwifs/kiwifs/internal/janitor"
 	"github.com/kiwifs/kiwifs/internal/pipeline"
+	"github.com/kiwifs/kiwifs/internal/presence"
+	"github.com/kiwifs/kiwifs/internal/rbac"
+	"github.com/kiwifs/kiwifs/internal/workflow"
 	"github.com/kiwifs/kiwifs/internal/vectorstore"
 	"github.com/kiwifs/kiwifs/internal/webui"
 	"github.com/labstack/echo/v4"
@@ -32,7 +37,50 @@ type Server struct {
 	pipe     *pipeline.Pipeline
 	vectors  *vectorstore.Service // nil when vector search is disabled
 	comments *comments.Store
+	shares   *rbac.ShareStore
+	presence *presence.Tracker
 	echo     *echo.Echo
+
+	// janitorSched is the background janitor scheduler. Set by
+	// SetJanitorScheduler before Start(); nil disables scheduled scans.
+	janitorSched    *janitor.Scheduler
+	janitorCancel   context.CancelFunc
+	presenceCancel  context.CancelFunc
+	reminders       *workflow.ReminderScheduler
+	remindersCancel context.CancelFunc
+
+	// auth holds the live authentication config. It's an atomic.Pointer
+	// so ReloadAuth can swap keys from under a SIGHUP handler without
+	// racing in-flight requests. The wrapper middleware installed in
+	// setupRoutes reads from this pointer on every request; the cost is
+	// a single atomic load per call plus the usual compare — negligible
+	// compared to the HTTP round-trip.
+	auth atomic.Pointer[liveAuth]
+}
+
+// liveAuth is the snapshot behind Server.auth. Stored as a pointer so
+// swap-ins are single-word atomics.
+type liveAuth struct {
+	typ     string
+	global  string
+	keys    []config.APIKeyEntry
+	oidcMW  echo.MiddlewareFunc // built once at bootstrap; nil when OIDC isn't configured
+	oidcIss string
+}
+
+// SetJanitorScheduler attaches a running janitor scheduler to the server
+// so the /janitor HTTP handler can return the most recent cached scan
+// instead of running an on-demand scan on every request. Optional — if
+// no scheduler is set, /janitor keeps its previous on-demand behaviour.
+func (s *Server) SetJanitorScheduler(sched *janitor.Scheduler) {
+	s.janitorSched = sched
+}
+
+// SetReminderScheduler attaches a workflow reminder scheduler so
+// /workflow/reminders serves the most-recent cached sweep and the
+// sweep's lifecycle is tied to the server.
+func (s *Server) SetReminderScheduler(sched *workflow.ReminderScheduler) {
+	s.reminders = sched
 }
 
 // NewServer creates and configures the server. The pipeline carries every
@@ -43,12 +91,15 @@ func NewServer(
 	pipe *pipeline.Pipeline,
 	vectors *vectorstore.Service,
 	cstore *comments.Store,
+	shares *rbac.ShareStore,
 ) *Server {
 	s := &Server{
 		cfg:      cfg,
 		pipe:     pipe,
 		vectors:  vectors,
 		comments: cstore,
+		shares:   shares,
+		presence: presence.New(presence.DefaultTTL),
 		echo:     echo.New(),
 	}
 	s.echo.HideBanner = true
@@ -103,7 +154,10 @@ func (s *Server) setupMiddleware() {
 	s.echo.Use(middleware.LoggerWithConfig(middleware.LoggerConfig{
 		Format: "${time_rfc3339} ${method} ${uri} ${status} ${latency_human} ${bytes_in}b in ${bytes_out}b out\n",
 		Skipper: func(c echo.Context) bool {
-			return c.Path() == "/health"
+			p := c.Path()
+			// Health + readiness + metrics probes fire every few
+			// seconds from Prometheus/Kubernetes and flood the log.
+			return p == "/health" || p == "/healthz" || p == "/readyz" || p == "/metrics"
 		},
 	}))
 	// CORS: when auth=none we restrict to localhost so a random webpage on
@@ -131,7 +185,8 @@ func (s *Server) setupMiddleware() {
 	// the health endpoint into 429 and make the pod look unhealthy).
 	s.echo.Use(middleware.RateLimiterWithConfig(middleware.RateLimiterConfig{
 		Skipper: func(c echo.Context) bool {
-			return c.Path() == "/health"
+			p := c.Path()
+			return p == "/health" || p == "/healthz" || p == "/readyz" || p == "/metrics"
 		},
 		Store: middleware.NewRateLimiterMemoryStoreWithConfig(middleware.RateLimiterMemoryStoreConfig{
 			Rate:      100,
@@ -147,49 +202,96 @@ func (s *Server) setupMiddleware() {
 	}))
 }
 
-// authMiddleware builds the configured authentication middleware or
-// returns nil when auth is off. Callers apply it to /api/kiwi only —
-// /health must stay reachable to LB probes (a token-gated health check
-// defeats the point of a health check), and the SPA catch-all serves
-// the static UI bundle which is the login entrypoint rather than a
-// protected resource.
+// authMiddleware builds the dynamic authentication middleware. It reads
+// the live key set from s.auth on every request so ReloadAuth (wired to
+// SIGHUP) can swap API keys without a process restart.
+//
+// Callers apply it to /api/kiwi only — /health must stay reachable to
+// LB probes (a token-gated health check defeats the point of a health
+// check), and the SPA catch-all serves the static UI bundle which is
+// the login entrypoint rather than a protected resource.
 func (s *Server) authMiddleware() echo.MiddlewareFunc {
-	switch s.cfg.Auth.Type {
-	case "apikey":
-		if s.cfg.Auth.APIKey != "" {
-			return apiKeyMiddleware(s.cfg.Auth.APIKey)
-		}
-	case "perspace":
-		if len(s.cfg.Auth.APIKeys) > 0 {
-			return perSpaceKeyMiddleware(s.cfg.Auth.APIKeys)
-		}
-	case "oidc":
-		if s.cfg.Auth.OIDC.Issuer != "" {
-			p, err := oidc.NewProvider(context.Background(), s.cfg.Auth.OIDC.Issuer)
-			if err != nil {
-				log.Printf("warning: OIDC provider setup failed (%v) — auth disabled", err)
-				return nil
+	s.installAuth(&s.cfg.Auth)
+	return func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error {
+			la := s.auth.Load()
+			if la == nil {
+				return next(c)
 			}
-			verifier := p.Verifier(&oidc.Config{ClientID: s.cfg.Auth.OIDC.ClientID})
-			return oidcMiddleware(verifier)
+			switch la.typ {
+			case "apikey":
+				if la.global == "" {
+					return next(c)
+				}
+				return apiKeyHandler(la.global)(next)(c)
+			case "perspace":
+				if len(la.keys) == 0 {
+					return next(c)
+				}
+				return perSpaceKeyHandler(la.keys)(next)(c)
+			case "oidc":
+				if la.oidcMW == nil {
+					return next(c)
+				}
+				return la.oidcMW(next)(c)
+			}
+			return next(c)
 		}
 	}
-	return nil
+}
+
+// ReloadAuth replaces the live key set used by authMiddleware. It's
+// safe to call concurrently with in-flight requests — the atomic
+// pointer swap means every request either sees the old keys or the new
+// keys, never a partial mix. OIDC issuer changes require a restart
+// because the JWKS cache is held inside the provider value.
+func (s *Server) ReloadAuth(cfg *config.AuthConfig) {
+	s.installAuth(cfg)
+	log.Printf("auth: reloaded (type=%s)", cfg.Type)
+}
+
+// installAuth builds a fresh liveAuth from the given config and atomic-
+// stores it into s.auth. Shared between NewServer and ReloadAuth so the
+// startup path and the hot-reload path stay in sync.
+func (s *Server) installAuth(cfg *config.AuthConfig) {
+	next := &liveAuth{typ: cfg.Type, global: cfg.APIKey, keys: cfg.APIKeys, oidcIss: cfg.OIDC.Issuer}
+	// Preserve the OIDC verifier across reloads when the issuer hasn't
+	// changed — building a new one requires a network round-trip to the
+	// JWKS endpoint, which SIGHUP would force on every reload.
+	if cur := s.auth.Load(); cur != nil && cur.oidcIss == next.oidcIss && cur.oidcMW != nil {
+		next.oidcMW = cur.oidcMW
+	} else if cfg.Type == "oidc" && cfg.OIDC.Issuer != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		p, err := oidc.NewProvider(ctx, cfg.OIDC.Issuer)
+		if err != nil {
+			log.Printf("warning: OIDC provider setup failed (%v) — auth disabled", err)
+		} else {
+			verifier := p.Verifier(&oidc.Config{ClientID: cfg.OIDC.ClientID})
+			next.oidcMW = oidcMiddleware(verifier)
+		}
+	}
+	s.auth.Store(next)
 }
 
 func (s *Server) setupRoutes() {
 	h := &Handlers{
-		store:     s.pipe.Store,
-		versioner: s.pipe.Versioner,
-		searcher:  s.pipe.Searcher,
-		linker:    s.pipe.Linker,
-		hub:       s.pipe.Hub,
-		pipe:      s.pipe,
-		vectors:   s.vectors,
-		comments:  s.comments,
-		assets:    s.cfg.Assets,
-		ui:        s.cfg.UI,
-		root:      s.pipe.Store.AbsPath(""),
+		store:            s.pipe.Store,
+		versioner:        s.pipe.Versioner,
+		searcher:         s.pipe.Searcher,
+		linker:           s.pipe.Linker,
+		hub:              s.pipe.Hub,
+		pipe:             s.pipe,
+		vectors:          s.vectors,
+		comments:         s.comments,
+		shares:           s.shares,
+		presence:         s.presence,
+		assets:           s.cfg.Assets,
+		ui:               s.cfg.UI,
+		root:             s.pipe.Store.AbsPath(""),
+		janitorSched:     s.janitorSched,
+		janitorStaleDays: s.cfg.Janitor.StaleDays,
+		reminders:        s.reminders,
 	}
 	// Chain cache invalidation onto the pipeline's fan-out so any write —
 	// REST, WebDAV, NFS, S3, fsnotify — drops the /graph cache. Chained
@@ -205,6 +307,14 @@ func (s *Server) setupRoutes() {
 
 	// /health stays outside any auth middleware so LB probes can reach it.
 	s.echo.GET("/health", h.Health)
+	// /healthz + /readyz + /metrics sit next to /health for ops tooling.
+	// Keeping them unauthenticated mirrors how every major server (etcd,
+	// kubelet, Prometheus itself) exposes these — a bearer-gated probe
+	// defeats the entire point. Operators who need tighter scoping
+	// should put the server behind an internal ingress.
+	s.echo.GET("/healthz", h.Healthz)
+	s.echo.GET("/readyz", h.Readyz)
+	s.echo.GET("/metrics", h.Metrics)
 
 	api := s.echo.Group("/api/kiwi")
 	if mw := s.authMiddleware(); mw != nil {
@@ -217,9 +327,13 @@ func (s *Server) setupRoutes() {
 	api.POST("/bulk", h.BulkWrite)
 	api.POST("/assets", h.UploadAsset)
 	api.GET("/search", h.Search)
+	api.GET("/search/verified", h.VerifiedSearch)
 	api.POST("/search/semantic", h.SemanticSearch)
 	api.GET("/search/semantic", h.SemanticSearch)
 	api.GET("/meta", h.Meta)
+	api.PATCH("/meta", h.PatchMeta)
+	api.GET("/stale", h.StalePages)
+	api.GET("/contradictions", h.Contradictions)
 	api.GET("/versions", h.Versions)
 	api.GET("/version", h.Version)
 	api.GET("/diff", h.Diff)
@@ -237,6 +351,28 @@ func (s *Server) setupRoutes() {
 	api.GET("/theme", h.GetTheme)
 	api.PUT("/theme", h.PutTheme)
 	api.GET("/ui-config", h.UIConfig)
+	api.GET("/janitor", h.Janitor)
+
+	// Share links (auth required)
+	api.POST("/share", h.CreateShareLink)
+	api.GET("/share", h.ListShareLinks)
+	api.DELETE("/share/:id", h.RevokeShareLink)
+
+	// Presence / collaborative banner (auth required)
+	api.POST("/presence", h.PresenceHeartbeat)
+	api.GET("/presence", h.PresenceList)
+	api.DELETE("/presence", h.PresenceLeave)
+
+	// Workflow (auth required)
+	api.GET("/workflow", h.GetWorkflow)
+	api.PATCH("/workflow/task", h.UpdateTask)
+	api.PATCH("/workflow/approval", h.UpdateApproval)
+	api.GET("/workflow/reminders", h.WorkflowReminders)
+
+	// Public access — registered outside the auth group so no token is needed.
+	s.echo.GET("/api/kiwi/public/:token", h.PublicPage)
+	s.echo.GET("/api/kiwi/public/file", h.PublicFile)
+	s.echo.GET("/api/kiwi/public/tree", h.PublicTree)
 
 	// Embedded UI — must be last so it acts as a catch-all SPA fallback.
 	// /api/* and /health are matched above this.
@@ -252,12 +388,80 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) Start(addr string) error {
+	// Start the background janitor before accepting HTTP. If the
+	// scheduler is nil (no config / disabled) this is a no-op. We tie
+	// its context to the echo server's lifetime via a cancel we save
+	// into s for Shutdown to trigger.
+	if s.janitorSched != nil {
+		ctx, cancel := context.WithCancel(context.Background())
+		s.janitorCancel = cancel
+		s.janitorSched.Start(ctx)
+	}
+	// Workflow reminder sweeper. Same lifetime contract as the janitor:
+	// a cancel func saved on s so Shutdown can bring the goroutine
+	// down cleanly, even under SIGTERM.
+	if s.reminders != nil {
+		ctx, cancel := context.WithCancel(context.Background())
+		s.remindersCancel = cancel
+		s.reminders.Start(ctx)
+	}
+	// Presence sweeper: walks the tracker every TTL/2 and broadcasts
+	// an empty presence event for any page whose last live actor just
+	// dropped off (tab closed, laptop slept). Without this, "Alice is
+	// editing this page" lingers forever if Alice's browser never
+	// explicitly Leave()-s.
+	if s.presence != nil {
+		ctx, cancel := context.WithCancel(context.Background())
+		s.presenceCancel = cancel
+		go s.runPresenceSweeper(ctx)
+	}
 	return s.echo.Start(addr)
+}
+
+func (s *Server) runPresenceSweeper(ctx context.Context) {
+	t := time.NewTicker(presence.DefaultTTL / 2)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if s.presence == nil {
+				return
+			}
+			changed := s.presence.Sweep()
+			for _, path := range changed {
+				live := s.presence.List(path)
+				s.pipe.Hub.Broadcast(events.Event{
+					Op:   "presence",
+					Path: path,
+					Extra: map[string]any{
+						"viewers": live,
+					},
+				})
+			}
+		}
+	}
 }
 
 // Shutdown closes the HTTP server gracefully, waiting for in-flight
 // requests to finish (bounded by the caller's ctx deadline).
 func (s *Server) Shutdown(ctx context.Context) error {
+	if s.janitorCancel != nil {
+		s.janitorCancel()
+	}
+	if s.janitorSched != nil {
+		s.janitorSched.Stop()
+	}
+	if s.presenceCancel != nil {
+		s.presenceCancel()
+	}
+	if s.remindersCancel != nil {
+		s.remindersCancel()
+	}
+	if s.reminders != nil {
+		s.reminders.Stop()
+	}
 	return s.echo.Shutdown(ctx)
 }
 
@@ -302,6 +506,14 @@ func isLoopbackOrigin(origin string) bool {
 }
 
 func apiKeyMiddleware(key string) echo.MiddlewareFunc {
+	return apiKeyHandler(key)
+}
+
+// apiKeyHandler returns the middleware for a single global API key. It's
+// separate from apiKeyMiddleware so the dynamic wrapper in
+// authMiddleware can invoke the compiled handler directly on every
+// request without indirection through an extra closure layer.
+func apiKeyHandler(key string) echo.MiddlewareFunc {
 	expected := []byte("Bearer " + key)
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
@@ -320,6 +532,10 @@ func apiKeyMiddleware(key string) echo.MiddlewareFunc {
 }
 
 func perSpaceKeyMiddleware(keys []config.APIKeyEntry) echo.MiddlewareFunc {
+	return perSpaceKeyHandler(keys)
+}
+
+func perSpaceKeyHandler(keys []config.APIKeyEntry) echo.MiddlewareFunc {
 	type entry struct {
 		hash  [32]byte
 		space string

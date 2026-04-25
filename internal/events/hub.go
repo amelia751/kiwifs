@@ -18,11 +18,16 @@ var ErrTooManySubscribers = errors.New("sse: too many subscribers")
 
 // Event is broadcast to all connected SSE clients.
 type Event struct {
-	Op    string   `json:"op"`              // "write", "delete", "bulk", "comment.add", ...
+	Op    string   `json:"op"`              // "write", "delete", "bulk", "comment.add", "janitor", ...
 	Path  string   `json:"path,omitempty"`  // single-file ops
 	Paths []string `json:"paths,omitempty"` // bulk ops
 	Actor string   `json:"actor,omitempty"`
 	ETag  string   `json:"etag,omitempty"`
+	// Extra carries event-type-specific payload (janitor scan summary,
+	// presence viewer list, etc.). Keep to small primitive maps — SSE
+	// consumers don't want to decode a 10 MB janitor issue list over
+	// the wire; that comes through the dedicated REST endpoint.
+	Extra map[string]any `json:"extra,omitempty"`
 }
 
 // Message is what each SSE writer actually pushes to the wire. Carrying the

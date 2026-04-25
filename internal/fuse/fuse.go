@@ -41,6 +41,14 @@ type Client struct {
 	remote string // remote KiwiFS server URL (e.g., "http://localhost:3333")
 	client *http.Client
 
+	// auth, when set, is injected into every outbound request. See
+	// NewClientWithAuth / ClientAuth for the accepted shapes.
+	auth *ClientAuth
+
+	// space selects a named knowledge space on multi-space deployments.
+	// Sent as X-Kiwi-Space; leave empty for the default space.
+	space string
+
 	cacheMu sync.RWMutex
 	dirs    map[string]*dirCacheEntry  // keyed by dir path
 	files   map[string]*fileCacheEntry // keyed by file path
@@ -56,7 +64,33 @@ type fileCacheEntry struct {
 	stamp time.Time
 }
 
-// NewClient creates a new FUSE client.
+// ClientAuth is a tagged union for the authentication styles kiwifs
+// supports. Exactly one of APIKey / Bearer / Basic should be non-zero.
+// Zero-value means "no auth header".
+type ClientAuth struct {
+	// APIKey is sent verbatim as `X-API-Key: <value>` — matches the
+	// server's `auth.api_key` / per-space API key middleware.
+	APIKey string
+
+	// Bearer is sent as `Authorization: Bearer <value>` — use with the
+	// OIDC flow or any JWT-issuing proxy in front of kiwifs.
+	Bearer string
+
+	// BasicUser/BasicPass, when both set, emit an HTTP Basic header.
+	// Useful for Caddy / nginx basic-auth wrappers.
+	BasicUser string
+	BasicPass string
+}
+
+func (a *ClientAuth) empty() bool {
+	if a == nil {
+		return true
+	}
+	return a.APIKey == "" && a.Bearer == "" && (a.BasicUser == "" || a.BasicPass == "")
+}
+
+// NewClient creates a new FUSE client with no authentication. For protected
+// servers prefer NewClientWithAuth.
 func NewClient(remote string) *Client {
 	return &Client{
 		remote: strings.TrimSuffix(remote, "/"),
@@ -64,6 +98,48 @@ func NewClient(remote string) *Client {
 		dirs:   make(map[string]*dirCacheEntry),
 		files:  make(map[string]*fileCacheEntry),
 	}
+}
+
+// NewClientWithAuth constructs a client that attaches auth and an optional
+// space selector to every outbound request. Pass a nil or empty auth to
+// disable authentication.
+func NewClientWithAuth(remote string, auth *ClientAuth, space string) *Client {
+	c := NewClient(remote)
+	if !auth.empty() {
+		c.auth = auth
+	}
+	c.space = space
+	return c
+}
+
+// do is the authenticated request helper. Every FUSE codepath MUST route
+// through here so auth and space selection are never forgotten.
+func (c *Client) do(req *http.Request) (*http.Response, error) {
+	if c.auth != nil {
+		if c.auth.APIKey != "" {
+			req.Header.Set("X-API-Key", c.auth.APIKey)
+		}
+		if c.auth.Bearer != "" {
+			req.Header.Set("Authorization", "Bearer "+c.auth.Bearer)
+		}
+		if c.auth.BasicUser != "" && c.auth.BasicPass != "" {
+			req.SetBasicAuth(c.auth.BasicUser, c.auth.BasicPass)
+		}
+	}
+	if c.space != "" {
+		req.Header.Set("X-Kiwi-Space", c.space)
+	}
+	return c.client.Do(req)
+}
+
+// get is a tiny GET helper that routes through do() so auth is always
+// attached. Prefer this over client.Get in new code.
+func (c *Client) get(url string) (*http.Response, error) {
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	return c.do(req)
 }
 
 // Mount mounts the remote KiwiFS at the given mountpoint.
@@ -162,13 +238,16 @@ func (n *kiwiNode) statFile() (int64, bool, syscall.Errno) {
 	if cached := n.client.cachedFile(n.path); cached != nil {
 		return int64(len(cached)), true, 0
 	}
-	resp, err := n.client.client.Get(n.client.apiURL("/api/kiwi/file", n.path))
+	resp, err := n.client.get(n.client.apiURL("/api/kiwi/file", n.path))
 	if err != nil {
 		return 0, false, syscall.EIO
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
 		return 0, false, 0
+	}
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return 0, false, syscall.EACCES
 	}
 	if resp.StatusCode != http.StatusOK {
 		return 0, false, syscall.EIO
@@ -237,13 +316,16 @@ func (n *kiwiNode) listDir() ([]fuse.DirEntry, syscall.Errno) {
 	if cached := n.client.cachedDir(n.path); cached != nil {
 		return cached, 0
 	}
-	resp, err := n.client.client.Get(n.client.apiURL("/api/kiwi/tree", n.path))
+	resp, err := n.client.get(n.client.apiURL("/api/kiwi/tree", n.path))
 	if err != nil {
 		return nil, syscall.EIO
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, syscall.ENOENT
+	}
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return nil, syscall.EACCES
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, syscall.EIO
@@ -343,12 +425,15 @@ func (n *kiwiNode) Unlink(ctx context.Context, name string) syscall.Errno {
 	}
 
 	req, _ := http.NewRequest("DELETE", n.client.apiURL("/api/kiwi/file", childPath), nil)
-	resp, err := n.client.client.Do(req)
+	resp, err := n.client.do(req)
 	if err != nil {
 		return syscall.EIO
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return syscall.EACCES
+	}
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
 		return syscall.EIO
 	}
@@ -371,11 +456,14 @@ func (n *kiwiNode) Mkdir(ctx context.Context, name string, mode uint32, out *fus
 	req, _ := http.NewRequest("PUT", n.client.apiURL("/api/kiwi/file", placeholder), bytes.NewReader(nil))
 	req.Header.Set("Content-Type", "application/octet-stream")
 	req.Header.Set("X-Actor", "fuse")
-	resp, err := n.client.client.Do(req)
+	resp, err := n.client.do(req)
 	if err != nil {
 		return nil, syscall.EIO
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return nil, syscall.EACCES
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, syscall.EIO
 	}
@@ -416,12 +504,15 @@ func (f *kiwiFile) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadR
 		}
 	}
 	if f.data == nil {
-		resp, err := f.client.client.Get(f.client.apiURL("/api/kiwi/file", f.node.path))
+		resp, err := f.client.get(f.client.apiURL("/api/kiwi/file", f.node.path))
 		if err != nil {
 			return nil, syscall.EIO
 		}
 		defer resp.Body.Close()
 
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			return nil, syscall.EACCES
+		}
 		if resp.StatusCode != http.StatusOK {
 			return nil, syscall.ENOENT
 		}
@@ -473,12 +564,15 @@ func (f *kiwiFile) Flush(ctx context.Context) syscall.Errno {
 	req.Header.Set("Content-Type", "application/octet-stream")
 	req.Header.Set("X-Actor", "fuse")
 
-	resp, err := f.client.client.Do(req)
+	resp, err := f.client.do(req)
 	if err != nil {
 		return syscall.EIO
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return syscall.EACCES
+	}
 	if resp.StatusCode != http.StatusOK {
 		return syscall.EIO
 	}

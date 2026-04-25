@@ -4,11 +4,13 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 	"unicode"
@@ -141,7 +143,13 @@ CREATE TABLE IF NOT EXISTS file_meta (
 	frontmatter TEXT NOT NULL DEFAULT '{}',
 	updated_at TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_meta_status ON file_meta(json_extract(frontmatter, '$.status'));`
+CREATE INDEX IF NOT EXISTS idx_meta_status ON file_meta(json_extract(frontmatter, '$.status'));
+CREATE INDEX IF NOT EXISTS idx_meta_owner ON file_meta(json_extract(frontmatter, '$.owner'));
+CREATE INDEX IF NOT EXISTS idx_meta_confidence ON file_meta(json_extract(frontmatter, '$.confidence'));
+CREATE INDEX IF NOT EXISTS idx_meta_source_of_truth ON file_meta(json_extract(frontmatter, '$.source-of-truth'));
+CREATE INDEX IF NOT EXISTS idx_meta_reviewed ON file_meta(json_extract(frontmatter, '$.reviewed'));
+CREATE INDEX IF NOT EXISTS idx_meta_next_review ON file_meta(json_extract(frontmatter, '$.next-review'));
+CREATE INDEX IF NOT EXISTS idx_meta_visibility ON file_meta(json_extract(frontmatter, '$.visibility'));`
 	_, err := s.writeDB.ExecContext(ctx, ddl)
 	if err != nil {
 		return fmt.Errorf("create schema: %w", err)
@@ -278,6 +286,69 @@ func (s *SQLite) RemoveAll(ctx context.Context, path string) error {
 
 func (s *SQLite) Reindex(ctx context.Context) (int, error) {
 	return s.reindexLocked(ctx)
+}
+
+// Resync reconciles the search index with the underlying storage without
+// throwing everything away. It handles the common "someone edited the git
+// repo directly while the server was down" case: we add rows for files on
+// disk that aren't indexed, and drop rows for files that no longer exist.
+//
+// It does NOT detect content changes — for that you'd need a full reindex
+// — but the far cheaper add/remove pass is enough to keep the tree and
+// search in sync after routine git operations.
+func (s *SQLite) Resync(ctx context.Context) (added, removed int, err error) {
+	rows, err := s.readDB.QueryContext(ctx, `SELECT path FROM docs`)
+	if err != nil {
+		return 0, 0, fmt.Errorf("list indexed: %w", err)
+	}
+	indexed := make(map[string]struct{})
+	for rows.Next() {
+		var p string
+		if serr := rows.Scan(&p); serr != nil {
+			rows.Close()
+			return 0, 0, serr
+		}
+		indexed[p] = struct{}{}
+	}
+	rows.Close()
+	if rerr := rows.Err(); rerr != nil {
+		return 0, 0, rerr
+	}
+
+	onDisk := make(map[string]struct{})
+	walkErr := storage.Walk(ctx, s.store, "/", func(e storage.Entry) error {
+		if cerr := ctx.Err(); cerr != nil {
+			return cerr
+		}
+		onDisk[e.Path] = struct{}{}
+		if _, ok := indexed[e.Path]; ok {
+			return nil
+		}
+		content, rerr := s.store.Read(ctx, e.Path)
+		if rerr != nil {
+			return nil
+		}
+		if ierr := s.Index(ctx, e.Path, content); ierr != nil {
+			log.Printf("kiwifs search: resync index %s: %v", e.Path, ierr)
+			return nil
+		}
+		added++
+		return nil
+	})
+	if walkErr != nil {
+		return added, 0, walkErr
+	}
+	for p := range indexed {
+		if _, ok := onDisk[p]; ok {
+			continue
+		}
+		if rerr := s.Remove(ctx, p); rerr != nil {
+			log.Printf("kiwifs search: resync remove %s: %v", p, rerr)
+			continue
+		}
+		removed++
+	}
+	return added, removed, nil
 }
 
 func (s *SQLite) Close() error {
@@ -660,6 +731,375 @@ func (s *SQLite) FilterByDate(ctx context.Context, paths []string, after time.Ti
 		out = append(out, p)
 	}
 	return out, rows.Err()
+}
+
+// ─── Verified Knowledge Layer ────────────────────────────────────────────────
+
+// SearchBoosted runs a normal FTS5 search and then applies a *soft*
+// trust re-rank: verified / source-of-truth / high-confidence pages get
+// nudged up, deprecated pages nudged down, but every BM25 hit stays in
+// the result set. This is the default ranker used by the main /search
+// endpoint — a silent boost is more useful than a toggle nobody checks.
+//
+// SearchVerified below does the same lookup but with aggressive
+// multipliers that can push a page off the results list entirely; the
+// two diverged for correctness rather than a single tunable because the
+// "only show verified" and "rank verified first" UX goals pull in
+// different directions on tie-breaks.
+func (s *SQLite) SearchBoosted(ctx context.Context, query string, limit, offset int, pathPrefix string) ([]Result, error) {
+	return s.searchTrust(ctx, query, limit, offset, pathPrefix, softTrustBoost)
+}
+
+// SearchVerified runs a normal FTS5 search and then re-ranks results by
+// trust signals stored in file_meta frontmatter. The boosted TrustScore
+// replaces raw BM25 ordering so verified, high-confidence pages float to
+// the top.
+func (s *SQLite) SearchVerified(ctx context.Context, query string, limit, offset int, pathPrefix string) ([]Result, error) {
+	return s.searchTrust(ctx, query, limit, offset, pathPrefix, hardTrustBoost)
+}
+
+// searchTrust is the shared re-ranking path for SearchVerified (hard
+// multipliers, intended for the "Verified" chip) and SearchBoosted
+// (soft multipliers, used as the default sort). The boost callback
+// returns the multiplier for a given frontmatter map; the search path
+// otherwise uses the same BM25 candidates, frontmatter lookup, and
+// paging logic to keep trust-ranked results comparable to the plain
+// /search list.
+func (s *SQLite) searchTrust(ctx context.Context, query string, limit, offset int, pathPrefix string, boostFn func(map[string]any) float64) ([]Result, error) {
+	// Over-fetch so we have enough candidates after re-ranking and slicing.
+	fetchLimit := limit * 3
+	if fetchLimit < 60 {
+		fetchLimit = 60
+	}
+	results, err := s.Search(ctx, query, fetchLimit, 0, pathPrefix)
+	if err != nil {
+		return nil, err
+	}
+	if len(results) == 0 {
+		return results, nil
+	}
+
+	paths := make([]string, len(results))
+	for i, r := range results {
+		paths[i] = r.Path
+	}
+
+	placeholders := make([]string, len(paths))
+	args := make([]any, len(paths))
+	for i, p := range paths {
+		placeholders[i] = "?"
+		args[i] = p
+	}
+	q := fmt.Sprintf(
+		`SELECT path, frontmatter FROM file_meta WHERE path IN (%s)`,
+		strings.Join(placeholders, ","),
+	)
+	rows, err := s.readDB.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("search verified meta lookup: %w", err)
+	}
+	defer rows.Close()
+
+	fmMap := make(map[string]map[string]any, len(paths))
+	for rows.Next() {
+		var path, raw string
+		if err := rows.Scan(&path, &raw); err != nil {
+			return nil, err
+		}
+		fm := map[string]any{}
+		if raw != "" {
+			_ = json.Unmarshal([]byte(raw), &fm)
+		}
+		fmMap[path] = fm
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	for i := range results {
+		fm := fmMap[results[i].Path]
+		boost := boostFn(fm)
+		if boost <= 0 {
+			boost = 1.0
+		}
+		results[i].TrustScore = results[i].Score * boost
+	}
+
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].TrustScore > results[j].TrustScore
+	})
+
+	if offset >= len(results) {
+		return nil, nil
+	}
+	results = results[offset:]
+	if len(results) > limit {
+		results = results[:limit]
+	}
+	return results, nil
+}
+
+// hardTrustBoost is the legacy multiplier policy: "verified" pages get a
+// 2x bump, a source-of-truth flag triples them, and deprecated pages
+// drop to 0.1x. Intended for the opt-in "Verified" search chip where
+// people explicitly want only canonical content at the top.
+func hardTrustBoost(fm map[string]any) float64 {
+	boost := 1.0
+	if status, _ := fm["status"].(string); status != "" {
+		switch strings.ToLower(status) {
+		case "verified":
+			boost *= 2.0
+		case "deprecated":
+			boost *= 0.1
+		case "outdated":
+			boost *= 0.3
+		}
+	}
+	if sot, ok := fm["source-of-truth"]; ok {
+		if b, isBool := sot.(bool); isBool && b {
+			boost *= 3.0
+		}
+	}
+	if conf, ok := fm["confidence"]; ok {
+		var cv float64
+		switch v := conf.(type) {
+		case float64:
+			cv = v
+		case int:
+			cv = float64(v)
+		}
+		if cv > 0 && cv <= 1 {
+			boost *= 1.0 + cv
+		}
+	}
+	return boost
+}
+
+// softTrustBoost is the default-ranker policy: the *same* signals matter
+// but with dampened multipliers so a non-verified but clearly-more-
+// relevant BM25 hit still wins over a verified one-liner. This is what
+// makes trust "quietly helpful" rather than a tiebreaker that buries
+// fresh content.
+func softTrustBoost(fm map[string]any) float64 {
+	boost := 1.0
+	if status, _ := fm["status"].(string); status != "" {
+		switch strings.ToLower(status) {
+		case "verified":
+			boost *= 1.2
+		case "deprecated":
+			boost *= 0.5
+		case "outdated":
+			boost *= 0.7
+		}
+	}
+	if sot, ok := fm["source-of-truth"]; ok {
+		if b, isBool := sot.(bool); isBool && b {
+			boost *= 1.4
+		}
+	}
+	if conf, ok := fm["confidence"]; ok {
+		var cv float64
+		switch v := conf.(type) {
+		case float64:
+			cv = v
+		case int:
+			cv = float64(v)
+		}
+		if cv > 0 && cv <= 1 {
+			boost *= 1.0 + 0.3*cv
+		}
+	}
+	return boost
+}
+
+// StalePages returns pages that are past their next-review date, or haven't
+// been reviewed within staleDays. Excludes deprecated/archived pages.
+func (s *SQLite) StalePages(ctx context.Context, staleDays int) ([]MetaResult, error) {
+	cutoff := time.Now().UTC().AddDate(0, 0, -staleDays).Format("2006-01-02")
+	now := time.Now().UTC().Format("2006-01-02")
+
+	// Pages with an explicit next-review date that has passed.
+	const nextReviewQ = `
+SELECT path, frontmatter FROM file_meta
+WHERE json_extract(frontmatter, '$.next-review') IS NOT NULL
+  AND json_extract(frontmatter, '$.next-review') < ?
+  AND COALESCE(json_extract(frontmatter, '$.status'), '') NOT IN ('deprecated', 'archived')
+ORDER BY json_extract(frontmatter, '$.next-review') ASC`
+
+	// Fallback: pages where reviewed < cutoff and next-review is not set.
+	const reviewedFallbackQ = `
+SELECT path, frontmatter FROM file_meta
+WHERE json_extract(frontmatter, '$.next-review') IS NULL
+  AND json_extract(frontmatter, '$.reviewed') IS NOT NULL
+  AND json_extract(frontmatter, '$.reviewed') < ?
+  AND COALESCE(json_extract(frontmatter, '$.status'), '') NOT IN ('deprecated', 'archived')
+ORDER BY json_extract(frontmatter, '$.reviewed') ASC`
+
+	seen := map[string]bool{}
+	var out []MetaResult
+
+	for _, qr := range []struct {
+		sql string
+		arg string
+	}{
+		{nextReviewQ, now},
+		{reviewedFallbackQ, cutoff},
+	} {
+		rows, err := s.readDB.QueryContext(ctx, qr.sql, qr.arg)
+		if err != nil {
+			return nil, fmt.Errorf("stale pages: %w", err)
+		}
+		for rows.Next() {
+			var path, raw string
+			if err := rows.Scan(&path, &raw); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			if seen[path] {
+				continue
+			}
+			seen[path] = true
+			fm := map[string]any{}
+			if raw != "" {
+				_ = json.Unmarshal([]byte(raw), &fm)
+			}
+			out = append(out, MetaResult{Path: path, Frontmatter: fm})
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+// FindContradictions looks for pages that share tags/topics with the given
+// path but have conflicting trust signals (different status or competing
+// source-of-truth claims).
+func (s *SQLite) FindContradictions(ctx context.Context, path string) ([]string, error) {
+	var raw string
+	err := s.readDB.QueryRowContext(ctx,
+		`SELECT frontmatter FROM file_meta WHERE path = ?`, path,
+	).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		// Page is not in the meta index yet (e.g. no frontmatter, or just
+		// written). That's expected — treat it as "nothing to contradict".
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("find contradictions: %w", err)
+	}
+	if raw == "" {
+		return nil, nil
+	}
+	var fm map[string]any
+	if err := json.Unmarshal([]byte(raw), &fm); err != nil {
+		return nil, fmt.Errorf("parse frontmatter: %w", err)
+	}
+
+	tags := extractStringSlice(fm, "tags")
+	tags = append(tags, extractStringSlice(fm, "topics")...)
+	if len(tags) == 0 {
+		return nil, nil
+	}
+
+	status, _ := fm["status"].(string)
+	isSoT := false
+	if sot, ok := fm["source-of-truth"]; ok {
+		isSoT, _ = sot.(bool)
+	}
+
+	// Find pages sharing any tag/topic via json_each.
+	placeholders := make([]string, len(tags))
+	args := make([]any, len(tags))
+	for i, t := range tags {
+		placeholders[i] = "?"
+		args[i] = strings.ToLower(t)
+	}
+	args = append(args, path)
+
+	q := fmt.Sprintf(`
+SELECT DISTINCT fm.path, fm.frontmatter FROM file_meta fm
+WHERE fm.path != ?
+  AND (
+    EXISTS (
+      SELECT 1 FROM json_each(fm.frontmatter, '$.tags') jt
+      WHERE LOWER(jt.value) IN (%s)
+    )
+    OR EXISTS (
+      SELECT 1 FROM json_each(fm.frontmatter, '$.topics') jt
+      WHERE LOWER(jt.value) IN (%s)
+    )
+  )`,
+		strings.Join(placeholders, ","),
+		strings.Join(placeholders, ","),
+	)
+
+	// args order: tags... tags... path
+	// But the query has path first (fm.path != ?), then tags twice.
+	// Reorder: path, tags..., tags...
+	queryArgs := make([]any, 0, 1+2*len(tags))
+	queryArgs = append(queryArgs, path)
+	queryArgs = append(queryArgs, args[:len(tags)]...)
+	queryArgs = append(queryArgs, args[:len(tags)]...)
+
+	rows, err := s.readDB.QueryContext(ctx, q, queryArgs...)
+	if err != nil {
+		return nil, fmt.Errorf("find contradictions query: %w", err)
+	}
+	defer rows.Close()
+
+	var contradictions []string
+	for rows.Next() {
+		var otherPath, otherRaw string
+		if err := rows.Scan(&otherPath, &otherRaw); err != nil {
+			return nil, err
+		}
+		var otherFM map[string]any
+		if err := json.Unmarshal([]byte(otherRaw), &otherFM); err != nil {
+			continue
+		}
+
+		otherStatus, _ := otherFM["status"].(string)
+		otherSoT := false
+		if sot, ok := otherFM["source-of-truth"]; ok {
+			otherSoT, _ = sot.(bool)
+		}
+
+		conflicting := false
+		if status != "" && otherStatus != "" && !strings.EqualFold(status, otherStatus) {
+			conflicting = true
+		}
+		if isSoT && otherSoT {
+			conflicting = true
+		}
+		if conflicting {
+			contradictions = append(contradictions, otherPath)
+		}
+	}
+	return contradictions, rows.Err()
+}
+
+func extractStringSlice(fm map[string]any, key string) []string {
+	val, ok := fm[key]
+	if !ok {
+		return nil
+	}
+	switch v := val.(type) {
+	case []any:
+		out := make([]string, 0, len(v))
+		for _, item := range v {
+			if s, ok := item.(string); ok && s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	case string:
+		if v != "" {
+			return []string{v}
+		}
+	}
+	return nil
 }
 
 // ─── Internals ──────────────────────────────────────────────────────────────

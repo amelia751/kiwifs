@@ -22,6 +22,9 @@ type Result struct {
 	// Snippet is a short highlighted excerpt around the best match.
 	// Empty for engines that don't produce snippets (grep).
 	Snippet string `json:"snippet,omitempty"`
+	// TrustScore is the BM25 score adjusted by trust signals (status, confidence,
+	// source-of-truth). Only populated by TrustSearcher.SearchVerified.
+	TrustScore float64 `json:"trustScore,omitempty"`
 }
 
 // DefaultSearchLimit is the default number of results returned when the
@@ -63,6 +66,40 @@ type Searcher interface {
 // per-file stat calls.
 type DateFilterer interface {
 	FilterByDate(ctx context.Context, paths []string, after time.Time) ([]string, error)
+}
+
+// TrustSearcher is implemented by search backends that support trust-boosted ranking.
+type TrustSearcher interface {
+	// SearchVerified returns only pages whose trust signals clear a
+	// high bar (status == verified, source-of-truth == true, or a
+	// confidence > 0.8). Zero results is normal: the caller explicitly
+	// asked for the "only canonical" view.
+	SearchVerified(ctx context.Context, query string, limit, offset int, pathPrefix string) ([]Result, error)
+	// SearchBoosted returns the same set of hits as a plain BM25
+	// search, but re-ranks them with a soft trust multiplier so
+	// verified pages bubble up. Unlike SearchVerified, a page with no
+	// trust metadata still appears in results — it just doesn't get
+	// the boost.
+	SearchBoosted(ctx context.Context, query string, limit, offset int, pathPrefix string) ([]Result, error)
+}
+
+// StaleDetector is implemented by search backends that can identify pages
+// past their review date or not reviewed within a given window.
+type StaleDetector interface {
+	StalePages(ctx context.Context, staleDays int) ([]MetaResult, error)
+}
+
+// ContradictionDetector is implemented by search backends that can find
+// pages with overlapping topics but conflicting trust signals.
+type ContradictionDetector interface {
+	FindContradictions(ctx context.Context, path string) ([]string, error)
+}
+
+// Resyncer is implemented by search backends that support an incremental
+// reconciliation with underlying storage (used at startup to catch
+// out-of-band filesystem changes made while the server was down).
+type Resyncer interface {
+	Resync(ctx context.Context) (added, removed int, err error)
 }
 
 // NormalizeLimit clamps a caller-supplied limit into [1, MaxSearchLimit].
