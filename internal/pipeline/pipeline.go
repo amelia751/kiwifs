@@ -327,7 +327,7 @@ func (p *Pipeline) Write(ctx context.Context, path string, content []byte, actor
 	return p.WriteWithOpts(ctx, path, content, actor, WriteOpts{})
 }
 
-// streamInMemoryThreshold bounds the size of an upload we'll fully buffer
+// StreamInMemoryThreshold bounds the size of an upload we'll fully buffer
 // in RAM before hitting pipeline.Write. Requests above this threshold go
 // through WriteStream, which spools the body to a temp file first and
 // avoids accumulating gigabytes for a single S3 / WebDAV upload.
@@ -335,7 +335,7 @@ func (p *Pipeline) Write(ctx context.Context, path string, content []byte, actor
 // 16 MB comfortably fits agent-generated markdown runs and CSV exports;
 // large media files (screen recordings, datasets) will take the streaming
 // path.
-const streamInMemoryThreshold = 16 * 1024 * 1024
+const StreamInMemoryThreshold = 16 * 1024 * 1024
 
 // WriteStream persists a potentially-large payload without buffering the
 // whole body in memory. The caller passes an io.Reader (e.g. an HTTP
@@ -358,10 +358,10 @@ func (p *Pipeline) WriteStream(ctx context.Context, path string, body io.Reader,
 	}
 	// Small payload + caller told us the size: avoid all the tempfile
 	// dance and keep the behavior identical to Write().
-	if sizeHint >= 0 && sizeHint <= streamInMemoryThreshold {
+	if sizeHint >= 0 && sizeHint <= StreamInMemoryThreshold {
 		buf := make([]byte, 0, sizeHint)
 		bb := bytes.NewBuffer(buf)
-		if _, err := io.Copy(bb, io.LimitReader(body, streamInMemoryThreshold+1)); err != nil {
+		if _, err := io.Copy(bb, io.LimitReader(body, StreamInMemoryThreshold+1)); err != nil {
 			return Result{}, fmt.Errorf("read body: %w", err)
 		}
 		return p.Write(ctx, path, bb.Bytes(), actor)
@@ -391,6 +391,9 @@ func (p *Pipeline) WriteStream(ctx context.Context, path string, body io.Reader,
 	}
 	defer cleanup()
 	n, err := io.Copy(tmp, body)
+	if err == nil {
+		err = tmp.Sync()
+	}
 	if cerr := tmp.Close(); err == nil {
 		err = cerr
 	}
@@ -401,7 +404,7 @@ func (p *Pipeline) WriteStream(ctx context.Context, path string, body io.Reader,
 	// Re-open and read back only if this is a knowledge file small
 	// enough to index; large binaries get a streaming in-place write
 	// that skips the FTS + vector fan-out entirely.
-	knowledgeIndex := storage.IsKnowledgeFile(path) && n <= streamInMemoryThreshold
+	knowledgeIndex := storage.IsKnowledgeFile(path) && n <= StreamInMemoryThreshold
 	var content []byte
 	if knowledgeIndex {
 		content, err = os.ReadFile(tmpName)

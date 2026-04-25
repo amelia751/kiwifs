@@ -251,8 +251,7 @@ func (a *adapter) HeadObject(bucket, key string) (*gofakes3.Object, error) {
 
 // s3StreamThreshold picks the point at which we route a PUT through the
 // streaming pipeline path rather than buffering the whole body in RAM.
-// It's set to match pipeline.streamInMemoryThreshold.
-const s3StreamThreshold = 16 * 1024 * 1024
+const s3StreamThreshold = pipeline.StreamInMemoryThreshold
 
 func (a *adapter) PutObject(bucket, key string, meta map[string]string, body io.Reader, size int64, conditions *gofakes3.PutConditions) (gofakes3.PutObjectResult, error) {
 	be, err := a.resolve(bucket)

@@ -168,7 +168,7 @@ func (h *Handlers) ReadFile(c echo.Context) error {
 	// latest write to show up on the next navigation, so we keep the
 	// validating no-cache policy. Everything else (images, PDFs, other
 	// attachments) can be cached aggressively: the ETag is content-
-	// addressable (sha256-prefix), so a mutation changes the URL's
+	// addressable (git blob SHA-1), so a mutation changes the URL's
 	// effective cache key and the browser fetches the new body. An
 	// hour of CDN-ish caching dramatically reduces page-nav bandwidth
 	// on image-heavy pages without risking stale content.

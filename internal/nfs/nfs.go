@@ -287,8 +287,7 @@ func (fs *kiwiFS) Rename(oldpath, newpath string) error {
 	if err != nil {
 		return err
 	}
-	fullNew, err := fs.safePath(newpath)
-	if err != nil {
+	if _, err := fs.safePath(newpath); err != nil {
 		return err
 	}
 
@@ -307,7 +306,6 @@ func (fs *kiwiFS) Rename(oldpath, newpath string) error {
 	if derr := fs.pipe.Delete(context.Background(), oldpath, "nfs"); derr != nil {
 		return fmt.Errorf("pipeline delete %s: %w", oldpath, derr)
 	}
-	_ = fullNew
 	return nil
 }
 

@@ -256,7 +256,7 @@ func (r *readFile) Write(_ []byte) (int, error) { return 0, os.ErrPermission }
 // in-memory buffer. Below this, we keep everything in RAM for speed; above
 // it, we swap to a tempfile + WriteStream on Close so a 2 GB upload
 // doesn't OOM the process.
-const webdavSpillThreshold = 16 * 1024 * 1024
+const webdavSpillThreshold = pipeline.StreamInMemoryThreshold
 
 // writeFile accumulates the body of a PUT. Small bodies stay in the
 // bytes.Buffer for zero-copy fan-out through pipeline.Write; larger ones
