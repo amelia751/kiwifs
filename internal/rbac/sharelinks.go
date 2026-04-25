@@ -1,6 +1,7 @@
 package rbac
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -12,7 +13,73 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
+
+const (
+	VisibilityPrivate  = "private"
+	VisibilityInternal = "internal"
+	VisibilityPublic   = "public"
+	VisibilityPassword = "password"
+)
+
+// PageVisibility extracts the visibility field from YAML frontmatter.
+// Returns VisibilityInternal when the field is absent or unparseable.
+func PageVisibility(content []byte) string {
+	fm, _, err := splitFrontmatter(content)
+	if err != nil || len(fm) == 0 {
+		return VisibilityInternal
+	}
+	var meta struct {
+		Visibility string `yaml:"visibility"`
+	}
+	if err := yaml.Unmarshal(fm, &meta); err != nil {
+		return VisibilityInternal
+	}
+	switch meta.Visibility {
+	case VisibilityPrivate, VisibilityInternal, VisibilityPublic, VisibilityPassword:
+		return meta.Visibility
+	default:
+		return VisibilityInternal
+	}
+}
+
+func splitFrontmatter(content []byte) (fm, body []byte, err error) {
+	delim := []byte("---")
+	line, rest, ok := bytes.Cut(content, []byte("\n"))
+	if !ok {
+		return nil, content, nil
+	}
+	if !bytes.Equal(bytes.TrimRight(line, "\r"), delim) {
+		return nil, content, nil
+	}
+	scanner := rest
+	pos := 0
+	for {
+		nl := bytes.IndexByte(scanner, '\n')
+		var current []byte
+		if nl < 0 {
+			current = scanner
+		} else {
+			current = scanner[:nl]
+		}
+		if bytes.Equal(bytes.TrimRight(current, "\r"), delim) {
+			fm = rest[:pos]
+			if nl < 0 {
+				body = nil
+			} else {
+				body = scanner[nl+1:]
+			}
+			return fm, body, nil
+		}
+		if nl < 0 {
+			return nil, nil, nil
+		}
+		pos += nl + 1
+		scanner = scanner[nl+1:]
+	}
+}
 
 // ShareLink is the on-disk + wire form of a public share entry.
 // PasswordHash is the sha256 hex of the (salt + password) secret, never the

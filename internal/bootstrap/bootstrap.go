@@ -22,7 +22,6 @@ import (
 	"github.com/kiwifs/kiwifs/internal/storage"
 	"github.com/kiwifs/kiwifs/internal/vectorstore"
 	"github.com/kiwifs/kiwifs/internal/versioning"
-	"github.com/kiwifs/kiwifs/internal/workflow"
 )
 
 // janitorInterval parses the configured interval or returns the default
@@ -58,7 +57,6 @@ type Stack struct {
 	Comments      *comments.Store
 	Server        *api.Server
 	JanitorSched  *janitor.Scheduler          // nil when scheduled scans are disabled
-	Reminders     *workflow.ReminderScheduler // nil when disabled
 }
 
 // Build assembles every dependency for one space. name is used as a log
@@ -138,20 +136,6 @@ func Build(name, root string, cfg *config.Config) (*Stack, error) {
 		server.SetJanitorScheduler(janitorSched)
 	}
 
-	// Workflow reminder scheduler. Walks every *.md file on the same
-	// cadence as the janitor and turns overdue tasks/approvals/pages
-	// into SSE "workflow.reminder" events + a cached inbox that the
-	// /workflow/reminders endpoint can serve without a fresh scan.
-	var reminders *workflow.ReminderScheduler
-	if iv := janitorInterval(cfg); iv > 0 {
-		reminders = workflow.NewReminderScheduler(root, hub, workflow.ReminderSchedulerOptions{
-			Interval:       iv,
-			Jitter:         60 * time.Second,
-			WarnWithinDays: 3,
-		})
-		server.SetReminderScheduler(reminders)
-	}
-
 	stack := &Stack{
 		Name:          name,
 		Root:          root,
@@ -165,7 +149,6 @@ func Build(name, root string, cfg *config.Config) (*Stack, error) {
 		Comments:      cstore,
 		Server:        server,
 		JanitorSched:  janitorSched,
-		Reminders:     reminders,
 	}
 
 	pipe.DrainUncommitted(context.Background())

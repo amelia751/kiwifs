@@ -25,13 +25,11 @@ import (
 	"github.com/kiwifs/kiwifs/internal/links"
 	"github.com/kiwifs/kiwifs/internal/markdown"
 	"github.com/kiwifs/kiwifs/internal/pipeline"
-	"github.com/kiwifs/kiwifs/internal/presence"
 	"github.com/kiwifs/kiwifs/internal/rbac"
 	"github.com/kiwifs/kiwifs/internal/search"
 	"github.com/kiwifs/kiwifs/internal/storage"
 	"github.com/kiwifs/kiwifs/internal/vectorstore"
 	"github.com/kiwifs/kiwifs/internal/versioning"
-	"github.com/kiwifs/kiwifs/internal/workflow"
 	"github.com/labstack/echo/v4"
 	"golang.org/x/sync/singleflight"
 )
@@ -51,7 +49,6 @@ type Handlers struct {
 	vectors   *vectorstore.Service // nil when vector search is disabled
 	comments  *comments.Store
 	shares    *rbac.ShareStore
-	presence  *presence.Tracker
 	assets    config.AssetsConfig
 	ui        config.UIConfig
 	root      string
@@ -65,10 +62,6 @@ type Handlers struct {
 	// threshold. Zero falls back to the 90-day default so older callers
 	// see no behaviour change.
 	janitorStaleDays int
-
-	// reminders, when set, lets /workflow/reminders answer from the
-	// scheduler's cache instead of walking the workspace on every hit.
-	reminders *workflow.ReminderScheduler
 
 	// graphCache stores the last-computed /graph response; pipeline
 	// invalidation callbacks nil it out on every write. atomic.Pointer is
@@ -146,12 +139,6 @@ func (h *Handlers) Metrics(c echo.Context) error {
 		fmt.Fprintf(&b, "# TYPE kiwi_sse_subscribers gauge\n")
 		fmt.Fprintf(&b, "kiwi_sse_subscribers %d\n", h.hub.Count())
 	}
-	if h.presence != nil {
-		pages := len(h.presence.Snapshot())
-		fmt.Fprintf(&b, "# HELP kiwi_presence_pages Pages with at least one live viewer/editor.\n")
-		fmt.Fprintf(&b, "# TYPE kiwi_presence_pages gauge\n")
-		fmt.Fprintf(&b, "kiwi_presence_pages %d\n", pages)
-	}
 	if h.janitorSched != nil {
 		if r := h.janitorSched.LastResult(); r != nil {
 			fmt.Fprintf(&b, "# HELP kiwi_janitor_issues Total janitor issues at last scan.\n")
@@ -159,12 +146,6 @@ func (h *Handlers) Metrics(c echo.Context) error {
 			fmt.Fprintf(&b, "kiwi_janitor_issues %d\n", len(r.Issues))
 		}
 	}
-	if h.reminders != nil {
-		fmt.Fprintf(&b, "# HELP kiwi_workflow_reminders Active workflow reminders.\n")
-		fmt.Fprintf(&b, "# TYPE kiwi_workflow_reminders gauge\n")
-		fmt.Fprintf(&b, "kiwi_workflow_reminders %d\n", len(h.reminders.Inbox()))
-	}
-
 	return c.Blob(http.StatusOK, "text/plain; version=0.0.4; charset=utf-8", []byte(b.String()))
 }
 
@@ -1931,271 +1912,3 @@ func (h *Handlers) buildPublicTree(ctx context.Context, path string, depth int) 
 	return root, nil
 }
 
-// ─── Workflow ────────────────────────────────────────────────────────────────
-
-// GetWorkflow returns parsed workflow metadata for a page.
-// GET /api/kiwi/workflow?path=
-func (h *Handlers) GetWorkflow(c echo.Context) error {
-	path := c.QueryParam("path")
-	if path == "" {
-		return echo.NewHTTPError(http.StatusBadRequest, "path is required")
-	}
-	content, err := h.store.Read(c.Request().Context(), path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return echo.NewHTTPError(http.StatusNotFound, "file not found")
-		}
-		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
-	}
-	wf, err := workflow.ParseWorkflow(content)
-	if err != nil {
-		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
-	}
-	if wf == nil {
-		return echo.NewHTTPError(http.StatusNotFound, "no workflow metadata in this page")
-	}
-	return c.JSON(http.StatusOK, wf)
-}
-
-// ─── Frontmatter patch ────────────────────────────────────────────────────
-
-type patchMetaRequest struct {
-	Path    string         `json:"path"`
-	Updates map[string]any `json:"updates"`
-}
-
-// PatchMeta merges a set of frontmatter key/value updates into a page without
-// touching the body. A null value removes the key. Goes through the pipeline
-// so the meta index, git commit, and SSE watchers all stay in sync.
-// PATCH /api/kiwi/meta
-func (h *Handlers) PatchMeta(c echo.Context) error {
-	var req patchMetaRequest
-	if err := c.Bind(&req); err != nil {
-		return echo.NewHTTPError(http.StatusBadRequest, "invalid JSON body")
-	}
-	if req.Path == "" {
-		return echo.NewHTTPError(http.StatusBadRequest, "path is required")
-	}
-	if len(req.Updates) == 0 {
-		return echo.NewHTTPError(http.StatusBadRequest, "updates is required")
-	}
-
-	content, err := h.store.Read(c.Request().Context(), req.Path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return echo.NewHTTPError(http.StatusNotFound, "file not found")
-		}
-		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
-	}
-
-	updated, err := workflow.MergeFrontmatter(content, req.Updates)
-	if err != nil {
-		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
-	}
-
-	actor := c.Request().Header.Get("X-Actor")
-	if actor == "" {
-		actor = pipeline.DefaultActor
-	}
-	res, err := h.pipe.Write(c.Request().Context(), req.Path, updated, actor)
-	if err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
-	}
-	return c.JSON(http.StatusOK, map[string]string{
-		"path": res.Path,
-		"etag": res.ETag,
-	})
-}
-
-type updateTaskRequest struct {
-	Path   string              `json:"path"`
-	TaskID string              `json:"taskId"`
-	Status workflow.TaskStatus `json:"status"`
-}
-
-// UpdateTask updates a workflow task's status.
-// PATCH /api/kiwi/workflow/task
-func (h *Handlers) UpdateTask(c echo.Context) error {
-	var req updateTaskRequest
-	if err := c.Bind(&req); err != nil {
-		return echo.NewHTTPError(http.StatusBadRequest, "invalid JSON body")
-	}
-	if req.Path == "" || req.TaskID == "" || req.Status == "" {
-		return echo.NewHTTPError(http.StatusBadRequest, "path, taskId, and status are required")
-	}
-
-	content, err := h.store.Read(c.Request().Context(), req.Path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return echo.NewHTTPError(http.StatusNotFound, "file not found")
-		}
-		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
-	}
-
-	actor := c.Request().Header.Get("X-Actor")
-	if actor == "" {
-		actor = pipeline.DefaultActor
-	}
-
-	updated, err := workflow.UpdateTask(content, req.TaskID, req.Status, actor)
-	if err != nil {
-		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
-	}
-
-	res, err := h.pipe.Write(c.Request().Context(), req.Path, updated, actor)
-	if err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
-	}
-	return c.JSON(http.StatusOK, map[string]string{
-		"path": res.Path,
-		"etag": res.ETag,
-	})
-}
-
-type updateApprovalRequest struct {
-	Path    string                  `json:"path"`
-	Status  workflow.ApprovalStatus `json:"status"`
-	Comment string                  `json:"comment,omitempty"`
-}
-
-// UpdateApproval sets a workflow page's approval status.
-// PATCH /api/kiwi/workflow/approval
-func (h *Handlers) UpdateApproval(c echo.Context) error {
-	var req updateApprovalRequest
-	if err := c.Bind(&req); err != nil {
-		return echo.NewHTTPError(http.StatusBadRequest, "invalid JSON body")
-	}
-	if req.Path == "" || req.Status == "" {
-		return echo.NewHTTPError(http.StatusBadRequest, "path and status are required")
-	}
-
-	content, err := h.store.Read(c.Request().Context(), req.Path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return echo.NewHTTPError(http.StatusNotFound, "file not found")
-		}
-		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
-	}
-
-	actor := c.Request().Header.Get("X-Actor")
-	if actor == "" {
-		actor = pipeline.DefaultActor
-	}
-
-	updated, err := workflow.UpdateApproval(content, req.Status, actor, req.Comment)
-	if err != nil {
-		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
-	}
-
-	res, err := h.pipe.Write(c.Request().Context(), req.Path, updated, actor)
-	if err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
-	}
-	return c.JSON(http.StatusOK, map[string]string{
-		"path": res.Path,
-		"etag": res.ETag,
-	})
-}
-
-// WorkflowReminders returns the cached list of overdue tasks, approvals,
-// and pages from the reminder scheduler. Clients poll this to render
-// an "inbox" panel; the SSE workflow.reminder event provides push
-// updates between polls.
-// GET /api/kiwi/workflow/reminders
-func (h *Handlers) WorkflowReminders(c echo.Context) error {
-	if h.reminders == nil {
-		return c.JSON(http.StatusOK, map[string]any{
-			"reminders": []workflow.Reminder{},
-			"lastScan":  nil,
-		})
-	}
-	return c.JSON(http.StatusOK, map[string]any{
-		"reminders": h.reminders.Inbox(),
-		"lastScan":  h.reminders.LastScan().UTC().Format(time.RFC3339),
-	})
-}
-
-// ─── Presence ────────────────────────────────────────────────────────────────
-
-type presenceRequest struct {
-	Path string `json:"path"`
-	Role string `json:"role"`
-}
-
-// PresenceHeartbeat records that the caller is still active on a page
-// and returns the current live viewer/editor list. Clients should call
-// this every ~10s while the page is open. Broadcasts a "presence" SSE
-// event so other tabs see the updated set without polling.
-// POST /api/kiwi/presence
-func (h *Handlers) PresenceHeartbeat(c echo.Context) error {
-	if h.presence == nil {
-		return echo.NewHTTPError(http.StatusServiceUnavailable, "presence disabled")
-	}
-	var req presenceRequest
-	if err := c.Bind(&req); err != nil {
-		return echo.NewHTTPError(http.StatusBadRequest, "invalid JSON body")
-	}
-	if req.Path == "" {
-		return echo.NewHTTPError(http.StatusBadRequest, "path is required")
-	}
-	actor := c.Request().Header.Get("X-Actor")
-	if actor == "" {
-		actor = pipeline.DefaultActor
-	}
-	role := presence.RoleViewer
-	if strings.EqualFold(req.Role, "editor") {
-		role = presence.RoleEditor
-	}
-	live := h.presence.Heartbeat(req.Path, actor, role)
-	h.hub.Broadcast(events.Event{
-		Op:    "presence",
-		Path:  req.Path,
-		Actor: actor,
-		Extra: map[string]any{"viewers": live},
-	})
-	return c.JSON(http.StatusOK, map[string]any{
-		"path":    req.Path,
-		"viewers": live,
-	})
-}
-
-// PresenceList returns the current live viewer/editor list for a page.
-// GET /api/kiwi/presence?path=...
-func (h *Handlers) PresenceList(c echo.Context) error {
-	if h.presence == nil {
-		return c.JSON(http.StatusOK, map[string]any{"viewers": []presence.Entry{}})
-	}
-	path := c.QueryParam("path")
-	if path == "" {
-		return echo.NewHTTPError(http.StatusBadRequest, "path is required")
-	}
-	return c.JSON(http.StatusOK, map[string]any{
-		"path":    path,
-		"viewers": h.presence.List(path),
-	})
-}
-
-// PresenceLeave removes the caller from a page's presence list — fired
-// by the UI on page navigation / tab close via navigator.sendBeacon.
-// DELETE /api/kiwi/presence?path=...
-func (h *Handlers) PresenceLeave(c echo.Context) error {
-	if h.presence == nil {
-		return c.NoContent(http.StatusNoContent)
-	}
-	path := c.QueryParam("path")
-	if path == "" {
-		return echo.NewHTTPError(http.StatusBadRequest, "path is required")
-	}
-	actor := c.Request().Header.Get("X-Actor")
-	if actor == "" {
-		actor = pipeline.DefaultActor
-	}
-	live := h.presence.Leave(path, actor)
-	h.hub.Broadcast(events.Event{
-		Op:    "presence",
-		Path:  path,
-		Actor: actor,
-		Extra: map[string]any{"viewers": live},
-	})
-	return c.NoContent(http.StatusNoContent)
-}

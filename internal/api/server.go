@@ -19,9 +19,7 @@ import (
 	"github.com/kiwifs/kiwifs/internal/events"
 	"github.com/kiwifs/kiwifs/internal/janitor"
 	"github.com/kiwifs/kiwifs/internal/pipeline"
-	"github.com/kiwifs/kiwifs/internal/presence"
 	"github.com/kiwifs/kiwifs/internal/rbac"
-	"github.com/kiwifs/kiwifs/internal/workflow"
 	"github.com/kiwifs/kiwifs/internal/vectorstore"
 	"github.com/kiwifs/kiwifs/internal/webui"
 	"github.com/labstack/echo/v4"
@@ -38,16 +36,12 @@ type Server struct {
 	vectors  *vectorstore.Service // nil when vector search is disabled
 	comments *comments.Store
 	shares   *rbac.ShareStore
-	presence *presence.Tracker
 	echo     *echo.Echo
 
 	// janitorSched is the background janitor scheduler. Set by
 	// SetJanitorScheduler before Start(); nil disables scheduled scans.
-	janitorSched    *janitor.Scheduler
-	janitorCancel   context.CancelFunc
-	presenceCancel  context.CancelFunc
-	reminders       *workflow.ReminderScheduler
-	remindersCancel context.CancelFunc
+	janitorSched  *janitor.Scheduler
+	janitorCancel context.CancelFunc
 
 	// auth holds the live authentication config. It's an atomic.Pointer
 	// so ReloadAuth can swap keys from under a SIGHUP handler without
@@ -76,13 +70,6 @@ func (s *Server) SetJanitorScheduler(sched *janitor.Scheduler) {
 	s.janitorSched = sched
 }
 
-// SetReminderScheduler attaches a workflow reminder scheduler so
-// /workflow/reminders serves the most-recent cached sweep and the
-// sweep's lifecycle is tied to the server.
-func (s *Server) SetReminderScheduler(sched *workflow.ReminderScheduler) {
-	s.reminders = sched
-}
-
 // NewServer creates and configures the server. The pipeline carries every
 // shared dependency (store, versioner, searcher, linker, hub) — callers
 // don't need to pass them separately.
@@ -99,7 +86,6 @@ func NewServer(
 		vectors:  vectors,
 		comments: cstore,
 		shares:   shares,
-		presence: presence.New(presence.DefaultTTL),
 		echo:     echo.New(),
 	}
 	s.echo.HideBanner = true
@@ -285,13 +271,11 @@ func (s *Server) setupRoutes() {
 		vectors:          s.vectors,
 		comments:         s.comments,
 		shares:           s.shares,
-		presence:         s.presence,
 		assets:           s.cfg.Assets,
 		ui:               s.cfg.UI,
 		root:             s.pipe.Store.AbsPath(""),
 		janitorSched:     s.janitorSched,
 		janitorStaleDays: s.cfg.Janitor.StaleDays,
-		reminders:        s.reminders,
 	}
 	// Chain cache invalidation onto the pipeline's fan-out so any write —
 	// REST, WebDAV, NFS, S3, fsnotify — drops the /graph cache. Chained
@@ -331,7 +315,6 @@ func (s *Server) setupRoutes() {
 	api.POST("/search/semantic", h.SemanticSearch)
 	api.GET("/search/semantic", h.SemanticSearch)
 	api.GET("/meta", h.Meta)
-	api.PATCH("/meta", h.PatchMeta)
 	api.GET("/stale", h.StalePages)
 	api.GET("/contradictions", h.Contradictions)
 	api.GET("/versions", h.Versions)
@@ -357,17 +340,6 @@ func (s *Server) setupRoutes() {
 	api.POST("/share", h.CreateShareLink)
 	api.GET("/share", h.ListShareLinks)
 	api.DELETE("/share/:id", h.RevokeShareLink)
-
-	// Presence / collaborative banner (auth required)
-	api.POST("/presence", h.PresenceHeartbeat)
-	api.GET("/presence", h.PresenceList)
-	api.DELETE("/presence", h.PresenceLeave)
-
-	// Workflow (auth required)
-	api.GET("/workflow", h.GetWorkflow)
-	api.PATCH("/workflow/task", h.UpdateTask)
-	api.PATCH("/workflow/approval", h.UpdateApproval)
-	api.GET("/workflow/reminders", h.WorkflowReminders)
 
 	// Public access — registered outside the auth group so no token is needed.
 	s.echo.GET("/api/kiwi/public/:token", h.PublicPage)
@@ -397,51 +369,7 @@ func (s *Server) Start(addr string) error {
 		s.janitorCancel = cancel
 		s.janitorSched.Start(ctx)
 	}
-	// Workflow reminder sweeper. Same lifetime contract as the janitor:
-	// a cancel func saved on s so Shutdown can bring the goroutine
-	// down cleanly, even under SIGTERM.
-	if s.reminders != nil {
-		ctx, cancel := context.WithCancel(context.Background())
-		s.remindersCancel = cancel
-		s.reminders.Start(ctx)
-	}
-	// Presence sweeper: walks the tracker every TTL/2 and broadcasts
-	// an empty presence event for any page whose last live actor just
-	// dropped off (tab closed, laptop slept). Without this, "Alice is
-	// editing this page" lingers forever if Alice's browser never
-	// explicitly Leave()-s.
-	if s.presence != nil {
-		ctx, cancel := context.WithCancel(context.Background())
-		s.presenceCancel = cancel
-		go s.runPresenceSweeper(ctx)
-	}
 	return s.echo.Start(addr)
-}
-
-func (s *Server) runPresenceSweeper(ctx context.Context) {
-	t := time.NewTicker(presence.DefaultTTL / 2)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-			if s.presence == nil {
-				return
-			}
-			changed := s.presence.Sweep()
-			for _, path := range changed {
-				live := s.presence.List(path)
-				s.pipe.Hub.Broadcast(events.Event{
-					Op:   "presence",
-					Path: path,
-					Extra: map[string]any{
-						"viewers": live,
-					},
-				})
-			}
-		}
-	}
 }
 
 // Shutdown closes the HTTP server gracefully, waiting for in-flight
@@ -452,15 +380,6 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}
 	if s.janitorSched != nil {
 		s.janitorSched.Stop()
-	}
-	if s.presenceCancel != nil {
-		s.presenceCancel()
-	}
-	if s.remindersCancel != nil {
-		s.remindersCancel()
-	}
-	if s.reminders != nil {
-		s.reminders.Stop()
 	}
 	return s.echo.Shutdown(ctx)
 }
