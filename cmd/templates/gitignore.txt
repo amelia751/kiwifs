@@ -1,0 +1,2 @@
+# KiwiFS — rebuildable state (SQLite indexes, WAL, vector cache)
+.kiwi/state/

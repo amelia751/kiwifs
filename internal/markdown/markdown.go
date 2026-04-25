@@ -90,6 +90,55 @@ func Frontmatter(content []byte) (map[string]any, error) {
 	return m, nil
 }
 
+// SplitFrontmatter returns the YAML frontmatter block (without the `---`
+// delimiters) and the remaining body. A file without a leading `---\n`
+// returns fm=nil and the whole input as body.
+func SplitFrontmatter(content []byte) (fm, body []byte, err error) {
+	delim := []byte("---")
+
+	line, rest, ok := bytes.Cut(content, []byte("\n"))
+	if !ok {
+		return nil, content, nil
+	}
+	if !bytes.Equal(bytes.TrimRight(line, "\r"), delim) {
+		return nil, content, nil
+	}
+	scanner := rest
+	pos := 0
+	for {
+		nl := bytes.IndexByte(scanner, '\n')
+		var current []byte
+		if nl < 0 {
+			current = scanner
+		} else {
+			current = scanner[:nl]
+		}
+		if bytes.Equal(bytes.TrimRight(current, "\r"), delim) {
+			fm = rest[:pos]
+			if nl < 0 {
+				body = nil
+			} else {
+				body = scanner[nl+1:]
+			}
+			return fm, body, nil
+		}
+		if nl < 0 {
+			return nil, nil, fmt.Errorf("frontmatter block not terminated")
+		}
+		pos += nl + 1
+		scanner = scanner[nl+1:]
+	}
+}
+
+// BodyAfterFrontmatter strips the YAML frontmatter and returns only the body.
+func BodyAfterFrontmatter(content []byte) string {
+	_, body, err := SplitFrontmatter(content)
+	if err != nil {
+		return string(content)
+	}
+	return strings.TrimLeft(string(body), "\n\r")
+}
+
 // Headings is the TOC-only accessor, used by /api/kiwi/toc.
 func Headings(content []byte) []Heading {
 	p, err := Parse(content)

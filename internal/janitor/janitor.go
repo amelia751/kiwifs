@@ -14,6 +14,8 @@ import (
 	"github.com/kiwifs/kiwifs/internal/storage"
 )
 
+const DefaultStaleDays = 90
+
 const (
 	IssueStale         = "stale"
 	IssueOrphan        = "orphan"
@@ -174,7 +176,7 @@ func (s *Scanner) collectPages(ctx context.Context) ([]pageInfo, error) {
 			return nil
 		}
 		fm, _ := markdown.Frontmatter(raw)
-		body := stripFrontmatter(raw)
+		body := markdown.BodyAfterFrontmatter(raw)
 		title := extractTitle(fm, raw)
 
 		pages = append(pages, pageInfo{
@@ -399,20 +401,6 @@ func (s *Scanner) checkContradictions(pages []pageInfo) []Issue {
 		}
 	}
 	return issues
-}
-
-// --- helpers ---
-
-func stripFrontmatter(content []byte) string {
-	s := string(content)
-	if !strings.HasPrefix(s, "---") {
-		return s
-	}
-	end := strings.Index(s[3:], "---")
-	if end < 0 {
-		return s
-	}
-	return s[end+6:]
 }
 
 func extractTitle(fm map[string]any, content []byte) string {

@@ -1,12 +1,5 @@
-// Provenance helpers keep "which run produced this file" data consistent
-// across REST and bulk writes.
-//
-// Callers pass an X-Provenance header (`type:id` — e.g. `run:run-249`) and
-// KiwiFS appends a structured entry to the YAML frontmatter's
-// `derived-from` list before the pipeline indexes the file. That way the
-// file on disk, the git history, and the file_meta table all carry the
-// same provenance — a single source of truth without asking every client
-// to serialise YAML correctly.
+// Provenance helpers inject X-Provenance header data into YAML frontmatter's
+// derived-from list so disk, git, and file_meta stay consistent.
 package pipeline
 
 import (
@@ -15,11 +8,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kiwifs/kiwifs/internal/markdown"
 	"gopkg.in/yaml.v3"
 )
 
 // ProvenanceEntry is the shape written into the `derived-from` list. The
-// fields match the SCHEMA.md contract the agent-knowledge template ships
+// fields match the SCHEMA.md contract the knowledge template ships
 // with, so structured queries like `?where=$.derived-from[*].id=run-249`
 // stay portable.
 type ProvenanceEntry struct {
@@ -60,7 +54,7 @@ func InjectProvenance(content []byte, provType, provID, actor string) ([]byte, e
 		return content, nil
 	}
 
-	fmBytes, body, err := splitFrontmatter(content)
+	fmBytes, body, err := markdown.SplitFrontmatter(content)
 	if err != nil {
 		return nil, err
 	}
@@ -161,47 +155,3 @@ func appendToDerivedFrom(mapping, entry *yaml.Node) {
 	mapping.Content = append(mapping.Content, key, seq)
 }
 
-// splitFrontmatter returns the YAML frontmatter block (without the `---`
-// delimiters) and the remaining body. A file without a leading `---\n`
-// returns fm=nil and the whole input as body — callers treat that case as
-// "no existing frontmatter, create a new block".
-//
-// Accepts `\r\n` line endings to be forgiving toward files authored on
-// Windows or copy-pasted through rich-text tools.
-func splitFrontmatter(content []byte) (fm, body []byte, err error) {
-	delim := []byte("---")
-
-	line, rest, ok := bytes.Cut(content, []byte("\n"))
-	if !ok {
-		return nil, content, nil
-	}
-	if !bytes.Equal(bytes.TrimRight(line, "\r"), delim) {
-		return nil, content, nil
-	}
-	// Walk lines until we hit the closing "---".
-	scanner := rest
-	pos := 0
-	for {
-		nl := bytes.IndexByte(scanner, '\n')
-		var current []byte
-		if nl < 0 {
-			current = scanner
-		} else {
-			current = scanner[:nl]
-		}
-		if bytes.Equal(bytes.TrimRight(current, "\r"), delim) {
-			fm = rest[:pos]
-			if nl < 0 {
-				body = nil
-			} else {
-				body = scanner[nl+1:]
-			}
-			return fm, body, nil
-		}
-		if nl < 0 {
-			return nil, nil, fmt.Errorf("frontmatter block not terminated")
-		}
-		pos += nl + 1
-		scanner = scanner[nl+1:]
-	}
-}

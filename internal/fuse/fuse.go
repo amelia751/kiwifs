@@ -230,6 +230,24 @@ var _ fs.NodeUnlinker = (*kiwiNode)(nil)
 var _ fs.NodeMkdirer = (*kiwiNode)(nil)
 var _ fs.NodeRmdirer = (*kiwiNode)(nil)
 
+func httpErrno(status int) syscall.Errno {
+	switch {
+	case status == http.StatusNotFound:
+		return syscall.ENOENT
+	case status == http.StatusUnauthorized || status == http.StatusForbidden:
+		return syscall.EACCES
+	default:
+		return syscall.EIO
+	}
+}
+
+func childPath(parent, name string) string {
+	if parent == "" {
+		return name
+	}
+	return filepath.Join(parent, name)
+}
+
 // statFile issues a GET against the file endpoint and returns (size, found).
 // KiwiFS doesn't implement HEAD on /api/kiwi/file, so the only portable way
 // to get a content length is a cached GET. Uses the file cache so a
@@ -246,11 +264,8 @@ func (n *kiwiNode) statFile() (int64, bool, syscall.Errno) {
 	if resp.StatusCode == http.StatusNotFound {
 		return 0, false, 0
 	}
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		return 0, false, syscall.EACCES
-	}
 	if resp.StatusCode != http.StatusOK {
-		return 0, false, syscall.EIO
+		return 0, false, httpErrno(resp.StatusCode)
 	}
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -321,14 +336,8 @@ func (n *kiwiNode) listDir() ([]fuse.DirEntry, syscall.Errno) {
 		return nil, syscall.EIO
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusNotFound {
-		return nil, syscall.ENOENT
-	}
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		return nil, syscall.EACCES
-	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, syscall.EIO
+		return nil, httpErrno(resp.StatusCode)
 	}
 	var tree treeResponse
 	if err := json.NewDecoder(resp.Body).Decode(&tree); err != nil {
@@ -358,14 +367,11 @@ func (n *kiwiNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 
 // Lookup finds a child node by name.
 func (n *kiwiNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
-	childPath := filepath.Join(n.path, name)
-	if n.path == "" {
-		childPath = name
-	}
+	cp := childPath(n.path, name)
 
 	child := &kiwiNode{
 		client: n.client,
-		path:   childPath,
+		path:   cp,
 	}
 
 	size, found, errno := child.statFile()
@@ -397,14 +403,11 @@ func (n *kiwiNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint3
 
 // Create creates a new file.
 func (n *kiwiNode) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (*fs.Inode, fs.FileHandle, uint32, syscall.Errno) {
-	childPath := filepath.Join(n.path, name)
-	if n.path == "" {
-		childPath = name
-	}
+	cp := childPath(n.path, name)
 
 	child := &kiwiNode{
 		client: n.client,
-		path:   childPath,
+		path:   cp,
 	}
 
 	fh := &kiwiFile{
@@ -419,25 +422,19 @@ func (n *kiwiNode) Create(ctx context.Context, name string, flags uint32, mode u
 
 // Unlink deletes a file.
 func (n *kiwiNode) Unlink(ctx context.Context, name string) syscall.Errno {
-	childPath := filepath.Join(n.path, name)
-	if n.path == "" {
-		childPath = name
-	}
+	cp := childPath(n.path, name)
 
-	req, _ := http.NewRequest("DELETE", n.client.apiURL("/api/kiwi/file", childPath), nil)
+	req, _ := http.NewRequest("DELETE", n.client.apiURL("/api/kiwi/file", cp), nil)
 	resp, err := n.client.do(req)
 	if err != nil {
 		return syscall.EIO
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		return syscall.EACCES
-	}
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
-		return syscall.EIO
+		return httpErrno(resp.StatusCode)
 	}
-	n.client.invalidate(childPath)
+	n.client.invalidate(cp)
 	return 0
 }
 
@@ -447,12 +444,9 @@ func (n *kiwiNode) Unlink(ctx context.Context, name string) syscall.Errno {
 // This matches git's usual convention for preserving empty dirs and makes
 // the server-side state consistent with what local FUSE operations expect.
 func (n *kiwiNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
-	childPath := filepath.Join(n.path, name)
-	if n.path == "" {
-		childPath = name
-	}
+	cp := childPath(n.path, name)
 
-	placeholder := filepath.Join(childPath, ".keep")
+	placeholder := filepath.Join(cp, ".keep")
 	req, _ := http.NewRequest("PUT", n.client.apiURL("/api/kiwi/file", placeholder), bytes.NewReader(nil))
 	req.Header.Set("Content-Type", "application/octet-stream")
 	req.Header.Set("X-Actor", "fuse")
@@ -461,15 +455,12 @@ func (n *kiwiNode) Mkdir(ctx context.Context, name string, mode uint32, out *fus
 		return nil, syscall.EIO
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		return nil, syscall.EACCES
-	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, syscall.EIO
+		return nil, httpErrno(resp.StatusCode)
 	}
 	n.client.invalidate(placeholder)
 
-	child := &kiwiNode{client: n.client, path: childPath}
+	child := &kiwiNode{client: n.client, path: cp}
 	out.Mode = 0755 | syscall.S_IFDIR
 	stable := fs.StableAttr{Mode: syscall.S_IFDIR}
 	return n.NewInode(ctx, child, stable), 0
@@ -570,11 +561,8 @@ func (f *kiwiFile) Flush(ctx context.Context) syscall.Errno {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		return syscall.EACCES
-	}
 	if resp.StatusCode != http.StatusOK {
-		return syscall.EIO
+		return httpErrno(resp.StatusCode)
 	}
 
 	// Our write invalidates sibling caches — drop them so the next read

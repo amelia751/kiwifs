@@ -86,6 +86,37 @@ func (r *RemoteBackend) readBody(resp *http.Response) ([]byte, error) {
 	return data, nil
 }
 
+func (r *RemoteBackend) getJSON(ctx context.Context, path string, out any) error {
+	resp, err := r.do(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return err
+	}
+	data, err := r.readBody(resp)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(data, out)
+}
+
+func (r *RemoteBackend) postJSON(ctx context.Context, path string, body, out any) error {
+	data, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	resp, err := r.do(ctx, http.MethodPost, path, strings.NewReader(string(data)), "Content-Type", "application/json")
+	if err != nil {
+		return err
+	}
+	respData, err := r.readBody(resp)
+	if err != nil {
+		return err
+	}
+	if out != nil {
+		return json.Unmarshal(respData, out)
+	}
+	return nil
+}
+
 func (r *RemoteBackend) ReadFile(ctx context.Context, path string) (string, string, error) {
 	resp, err := r.do(ctx, http.MethodGet, r.apiPrefix+"/file?path="+url.QueryEscape(path), nil)
 	if err != nil {
@@ -138,19 +169,19 @@ func (r *RemoteBackend) DeleteFile(ctx context.Context, path, actor string) erro
 }
 
 func (r *RemoteBackend) Tree(ctx context.Context, path string) (json.RawMessage, error) {
-	q := r.apiPrefix+"/tree"
+	q := r.apiPrefix + "/tree"
 	if path != "" {
 		q += "?path=" + url.QueryEscape(path)
 	}
-	resp, err := r.do(ctx, http.MethodGet, q, nil)
-	if err != nil {
+	var raw json.RawMessage
+	if err := r.getJSON(ctx, q, &raw); err != nil {
 		return nil, err
 	}
-	return r.readBody(resp)
+	return raw, nil
 }
 
 func (r *RemoteBackend) Search(ctx context.Context, query string, limit, offset int, pathPrefix string) ([]SearchResult, error) {
-	q := r.apiPrefix+"/search?q=" + url.QueryEscape(query)
+	q := r.apiPrefix + "/search?q=" + url.QueryEscape(query)
 	if limit > 0 {
 		q += "&limit=" + strconv.Itoa(limit)
 	}
@@ -160,18 +191,10 @@ func (r *RemoteBackend) Search(ctx context.Context, query string, limit, offset 
 	if pathPrefix != "" {
 		q += "&pathPrefix=" + url.QueryEscape(pathPrefix)
 	}
-	resp, err := r.do(ctx, http.MethodGet, q, nil)
-	if err != nil {
-		return nil, err
-	}
-	data, err := r.readBody(resp)
-	if err != nil {
-		return nil, err
-	}
 	var result struct {
 		Results []SearchResult `json:"results"`
 	}
-	if err := json.Unmarshal(data, &result); err != nil {
+	if err := r.getJSON(ctx, q, &result); err != nil {
 		return nil, err
 	}
 	for i := range result.Results {
@@ -181,15 +204,6 @@ func (r *RemoteBackend) Search(ctx context.Context, query string, limit, offset 
 }
 
 func (r *RemoteBackend) SearchSemantic(ctx context.Context, query string, limit int) ([]SearchResult, error) {
-	body := fmt.Sprintf(`{"query":%q,"topK":%d}`, query, limit)
-	resp, err := r.do(ctx, http.MethodPost, r.apiPrefix+"/search/semantic", strings.NewReader(body), "Content-Type", "application/json")
-	if err != nil {
-		return nil, err
-	}
-	data, err := r.readBody(resp)
-	if err != nil {
-		return nil, err
-	}
 	var result struct {
 		Results []struct {
 			Path  string  `json:"path"`
@@ -197,7 +211,7 @@ func (r *RemoteBackend) SearchSemantic(ctx context.Context, query string, limit 
 			Score float32 `json:"score"`
 		} `json:"results"`
 	}
-	if err := json.Unmarshal(data, &result); err != nil {
+	if err := r.postJSON(ctx, r.apiPrefix+"/search/semantic", map[string]any{"query": query, "topK": limit}, &result); err != nil {
 		return nil, err
 	}
 	out := make([]SearchResult, len(result.Results))
@@ -212,7 +226,6 @@ func (r *RemoteBackend) QueryMeta(ctx context.Context, filters []string, sort, o
 }
 
 func (r *RemoteBackend) QueryMetaOr(ctx context.Context, andFilters, orFilters []string, sort, order string, limit, offset int) ([]MetaResult, error) {
-	q := r.apiPrefix + "/meta?"
 	params := url.Values{}
 	for _, f := range andFilters {
 		params.Add("where", f)
@@ -232,37 +245,20 @@ func (r *RemoteBackend) QueryMetaOr(ctx context.Context, andFilters, orFilters [
 	if offset > 0 {
 		params.Set("offset", strconv.Itoa(offset))
 	}
-	resp, err := r.do(ctx, http.MethodGet, q+params.Encode(), nil)
-	if err != nil {
-		return nil, err
-	}
-	data, err := r.readBody(resp)
-	if err != nil {
-		return nil, err
-	}
 	var result struct {
 		Results []MetaResult `json:"results"`
 	}
-	if err := json.Unmarshal(data, &result); err != nil {
+	if err := r.getJSON(ctx, r.apiPrefix+"/meta?"+params.Encode(), &result); err != nil {
 		return nil, err
 	}
 	return result.Results, nil
 }
 
 func (r *RemoteBackend) ViewRefresh(ctx context.Context, path string) (bool, error) {
-	body := fmt.Sprintf(`{"path":%q}`, path)
-	resp, err := r.do(ctx, http.MethodPost, r.apiPrefix+"/view/refresh", strings.NewReader(body), "Content-Type", "application/json")
-	if err != nil {
-		return false, err
-	}
-	data, err := r.readBody(resp)
-	if err != nil {
-		return false, err
-	}
 	var result struct {
 		Status string `json:"status"`
 	}
-	if err := json.Unmarshal(data, &result); err != nil {
+	if err := r.postJSON(ctx, r.apiPrefix+"/view/refresh", map[string]string{"path": path}, &result); err != nil {
 		return false, err
 	}
 	return result.Status == "regenerated", nil
@@ -276,34 +272,18 @@ func (r *RemoteBackend) QueryDQL(ctx context.Context, dql string, limit, offset 
 	if offset > 0 {
 		q += "&offset=" + strconv.Itoa(offset)
 	}
-	resp, err := r.do(ctx, http.MethodGet, q, nil)
-	if err != nil {
-		return nil, err
-	}
-	data, err := r.readBody(resp)
-	if err != nil {
-		return nil, err
-	}
 	var result QueryResult
-	if err := json.Unmarshal(data, &result); err != nil {
+	if err := r.getJSON(ctx, q, &result); err != nil {
 		return nil, err
 	}
 	return &result, nil
 }
 
 func (r *RemoteBackend) Versions(ctx context.Context, path string) ([]Version, error) {
-	resp, err := r.do(ctx, http.MethodGet, r.apiPrefix+"/versions?path="+url.QueryEscape(path), nil)
-	if err != nil {
-		return nil, err
-	}
-	data, err := r.readBody(resp)
-	if err != nil {
-		return nil, err
-	}
 	var result struct {
 		Versions []Version `json:"versions"`
 	}
-	if err := json.Unmarshal(data, &result); err != nil {
+	if err := r.getJSON(ctx, r.apiPrefix+"/versions?path="+url.QueryEscape(path), &result); err != nil {
 		return nil, err
 	}
 	return result.Versions, nil
@@ -352,18 +332,10 @@ func (r *RemoteBackend) BulkWrite(ctx context.Context, files []BulkFile, actor, 
 }
 
 func (r *RemoteBackend) Backlinks(ctx context.Context, path string) ([]Backlink, error) {
-	resp, err := r.do(ctx, http.MethodGet, r.apiPrefix+"/backlinks?path="+url.QueryEscape(path), nil)
-	if err != nil {
-		return nil, err
-	}
-	data, err := r.readBody(resp)
-	if err != nil {
-		return nil, err
-	}
 	var result struct {
 		Backlinks []Backlink `json:"backlinks"`
 	}
-	if err := json.Unmarshal(data, &result); err != nil {
+	if err := r.getJSON(ctx, r.apiPrefix+"/backlinks?path="+url.QueryEscape(path), &result); err != nil {
 		return nil, err
 	}
 	return result.Backlinks, nil
@@ -372,36 +344,20 @@ func (r *RemoteBackend) Backlinks(ctx context.Context, path string) ([]Backlink,
 func (r *RemoteBackend) PublicURL() string { return "" }
 
 func (r *RemoteBackend) ResolveWikiLinks(ctx context.Context, content string) string {
-	body := fmt.Sprintf(`{"content":%s}`, mustMarshalString(content))
-	resp, err := r.do(ctx, http.MethodPost, r.apiPrefix+"/resolve-links", strings.NewReader(body), "Content-Type", "application/json")
-	if err != nil {
-		return content
-	}
-	data, err := r.readBody(resp)
-	if err != nil {
-		return content
-	}
 	var result struct {
 		Content string `json:"content"`
 	}
-	if json.Unmarshal(data, &result) == nil && result.Content != "" {
+	if err := r.postJSON(ctx, r.apiPrefix+"/resolve-links", map[string]string{"content": content}, &result); err != nil {
+		return content
+	}
+	if result.Content != "" {
 		return result.Content
 	}
 	return content
 }
 
-func mustMarshalString(s string) string {
-	b, _ := json.Marshal(s)
-	return string(b)
-}
-
 func (r *RemoteBackend) Health(ctx context.Context) error {
-	resp, err := r.do(ctx, http.MethodGet, "/health", nil)
-	if err != nil {
-		return err
-	}
-	_, err = r.readBody(resp)
-	return err
+	return r.getJSON(ctx, "/health", &json.RawMessage{})
 }
 
 func (r *RemoteBackend) Close() error { return nil }

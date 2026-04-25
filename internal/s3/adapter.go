@@ -70,8 +70,6 @@ func (a *adapter) resolve(name string) (SpaceBackend, error) {
 	return be, nil
 }
 
-// ─── Bucket operations ──────────────────────────────────────────────────────
-
 func (a *adapter) ListBuckets() ([]gofakes3.BucketInfo, error) {
 	out := make([]gofakes3.BucketInfo, 0, len(a.order))
 	for _, name := range a.order {
@@ -105,17 +103,7 @@ func (a *adapter) ForceDeleteBucket(_ string) error {
 	return gofakes3.ErrNotImplemented
 }
 
-// ─── ListBucket — the headline reason to use a library ─────────────────────
-
-// ListBucket walks the knowledge root and applies the prefix/delimiter
-// filter the client asked for. The hand-rolled implementation only ever
-// returned a flat key list which broke `aws s3 ls` (folder listing wants
-// CommonPrefixes), `aws s3 sync` (wants delimiter=/), and any client
-// using ListObjectsV2 pagination.
-//
-// Pagination uses ListBucketPage.Marker — gofakes3 echoes `marker` from
-// the v1 ListObjects API; v2 callers' continuation tokens get translated
-// for us upstream.
+// ListBucket walks the root with prefix/delimiter filtering and pagination.
 func (a *adapter) ListBucket(name string, prefix *gofakes3.Prefix, page gofakes3.ListBucketPage) (*gofakes3.ObjectList, error) {
 	be, err := a.resolve(name)
 	if err != nil {
@@ -191,8 +179,6 @@ var errStopWalk = errors.New("s3 walker: page filled")
 func walk(ctx context.Context, store storage.Storage, root string, fn storage.WalkFunc) error {
 	return storage.Walk(ctx, store, root, fn)
 }
-
-// ─── Object operations ─────────────────────────────────────────────────────
 
 func (a *adapter) GetObject(bucket, key string, _ *gofakes3.ObjectRangeRequest) (*gofakes3.Object, error) {
 	be, err := a.resolve(bucket)

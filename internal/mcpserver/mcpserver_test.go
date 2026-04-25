@@ -15,26 +15,6 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 )
 
-func setupTestBackend(t *testing.T) (*LocalBackend, string) {
-	t.Helper()
-	tmp := t.TempDir()
-	kiwiDir := filepath.Join(tmp, ".kiwi")
-	os.MkdirAll(kiwiDir, 0o755)
-	os.WriteFile(filepath.Join(kiwiDir, "config.toml"), []byte(`
-[search]
-engine = "sqlite"
-[versioning]
-strategy = "none"
-`), 0o644)
-	os.WriteFile(filepath.Join(tmp, "index.md"), []byte("# Index\n\nWelcome to the knowledge base.\n"), 0o644)
-	os.MkdirAll(filepath.Join(tmp, "concepts"), 0o755)
-	os.WriteFile(filepath.Join(tmp, "concepts", "auth.md"), []byte("---\nstatus: published\ntags:\n  - security\n---\n# Authentication\n\nAuth overview.\n"), 0o644)
-	os.WriteFile(filepath.Join(tmp, "SCHEMA.md"), []byte("# Schema\n\nKnowledge base schema.\n"), 0o644)
-
-	b := NewLocalBackend(tmp)
-	return b, tmp
-}
-
 func TestReadFile(t *testing.T) {
 	b, _ := setupTestBackend(t)
 	defer b.Close()
@@ -133,10 +113,10 @@ func TestTree(t *testing.T) {
 	if text == "" {
 		t.Fatal("expected non-empty tree text")
 	}
-	if !contains(text, "index.md") {
+	if !strings.Contains(text, "index.md") {
 		t.Fatalf("tree text missing index.md: %s", text)
 	}
-	if !contains(text, "concepts/") {
+	if !strings.Contains(text, "concepts/") {
 		t.Fatalf("tree text missing concepts/: %s", text)
 	}
 }
@@ -211,20 +191,8 @@ func TestToolHandlerRead(t *testing.T) {
 	b, _ := setupTestBackend(t)
 	defer b.Close()
 
-	handler := handleRead(b)
-	req := mcp.CallToolRequest{}
-	req.Params.Name = "kiwi_read"
-	req.Params.Arguments = map[string]any{"path": "index.md"}
-
-	result, err := handler(context.Background(), req)
-	if err != nil {
-		t.Fatalf("handleRead: %v", err)
-	}
-	if result.IsError {
-		t.Fatalf("unexpected error: %v", result.Content)
-	}
-	text := result.Content[0].(mcp.TextContent).Text
-	if !contains(text, "# Index") {
+	text := mustCallTool(t, handleRead(b), "kiwi_read", map[string]any{"path": "index.md"})
+	if !strings.Contains(text, "# Index") {
 		t.Fatalf("expected content to contain '# Index', got: %s", text[:50])
 	}
 }
@@ -246,7 +214,7 @@ func TestToolHandlerReadNotFound(t *testing.T) {
 		t.Fatal("expected isError=true for missing file")
 	}
 	text := result.Content[0].(mcp.TextContent).Text
-	if !contains(text, "File not found") {
+	if !strings.Contains(text, "File not found") {
 		t.Fatalf("expected 'File not found' error, got: %s", text)
 	}
 }
@@ -255,23 +223,11 @@ func TestToolHandlerWrite(t *testing.T) {
 	b, _ := setupTestBackend(t)
 	defer b.Close()
 
-	handler := handleWrite(b)
-	req := mcp.CallToolRequest{}
-	req.Params.Name = "kiwi_write"
-	req.Params.Arguments = map[string]any{
+	text := mustCallTool(t, handleWrite(b), "kiwi_write", map[string]any{
 		"path":    "new-page.md",
 		"content": "# New Page\n\nContent here.",
-	}
-
-	result, err := handler(context.Background(), req)
-	if err != nil {
-		t.Fatalf("handleWrite: %v", err)
-	}
-	if result.IsError {
-		t.Fatalf("unexpected error: %v", result.Content)
-	}
-	text := result.Content[0].(mcp.TextContent).Text
-	if !contains(text, "Written new-page.md") {
+	})
+	if !strings.Contains(text, "Written new-page.md") {
 		t.Fatalf("expected 'Written' message, got: %s", text)
 	}
 }
@@ -280,38 +236,15 @@ func TestToolHandlerSearch(t *testing.T) {
 	b, _ := setupTestBackend(t)
 	defer b.Close()
 
-	handler := handleSearch(b)
-	req := mcp.CallToolRequest{}
-	req.Params.Name = "kiwi_search"
-	req.Params.Arguments = map[string]any{"query": "knowledge"}
-
-	result, err := handler(context.Background(), req)
-	if err != nil {
-		t.Fatalf("handleSearch: %v", err)
-	}
-	if result.IsError {
-		t.Fatalf("unexpected error: %v", result.Content)
-	}
+	mustCallTool(t, handleSearch(b), "kiwi_search", map[string]any{"query": "knowledge"})
 }
 
 func TestToolHandlerDelete(t *testing.T) {
 	b, _ := setupTestBackend(t)
 	defer b.Close()
 
-	handler := handleDelete(b)
-	req := mcp.CallToolRequest{}
-	req.Params.Name = "kiwi_delete"
-	req.Params.Arguments = map[string]any{"path": "index.md"}
-
-	result, err := handler(context.Background(), req)
-	if err != nil {
-		t.Fatalf("handleDelete: %v", err)
-	}
-	if result.IsError {
-		t.Fatalf("unexpected error: %v", result.Content)
-	}
-	text := result.Content[0].(mcp.TextContent).Text
-	if !contains(text, "Deleted index.md") {
+	text := mustCallTool(t, handleDelete(b), "kiwi_delete", map[string]any{"path": "index.md"})
+	if !strings.Contains(text, "Deleted index.md") {
 		t.Fatalf("expected 'Deleted' message, got: %s", text)
 	}
 }
@@ -365,19 +298,6 @@ func TestFormatSize(t *testing.T) {
 			t.Errorf("formatSize(%d) = %q, want %q", tt.bytes, got, tt.want)
 		}
 	}
-}
-
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && searchString(s, substr)
-}
-
-func searchString(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }
 
 func TestRemoteWriteFileSendsHeaders(t *testing.T) {
@@ -495,16 +415,16 @@ func TestFormatTreeJSONRecursive(t *testing.T) {
 		]
 	}`
 	result := formatTreeJSON(json.RawMessage(tree), 5, "")
-	if !contains(result, "docs/") {
+	if !strings.Contains(result, "docs/") {
 		t.Errorf("missing docs/ in result: %s", result)
 	}
-	if !contains(result, "  api.md") {
+	if !strings.Contains(result, "  api.md") {
 		t.Errorf("missing indented api.md: %s", result)
 	}
-	if !contains(result, "    deep.md") {
+	if !strings.Contains(result, "    deep.md") {
 		t.Errorf("missing doubly-indented deep.md: %s", result)
 	}
-	if !contains(result, "readme.md") {
+	if !strings.Contains(result, "readme.md") {
 		t.Errorf("missing readme.md: %s", result)
 	}
 }
@@ -513,20 +433,11 @@ func TestSearchEmptyAfterPrefixFilter(t *testing.T) {
 	b, _ := setupTestBackend(t)
 	defer b.Close()
 
-	handler := handleSearch(b)
-	req := mcp.CallToolRequest{}
-	req.Params.Name = "kiwi_search"
-	req.Params.Arguments = map[string]any{
+	text := mustCallTool(t, handleSearch(b), "kiwi_search", map[string]any{
 		"query":       "knowledge",
 		"path_prefix": "nonexistent-prefix/",
-	}
-
-	result, err := handler(context.Background(), req)
-	if err != nil {
-		t.Fatalf("handleSearch: %v", err)
-	}
-	text := result.Content[0].(mcp.TextContent).Text
-	if !contains(text, "No results found in nonexistent-prefix/") {
+	})
+	if !strings.Contains(text, "No results found in nonexistent-prefix/") {
 		t.Fatalf("expected 'No results found in nonexistent-prefix/', got: %s", text)
 	}
 }
@@ -574,44 +485,22 @@ func TestNegativeLimitSearchHandler(t *testing.T) {
 	b, _ := setupTestBackend(t)
 	defer b.Close()
 
-	handler := handleSearch(b)
-	req := mcp.CallToolRequest{}
-	req.Params.Name = "kiwi_search"
-	req.Params.Arguments = map[string]any{
+	mustCallTool(t, handleSearch(b), "kiwi_search", map[string]any{
 		"query":  "knowledge",
 		"limit":  float64(-5),
 		"offset": float64(-3),
-	}
-
-	result, err := handler(context.Background(), req)
-	if err != nil {
-		t.Fatalf("handleSearch with negative limit/offset: %v", err)
-	}
-	if result.IsError {
-		t.Fatalf("unexpected error: %v", result.Content)
-	}
+	})
 }
 
 func TestNegativeLimitQueryMetaHandler(t *testing.T) {
 	b, _ := setupTestBackend(t)
 	defer b.Close()
 
-	handler := handleQueryMeta(b)
-	req := mcp.CallToolRequest{}
-	req.Params.Name = "kiwi_query_meta"
-	req.Params.Arguments = map[string]any{
+	mustCallTool(t, handleQueryMeta(b), "kiwi_query_meta", map[string]any{
 		"filters": []any{"$.status=published"},
 		"limit":   float64(-10),
 		"offset":  float64(-5),
-	}
-
-	result, err := handler(context.Background(), req)
-	if err != nil {
-		t.Fatalf("handleQueryMeta with negative limit/offset: %v", err)
-	}
-	if result.IsError {
-		t.Fatalf("unexpected error: %v", result.Content)
-	}
+	})
 }
 
 func TestFormatTreeJSONParseFailure(t *testing.T) {
@@ -628,21 +517,9 @@ func TestHandleQueryMetaSortedKeys(t *testing.T) {
 	b, _ := setupTestBackend(t)
 	defer b.Close()
 
-	handler := handleQueryMeta(b)
-	req := mcp.CallToolRequest{}
-	req.Params.Name = "kiwi_query_meta"
-	req.Params.Arguments = map[string]any{
+	text := mustCallTool(t, handleQueryMeta(b), "kiwi_query_meta", map[string]any{
 		"filters": []any{"$.status=published"},
-	}
-
-	result, err := handler(context.Background(), req)
-	if err != nil {
-		t.Fatalf("handleQueryMeta: %v", err)
-	}
-	if result.IsError {
-		t.Fatalf("unexpected error: %v", result.Content)
-	}
-	text := result.Content[0].(mcp.TextContent).Text
+	})
 	statusIdx := strings.Index(text, "  status:")
 	tagsIdx := strings.Index(text, "  tags:")
 	if statusIdx < 0 || tagsIdx < 0 {
@@ -657,26 +534,13 @@ func TestHandleBulkWriteMapSlice(t *testing.T) {
 	b, _ := setupTestBackend(t)
 	defer b.Close()
 
-	handler := handleBulkWrite(b)
-	req := mcp.CallToolRequest{}
-	req.Params.Name = "kiwi_bulk_write"
-	req.Params.Arguments = map[string]any{
+	text := mustCallTool(t, handleBulkWrite(b), "kiwi_bulk_write", map[string]any{
 		"files": []map[string]any{
 			{"path": "mapslice1.md", "content": "# Map Slice 1"},
 			{"path": "mapslice2.md", "content": "# Map Slice 2"},
 		},
-	}
-
-	result, err := handler(context.Background(), req)
-	if err != nil {
-		t.Fatalf("handleBulkWrite with []map[string]any: %v", err)
-	}
-	if result.IsError {
-		text := result.Content[0].(mcp.TextContent).Text
-		t.Fatalf("unexpected error: %s", text)
-	}
-	text := result.Content[0].(mcp.TextContent).Text
-	if !contains(text, "Written 2 files") {
+	})
+	if !strings.Contains(text, "Written 2 files") {
 		t.Fatalf("expected 'Written 2 files', got: %s", text)
 	}
 }
@@ -692,7 +556,7 @@ func TestResourceFileURLDecoding(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
 	}
-	if !contains(content, "# Spaced Path") {
+	if !strings.Contains(content, "# Spaced Path") {
 		t.Fatalf("unexpected content: %s", content)
 	}
 }
@@ -710,7 +574,7 @@ func TestRemoteBackendErrorPaths(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected error for 500 response")
 		}
-		if !contains(err.Error(), "internal server error") {
+		if !strings.Contains(err.Error(), "internal server error") {
 			t.Fatalf("expected error message in response, got: %v", err)
 		}
 	})
@@ -794,24 +658,12 @@ func TestMCP_KiwiQuery(t *testing.T) {
 	b, _ := setupTestBackend(t)
 	defer b.Close()
 
-	handler := handleQuery(b)
-	req := mcp.CallToolRequest{}
-	req.Params.Name = "kiwi_query"
-	req.Params.Arguments = map[string]any{
+	text := mustCallTool(t, handleQuery(b), "kiwi_query", map[string]any{
 		"query":  `TABLE _path`,
 		"format": "table",
-	}
-
-	result, err := handler(context.Background(), req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.IsError {
-		t.Fatalf("expected success, got error: %v", result.Content)
-	}
-	text, _ := result.Content[0].(mcp.TextContent)
-	if !strings.Contains(text.Text, "|") {
-		t.Errorf("expected markdown table, got:\n%s", text.Text)
+	})
+	if !strings.Contains(text, "|") {
+		t.Errorf("expected markdown table, got:\n%s", text)
 	}
 }
 
@@ -828,23 +680,14 @@ func TestMCP_KiwiViewRefresh(t *testing.T) {
 	// Re-index so the view file appears in file_meta
 	b.init()
 	if b.stack != nil && b.stack.Searcher != nil {
-		if sq, ok := b.stack.Searcher.(interface{ Reindex(context.Context) (int, error) }); ok {
+		if sq, ok := b.stack.Searcher.(interface {
+			Reindex(context.Context) (int, error)
+		}); ok {
 			sq.Reindex(context.Background())
 		}
 	}
 
-	handler := handleViewRefresh(b)
-	req := mcp.CallToolRequest{}
-	req.Params.Name = "kiwi_view_refresh"
-	req.Params.Arguments = map[string]any{
+	mustCallTool(t, handleViewRefresh(b), "kiwi_view_refresh", map[string]any{
 		"path": "views/test.md",
-	}
-
-	result, err := handler(context.Background(), req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.IsError {
-		t.Fatalf("expected success, got error: %v", result.Content)
-	}
+	})
 }

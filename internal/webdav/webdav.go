@@ -1,14 +1,5 @@
-// Package webdav exposes the knowledge root over the WebDAV protocol.
-//
-// The FileSystem is a thin wrapper over the on-disk root: reads and directory
-// ops go straight to the local filesystem, but writes and deletes are funneled
-// through pipeline.Pipeline so they produce the same git commit + search index
-// + SSE broadcast side-effects that the REST API does.
-//
-// WebDAV streams writes as Write(p) calls followed by Close(). We buffer the
-// body in memory and call pipeline.Write on Close — knowledge-base files are
-// markdown, so they fit in memory, and a single commit-per-save is the
-// expected history granularity.
+// Package webdav exposes the knowledge root over WebDAV. Writes go through
+// pipeline.Pipeline so they get the same versioning/indexing as REST.
 package webdav
 
 import (
@@ -24,14 +15,11 @@ import (
 	"time"
 
 	"github.com/kiwifs/kiwifs/internal/pipeline"
+	"github.com/kiwifs/kiwifs/internal/storage"
 	"golang.org/x/net/webdav"
 )
 
 // FS implements webdav.FileSystem on top of a local root directory.
-//
-// The actor string is stamped into every git commit produced by writes that
-// come through this protocol (default: "webdav") so audit logs can tell
-// WebDAV-origin changes apart from REST or fsnotify-caught direct edits.
 type FS struct {
 	root   string
 	pipe   *pipeline.Pipeline
@@ -50,9 +38,6 @@ func New(root string, pipe *pipeline.Pipeline, actor, apiKey string) *FS {
 }
 
 // Handler wires the FS into an http.Handler with an in-memory lock system.
-// Most WebDAV clients require locking to accept PUT with If-None-Match, so
-// the memory locks keep single-process deployments honest without pulling
-// in a persistent lock store.
 func (f *FS) Handler(prefix string) http.Handler {
 	h := &webdav.Handler{
 		Prefix:     prefix,
@@ -93,18 +78,16 @@ func (f *FS) auth(next http.Handler) http.Handler {
 // abs resolves a WebDAV path (always slash-separated, may have leading '/')
 // to an absolute local path and guards against traversal outside the root.
 func (f *FS) abs(name string) (string, string, error) {
-	clean := filepath.Clean("/" + strings.TrimPrefix(name, "/"))
-	abs := filepath.Join(f.root, clean)
-	rel, err := filepath.Rel(f.root, abs)
-	if err != nil || strings.HasPrefix(rel, "..") {
+	absPath, err := storage.GuardPath(f.root, strings.TrimPrefix(name, "/"))
+	if err != nil {
 		return "", "", os.ErrPermission
 	}
-	// rel is the storage-relative path the pipeline sees ("concepts/auth.md").
+	rel, _ := filepath.Rel(f.root, absPath)
 	rel = filepath.ToSlash(rel)
 	if rel == "." {
 		rel = ""
 	}
-	return abs, rel, nil
+	return absPath, rel, nil
 }
 
 func (f *FS) Mkdir(_ context.Context, name string, perm os.FileMode) error {
@@ -196,10 +179,8 @@ func (f *FS) Rename(ctx context.Context, oldName, newName string) error {
 	return f.pipe.Delete(ctx, oldRel, f.actor)
 }
 
-// OpenFile returns a File. For read-only flags we pass through to os.File;
-// for any write intent we return a buffered file that calls pipeline.Write
-// on Close. The buffered approach is what makes the commit granularity
-// match REST (one PUT = one commit) instead of one-per-Write-call.
+// OpenFile returns a File. Write-intent opens get a buffered file that
+// calls pipeline.Write on Close.
 func (f *FS) OpenFile(ctx context.Context, name string, flag int, perm os.FileMode) (webdav.File, error) {
 	abs, rel, err := f.abs(name)
 	if err != nil {
@@ -242,26 +223,15 @@ func (f *FS) OpenFile(ctx context.Context, name string, flag int, perm os.FileMo
 	}, nil
 }
 
-// ─── File implementations ───────────────────────────────────────────────────
-
-// readFile is a thin wrapper so we can implement the webdav.File interface
-// (which requires io.Writer even on read-only opens — clients are allowed to
-// call Write and get ErrPermission).
+// readFile wraps os.File and rejects writes with ErrPermission.
 type readFile struct{ *os.File }
 
 func (r *readFile) Write(_ []byte) (int, error) { return 0, os.ErrPermission }
 
-// webdavSpillThreshold is the buffered-bytes point above which a webdav
-// write handle spills to a temp file on disk rather than growing its
-// in-memory buffer. Below this, we keep everything in RAM for speed; above
-// it, we swap to a tempfile + WriteStream on Close so a 2 GB upload
-// doesn't OOM the process.
+// webdavSpillThreshold: writes above this spill to a temp file.
 const webdavSpillThreshold = pipeline.StreamInMemoryThreshold
 
-// writeFile accumulates the body of a PUT. Small bodies stay in the
-// bytes.Buffer for zero-copy fan-out through pipeline.Write; larger ones
-// transparently spill to a temp file so peak memory stays bounded. Either
-// way, Close commits the final payload atomically through the pipeline.
+// writeFile buffers a PUT body (in RAM or temp file) and commits on Close.
 type writeFile struct {
 	fs      *FS
 	ctx     context.Context // captured from OpenFile so Close can plumb it through to pipeline.Write

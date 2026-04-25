@@ -5,73 +5,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/kiwifs/kiwifs/internal/comments"
 	"github.com/kiwifs/kiwifs/internal/config"
 	"github.com/kiwifs/kiwifs/internal/events"
-	"github.com/kiwifs/kiwifs/internal/links"
 	"github.com/kiwifs/kiwifs/internal/markdown"
-	"github.com/kiwifs/kiwifs/internal/pipeline"
-	"github.com/kiwifs/kiwifs/internal/search"
-	"github.com/kiwifs/kiwifs/internal/storage"
-	"github.com/kiwifs/kiwifs/internal/versioning"
 )
-
-// buildTestServer wires up the real Server with a Noop versioner + Grep
-// search so handler tests cover the full request path without side effects
-// on git.
-func buildTestServer(t *testing.T) *Server {
-	t.Helper()
-	dir := t.TempDir()
-	store, err := storage.NewLocal(dir)
-	if err != nil {
-		t.Fatalf("storage: %v", err)
-	}
-	searcher := search.NewGrep(dir)
-	ver := versioning.NewNoop()
-	hub := events.NewHub()
-	pipe := pipeline.New(store, ver, searcher, nil, hub, nil, "")
-	cstore, err := comments.New(dir)
-	if err != nil {
-		t.Fatalf("comments: %v", err)
-	}
-	cfg := &config.Config{}
-	cfg.Storage.Root = dir
-	return NewServer(cfg, pipe, nil, cstore, nil, nil)
-}
-
-// buildSQLiteTestServer is the same wiring as buildTestServer but swaps in
-// the SQLite searcher so tests can exercise backlinks, metadata queries, and
-// everything else grep can't do.
-func buildSQLiteTestServer(t *testing.T) (*Server, string) {
-	t.Helper()
-	dir := t.TempDir()
-	store, err := storage.NewLocal(dir)
-	if err != nil {
-		t.Fatalf("storage: %v", err)
-	}
-	searcher, err := search.NewSQLite(dir, store)
-	if err != nil {
-		t.Fatalf("sqlite: %v", err)
-	}
-	t.Cleanup(func() { _ = searcher.Close() })
-	ver := versioning.NewNoop()
-	hub := events.NewHub()
-	pipe := pipeline.New(store, ver, searcher, searcher, hub, nil, "")
-	cstore, err := comments.New(dir)
-	if err != nil {
-		t.Fatalf("comments: %v", err)
-	}
-	cfg := &config.Config{}
-	cfg.Storage.Root = dir
-	return NewServer(cfg, pipe, nil, cstore, nil, nil), dir
-}
 
 // TestMetaEndpoint covers the happy path: write a markdown file with
 // frontmatter, then GET /api/kiwi/meta with a matching where clause.
@@ -79,15 +22,10 @@ func TestMetaEndpoint(t *testing.T) {
 	s, _ := buildSQLiteTestServer(t)
 
 	body := "---\nstatus: published\npriority: high\n---\n# Hi\n"
-	req := httptest.NewRequest(http.MethodPut, "/api/kiwi/file?path=doc.md", strings.NewReader(body))
-	rec := httptest.NewRecorder()
-	s.echo.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("PUT: %d %s", rec.Code, rec.Body.String())
-	}
+	mustPutFile(t, s, "doc.md", body)
 
-	req = httptest.NewRequest(http.MethodGet, "/api/kiwi/meta?where=$.status=published", nil)
-	rec = httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/kiwi/meta?where=$.status=published", nil)
+	rec := httptest.NewRecorder()
 	s.echo.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET /meta: %d %s", rec.Code, rec.Body.String())
@@ -282,16 +220,7 @@ func TestWriteFileIfMatchConflictUnderRace(t *testing.T) {
 // a valid bearer must reach the handler, an invalid one must 401, and
 // the middleware must stamp X-Actor/X-Space onto the request.
 func TestPerSpaceKeyMiddlewareValidates(t *testing.T) {
-	dir := t.TempDir()
-	store, err := storage.NewLocal(dir)
-	if err != nil {
-		t.Fatalf("storage: %v", err)
-	}
-	pipe := pipeline.New(store, versioning.NewNoop(), search.NewGrep(dir), nil, events.NewHub(), nil, "")
-	cstore, err := comments.New(dir)
-	if err != nil {
-		t.Fatalf("comments: %v", err)
-	}
+	dir, pipe, cstore := buildTestPipeline(t)
 	cfg := &config.Config{}
 	cfg.Storage.Root = dir
 	cfg.Auth.Type = "perspace"
@@ -302,10 +231,10 @@ func TestPerSpaceKeyMiddlewareValidates(t *testing.T) {
 	s := NewServer(cfg, pipe, nil, cstore, nil, nil)
 
 	cases := []struct {
-		name   string
-		auth   string
-		path   string
-		want   int
+		name string
+		auth string
+		path string
+		want int
 	}{
 		{"valid key, in-scope path", "Bearer secret-team-a", "team-a/note.md", http.StatusOK},
 		{"valid key, out-of-scope path", "Bearer secret-team-a", "team-b/note.md", http.StatusForbidden},
@@ -522,17 +451,11 @@ func TestSSEHeartbeat(t *testing.T) {
 func TestToCEndpoint(t *testing.T) {
 	s := buildTestServer(t)
 
-	// Seed a file with nested headings.
 	body := "# Title\n\ncontent\n\n## Section A\n\n### Sub A1\n"
-	req := httptest.NewRequest(http.MethodPut, "/api/kiwi/file?path=doc.md", strings.NewReader(body))
-	rec := httptest.NewRecorder()
-	s.echo.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("PUT doc.md: %d %s", rec.Code, rec.Body.String())
-	}
+	mustPutFile(t, s, "doc.md", body)
 
-	req = httptest.NewRequest(http.MethodGet, "/api/kiwi/toc?path=doc.md", nil)
-	rec = httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/kiwi/toc?path=doc.md", nil)
+	rec := httptest.NewRecorder()
 	s.echo.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET /toc: %d %s", rec.Code, rec.Body.String())
@@ -576,28 +499,6 @@ func TestToCEndpoint(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("no path: expected 400, got %d", rec.Code)
 	}
-}
-
-// pngMagic is the minimal byte prefix that makes http.DetectContentType
-// return "image/png" — enough for the asset handler's sniff + allowlist
-// check without shipping a real encoder in the test dependencies.
-var pngMagic = []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n', 0, 0, 0, 0}
-
-func buildMultipart(t *testing.T, fieldName, filename string, content []byte) (*bytes.Buffer, string) {
-	t.Helper()
-	buf := &bytes.Buffer{}
-	w := multipart.NewWriter(buf)
-	part, err := w.CreateFormFile(fieldName, filename)
-	if err != nil {
-		t.Fatalf("create form file: %v", err)
-	}
-	if _, err := part.Write(content); err != nil {
-		t.Fatalf("write part: %v", err)
-	}
-	if err := w.Close(); err != nil {
-		t.Fatalf("close multipart: %v", err)
-	}
-	return buf, w.FormDataContentType()
 }
 
 func TestUploadAssetPNG(t *testing.T) {
@@ -701,30 +602,6 @@ func TestUploadAssetRejectsOversize(t *testing.T) {
 	}
 }
 
-// buildTestServerWithAssets is buildTestServer with a caller-supplied
-// AssetsConfig baked in, so tests can exercise the limit/allowlist knobs
-// without post-construction mutation (handlers snapshot the config at
-// setupRoutes time).
-func buildTestServerWithAssets(t *testing.T, assets config.AssetsConfig) *Server {
-	t.Helper()
-	dir := t.TempDir()
-	store, err := storage.NewLocal(dir)
-	if err != nil {
-		t.Fatalf("storage: %v", err)
-	}
-	searcher := search.NewGrep(dir)
-	ver := versioning.NewNoop()
-	hub := events.NewHub()
-	pipe := pipeline.New(store, ver, searcher, nil, hub, nil, "")
-	cstore, err := comments.New(dir)
-	if err != nil {
-		t.Fatalf("comments: %v", err)
-	}
-	cfg := &config.Config{Assets: assets}
-	cfg.Storage.Root = dir
-	return NewServer(cfg, pipe, nil, cstore, nil, nil)
-}
-
 func TestReadFileLastModified(t *testing.T) {
 	s := buildTestServer(t)
 
@@ -802,13 +679,7 @@ func TestReadFileLastModified(t *testing.T) {
 func TestGraphCachingAndInvalidation(t *testing.T) {
 	s, _ := buildSQLiteTestServer(t)
 
-	// Seed one file so the graph isn't empty.
-	put := httptest.NewRequest(http.MethodPut, "/api/kiwi/file?path=a.md", strings.NewReader("# a\n"))
-	rec := httptest.NewRecorder()
-	s.echo.ServeHTTP(rec, put)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("seed a.md: %d", rec.Code)
-	}
+	mustPutFile(t, s, "a.md", "# a\n")
 
 	first := httptest.NewRecorder()
 	s.echo.ServeHTTP(first, httptest.NewRequest(http.MethodGet, "/api/kiwi/graph", nil))
@@ -833,12 +704,7 @@ func TestGraphCachingAndInvalidation(t *testing.T) {
 
 	// Write a new file — OnInvalidate fires, cache drops, next /graph
 	// includes b.md.
-	put2 := httptest.NewRequest(http.MethodPut, "/api/kiwi/file?path=b.md", strings.NewReader("# b\n"))
-	rec = httptest.NewRecorder()
-	s.echo.ServeHTTP(rec, put2)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("write b.md: %d", rec.Code)
-	}
+	mustPutFile(t, s, "b.md", "# b\n")
 
 	third := httptest.NewRecorder()
 	s.echo.ServeHTTP(third, httptest.NewRequest(http.MethodGet, "/api/kiwi/graph", nil))
@@ -853,43 +719,10 @@ func TestGraphCachingAndInvalidation(t *testing.T) {
 	}
 }
 
-func buildTestServerWithPublicURL(t *testing.T, publicURL string) *Server {
-	t.Helper()
-	dir := t.TempDir()
-	store, err := storage.NewLocal(dir)
-	if err != nil {
-		t.Fatalf("storage: %v", err)
-	}
-	searcher := search.NewGrep(dir)
-	ver := versioning.NewNoop()
-	hub := events.NewHub()
-	pipe := pipeline.New(store, ver, searcher, nil, hub, nil, "")
-	cstore, err := comments.New(dir)
-	if err != nil {
-		t.Fatalf("comments: %v", err)
-	}
-	lr := links.NewResolver(func(ctx context.Context, fn func(path string)) error {
-		return storage.Walk(ctx, store, "/", func(e storage.Entry) error {
-			fn(e.Path)
-			return nil
-		})
-	})
-	pipe.OnInvalidate = func() { lr.MarkDirty() }
-	cfg := &config.Config{}
-	cfg.Storage.Root = dir
-	cfg.Server.PublicURL = publicURL
-	return NewServer(cfg, pipe, nil, cstore, nil, lr)
-}
-
 func TestResolveLinksEndpoint(t *testing.T) {
 	s := buildTestServerWithPublicURL(t, "https://wiki.co")
 
-	req := httptest.NewRequest(http.MethodPut, "/api/kiwi/file?path=concepts/auth.md", strings.NewReader("# Auth\n"))
-	rec := httptest.NewRecorder()
-	s.echo.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("seed: %d %s", rec.Code, rec.Body.String())
-	}
+	mustPutFile(t, s, "concepts/auth.md", "# Auth\n")
 
 	t.Run("resolves wiki links", func(t *testing.T) {
 		body := `{"content":"See [[auth]] for details."}`
@@ -934,20 +767,10 @@ func TestResolveLinksEndpoint(t *testing.T) {
 func TestReadFileResolveLinks(t *testing.T) {
 	s := buildTestServerWithPublicURL(t, "https://wiki.co")
 
-	req := httptest.NewRequest(http.MethodPut, "/api/kiwi/file?path=concepts/auth.md", strings.NewReader("# Auth\n"))
-	rec := httptest.NewRecorder()
-	s.echo.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("seed auth.md: %d", rec.Code)
-	}
+	mustPutFile(t, s, "concepts/auth.md", "# Auth\n")
 
 	content := "See [[auth]] for details.\n"
-	req = httptest.NewRequest(http.MethodPut, "/api/kiwi/file?path=readme.md", strings.NewReader(content))
-	rec = httptest.NewRecorder()
-	s.echo.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("seed readme.md: %d", rec.Code)
-	}
+	mustPutFile(t, s, "readme.md", content)
 
 	t.Run("resolve_links=true rewrites links", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/api/kiwi/file?path=readme.md&resolve_links=true", nil)
@@ -989,12 +812,7 @@ func TestHandler_Query(t *testing.T) {
 		{"beta.md", "---\nname: Beta\nstatus: draft\n---\n# Beta\n"},
 		{"gamma.md", "---\nname: Gamma\nstatus: active\n---\n# Gamma\n"},
 	} {
-		req := httptest.NewRequest(http.MethodPut, "/api/kiwi/file?path="+f.path, strings.NewReader(f.body))
-		rec := httptest.NewRecorder()
-		s.echo.ServeHTTP(rec, req)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("PUT %s: %d %s", f.path, rec.Code, rec.Body.String())
-		}
+		mustPutFile(t, s, f.path, f.body)
 	}
 
 	req := httptest.NewRequest(http.MethodGet, `/api/kiwi/query?q=TABLE+name+WHERE+status+%3D+"active"&format=json`, nil)
@@ -1034,12 +852,7 @@ func TestHandler_QueryAggregate(t *testing.T) {
 		{"b.md", "---\nstatus: active\n---\n"},
 		{"c.md", "---\nstatus: draft\n---\n"},
 	} {
-		req := httptest.NewRequest(http.MethodPut, "/api/kiwi/file?path="+f.path, strings.NewReader(f.body))
-		rec := httptest.NewRecorder()
-		s.echo.ServeHTTP(rec, req)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("PUT %s: %d %s", f.path, rec.Code, rec.Body.String())
-		}
+		mustPutFile(t, s, f.path, f.body)
 	}
 
 	req := httptest.NewRequest(http.MethodGet, `/api/kiwi/query/aggregate?group_by=status`, nil)
@@ -1099,28 +912,18 @@ func TestHandler_ViewRefresh(t *testing.T) {
 		{"students/a.md", "---\nname: Alpha\nstatus: active\n---\n"},
 		{"students/b.md", "---\nname: Beta\nstatus: draft\n---\n"},
 	} {
-		req := httptest.NewRequest(http.MethodPut, "/api/kiwi/file?path="+f.path, strings.NewReader(f.body))
-		rec := httptest.NewRecorder()
-		s.echo.ServeHTTP(rec, req)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("PUT %s: %d %s", f.path, rec.Code, rec.Body.String())
-		}
+		mustPutFile(t, s, f.path, f.body)
 	}
 
 	// Create a computed view file
 	viewBody := "---\nkiwi-view: true\nkiwi-query: TABLE name FROM \"students/\"\n---\n<!-- kiwi:auto -->\n"
-	req := httptest.NewRequest(http.MethodPut, "/api/kiwi/file?path=views/test.md", strings.NewReader(viewBody))
-	rec := httptest.NewRecorder()
-	s.echo.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("PUT view: %d %s", rec.Code, rec.Body.String())
-	}
+	mustPutFile(t, s, "views/test.md", viewBody)
 
 	// Refresh the view
 	refreshBody := `{"path":"views/test.md"}`
-	req = httptest.NewRequest(http.MethodPost, "/api/kiwi/view/refresh", strings.NewReader(refreshBody))
+	req := httptest.NewRequest(http.MethodPost, "/api/kiwi/view/refresh", strings.NewReader(refreshBody))
 	req.Header.Set("Content-Type", "application/json")
-	rec = httptest.NewRecorder()
+	rec := httptest.NewRecorder()
 	s.echo.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("POST /view/refresh: %d %s", rec.Code, rec.Body.String())
@@ -1144,12 +947,7 @@ func TestHandler_Query_FormatTable(t *testing.T) {
 		{"a.md", "---\nname: Alpha\nstatus: active\n---\n"},
 		{"b.md", "---\nname: Beta\nstatus: draft\n---\n"},
 	} {
-		req := httptest.NewRequest(http.MethodPut, "/api/kiwi/file?path="+f.path, strings.NewReader(f.body))
-		rec := httptest.NewRecorder()
-		s.echo.ServeHTTP(rec, req)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("PUT %s: %d %s", f.path, rec.Code, rec.Body.String())
-		}
+		mustPutFile(t, s, f.path, f.body)
 	}
 
 	req := httptest.NewRequest(http.MethodGet, `/api/kiwi/query?q=TABLE+name&format=table`, nil)

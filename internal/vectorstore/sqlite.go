@@ -198,8 +198,6 @@ func (s *SQLite) Search(ctx context.Context, vector []float32, topK int) ([]Resu
 	return candidates, nil
 }
 
-// ─── Internals ──────────────────────────────────────────────────────────────
-
 func normalise(v []float32) []float32 {
 	var sum float64
 	for _, x := range v {

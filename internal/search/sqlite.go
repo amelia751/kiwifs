@@ -21,6 +21,71 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+func placeholders(n int) string {
+	s := make([]string, n)
+	for i := range s {
+		s[i] = "?"
+	}
+	return strings.Join(s, ",")
+}
+
+func scanMetaRows(rows *sql.Rows) ([]MetaResult, error) {
+	var out []MetaResult
+	for rows.Next() {
+		var path, raw string
+		if err := rows.Scan(&path, &raw); err != nil {
+			return nil, err
+		}
+		fm := map[string]any{}
+		if raw != "" {
+			_ = json.Unmarshal([]byte(raw), &fm)
+		}
+		out = append(out, MetaResult{Path: path, Frontmatter: fm})
+	}
+	return out, rows.Err()
+}
+
+type trustCoeffs struct {
+	verified, deprecated, outdated, sot, confScale float64
+}
+
+func trustBoost(fm map[string]any, c trustCoeffs) float64 {
+	boost := 1.0
+	if status, _ := fm["status"].(string); status != "" {
+		switch strings.ToLower(status) {
+		case "verified":
+			boost *= c.verified
+		case "deprecated":
+			boost *= c.deprecated
+		case "outdated":
+			boost *= c.outdated
+		}
+	}
+	if sot, ok := fm["source-of-truth"]; ok {
+		if b, isBool := sot.(bool); isBool && b {
+			boost *= c.sot
+		}
+	}
+	if conf, ok := fm["confidence"]; ok {
+		var cv float64
+		switch v := conf.(type) {
+		case float64:
+			cv = v
+		case int:
+			cv = float64(v)
+		}
+		if cv > 0 && cv <= 1 {
+			boost *= 1.0 + c.confScale*cv
+		}
+	}
+	return boost
+}
+
+var (
+	hardCoeffs = trustCoeffs{2.0, 0.1, 0.3, 3.0, 1.0}
+	softCoeffs = trustCoeffs{1.2, 0.5, 0.7, 1.4, 0.3}
+)
+
 // SQLite is a Searcher backed by SQLite FTS5. Pure-Go (no CGo).
 // The index lives at <root>/.kiwi/state/search.db and is fully rebuildable
 // from the files — if it ever drifts, `Reindex()` wipes and re-populates.
@@ -171,8 +236,6 @@ func (s *SQLite) isEmpty(ctx context.Context) (bool, error) {
 	return n == 0, nil
 }
 
-// ─── Searcher interface ─────────────────────────────────────────────────────
-
 func (s *SQLite) Search(ctx context.Context, query string, limit, offset int, pathPrefix string) ([]Result, error) {
 	q := buildFTS5Query(query)
 	if q == "" {
@@ -181,29 +244,14 @@ func (s *SQLite) Search(ctx context.Context, query string, limit, offset int, pa
 	limit = NormalizeLimit(limit)
 	offset = NormalizeOffset(offset)
 
-	var sqlQ string
-	var args []any
+	sqlQ := `SELECT path, snippet(docs, 1, '<mark>', '</mark>', '…', 16) AS snip, bm25(docs) AS score FROM docs WHERE docs MATCH ?`
+	args := []any{q}
 	if pathPrefix != "" {
-		sqlQ = `
-SELECT path,
-       snippet(docs, 1, '<mark>', '</mark>', '…', 16) AS snip,
-       bm25(docs) AS score
-FROM docs
-WHERE docs MATCH ? AND path LIKE ?
-ORDER BY rank
-LIMIT ? OFFSET ?;`
-		args = []any{q, pathPrefix + "%", limit, offset}
-	} else {
-		sqlQ = `
-SELECT path,
-       snippet(docs, 1, '<mark>', '</mark>', '…', 16) AS snip,
-       bm25(docs) AS score
-FROM docs
-WHERE docs MATCH ?
-ORDER BY rank
-LIMIT ? OFFSET ?;`
-		args = []any{q, limit, offset}
+		sqlQ += ` AND path LIKE ?`
+		args = append(args, pathPrefix+"%")
 	}
+	sqlQ += ` ORDER BY rank LIMIT ? OFFSET ?`
+	args = append(args, limit, offset)
 
 	rows, err := s.readDB.QueryContext(ctx, sqlQ, args...)
 	if err != nil {
@@ -364,8 +412,6 @@ func (s *SQLite) Close() error {
 	return rerr
 }
 
-// ─── Linker interface ───────────────────────────────────────────────────────
-
 // IndexLinks replaces every link row emitted by `source`. Atomic: either all
 // old rows for this source are gone and all new rows are in, or neither.
 func (s *SQLite) IndexLinks(ctx context.Context, source string, targets []string) error {
@@ -398,8 +444,6 @@ func (s *SQLite) RemoveLinks(ctx context.Context, source string) error {
 	return err
 }
 
-// ─── Metadata interface ─────────────────────────────────────────────────────
-
 // IndexMeta upserts a file's frontmatter into the file_meta table so
 // structured queries (status = "published", derived-from[*].id = "run-249",
 // …) can hit a JSON column instead of re-parsing every document.
@@ -417,7 +461,7 @@ func (s *SQLite) IndexMeta(ctx context.Context, path string, content []byte) err
 		fm = map[string]any{}
 	}
 	if s.computedFields {
-		body := bodyAfterFrontmatter(content)
+		body := []byte(markdown.BodyAfterFrontmatter(content))
 		fm["_word_count"] = len(strings.Fields(string(body)))
 		fm["_link_count"] = len(links.Extract(content))
 		fm["_heading_count"] = len(parsed.Headings)
@@ -425,16 +469,14 @@ func (s *SQLite) IndexMeta(ctx context.Context, path string, content []byte) err
 
 		forms := links.TargetForms(path)
 		if len(forms) > 0 {
-			placeholders := make([]string, len(forms))
 			args := make([]any, len(forms))
 			for i, f := range forms {
-				placeholders[i] = "?"
 				args[i] = strings.ToLower(f)
 			}
 			var blCount int
 			_ = s.readDB.QueryRowContext(ctx,
 				fmt.Sprintf(`SELECT COUNT(DISTINCT source) FROM links WHERE target_lc IN (%s)`,
-					strings.Join(placeholders, ",")),
+					placeholders(len(forms))),
 				args...,
 			).Scan(&blCount)
 			fm["_backlink_count"] = blCount
@@ -460,18 +502,6 @@ func (s *SQLite) IndexMeta(ctx context.Context, path string, content []byte) err
 		path, string(payload), tasksPayload, time.Now().UTC().Format(time.RFC3339),
 	)
 	return err
-}
-
-func bodyAfterFrontmatter(content []byte) []byte {
-	s := strings.TrimLeft(string(content), "\n\r")
-	if !strings.HasPrefix(s, "---") {
-		return content
-	}
-	idx := strings.Index(s[3:], "\n---")
-	if idx < 0 {
-		return content
-	}
-	return []byte(strings.TrimLeft(s[3+idx+4:], "\n\r"))
 }
 
 // RemoveMeta drops the file_meta row for a path — called from the pipeline's
@@ -575,7 +605,7 @@ func arrayPathPrefix(field string) (parent, sub string, ok bool) {
 
 // QueryMeta runs a structured query against file_meta. filters are AND-ed;
 // sort is an optional JSON path ("$.priority" etc.), order is "asc"/"desc".
-// limit ≤ 0 falls back to 50 (MaxSearchLimit caps at 200); negative offset
+// limit ≤ 0 falls back to 50 (maxSearchLimit caps at 200); negative offset
 // is treated as zero.
 func (s *SQLite) QueryMeta(ctx context.Context, filters []MetaFilter, sort, order string, limit, offset int) ([]MetaResult, error) {
 	return s.QueryMetaOr(ctx, filters, nil, sort, order, limit, offset)
@@ -660,23 +690,7 @@ func (s *SQLite) QueryMetaOr(ctx context.Context, andFilters, orFilters []MetaFi
 		return nil, fmt.Errorf("query meta: %w", err)
 	}
 	defer rows.Close()
-
-	out := []MetaResult{}
-	for rows.Next() {
-		var (
-			path string
-			raw  string
-		)
-		if err := rows.Scan(&path, &raw); err != nil {
-			return nil, err
-		}
-		fm := map[string]any{}
-		if raw != "" {
-			_ = json.Unmarshal([]byte(raw), &fm)
-		}
-		out = append(out, MetaResult{Path: path, Frontmatter: fm})
-	}
-	return out, rows.Err()
+	return scanMetaRows(rows)
 }
 
 // toJSONSafe converts YAML-parsed maps (which can use map[any]any under
@@ -739,15 +753,13 @@ func (s *SQLite) Backlinks(ctx context.Context, target string) ([]links.Entry, e
 	if len(forms) == 0 {
 		return nil, nil
 	}
-	placeholders := make([]string, len(forms))
 	args := make([]any, len(forms))
 	for i, f := range forms {
-		placeholders[i] = "?"
 		args[i] = strings.ToLower(f)
 	}
 	q := fmt.Sprintf(
 		`SELECT source, COUNT(*) FROM links WHERE target_lc IN (%s) GROUP BY source ORDER BY source`,
-		strings.Join(placeholders, ","),
+		placeholders(len(forms)),
 	)
 	rows, err := s.readDB.QueryContext(ctx, q, args...)
 	if err != nil {
@@ -773,16 +785,14 @@ func (s *SQLite) FilterByDate(ctx context.Context, paths []string, after time.Ti
 		return nil, nil
 	}
 	cutoff := after.UTC().Format(time.RFC3339)
-	placeholders := make([]string, len(paths))
 	args := make([]any, len(paths)+1)
 	for i, p := range paths {
-		placeholders[i] = "?"
 		args[i] = p
 	}
 	args[len(paths)] = cutoff
 	q := fmt.Sprintf(
 		`SELECT path FROM file_meta WHERE path IN (%s) AND updated_at > ?`,
-		strings.Join(placeholders, ","),
+		placeholders(len(paths)),
 	)
 	rows, err := s.readDB.QueryContext(ctx, q, args...)
 	if err != nil {
@@ -799,8 +809,6 @@ func (s *SQLite) FilterByDate(ctx context.Context, paths []string, after time.Ti
 	}
 	return out, rows.Err()
 }
-
-// ─── Verified Knowledge Layer ────────────────────────────────────────────────
 
 // SearchBoosted runs a normal FTS5 search and then applies a *soft*
 // trust re-rank: verified / source-of-truth / high-confidence pages get
@@ -850,15 +858,13 @@ func (s *SQLite) searchTrust(ctx context.Context, query string, limit, offset in
 		paths[i] = r.Path
 	}
 
-	placeholders := make([]string, len(paths))
 	args := make([]any, len(paths))
 	for i, p := range paths {
-		placeholders[i] = "?"
 		args[i] = p
 	}
 	q := fmt.Sprintf(
 		`SELECT path, frontmatter FROM file_meta WHERE path IN (%s)`,
-		strings.Join(placeholders, ","),
+		placeholders(len(paths)),
 	)
 	rows, err := s.readDB.QueryContext(ctx, q, args...)
 	if err != nil {
@@ -905,78 +911,8 @@ func (s *SQLite) searchTrust(ctx context.Context, query string, limit, offset in
 	return results, nil
 }
 
-// hardTrustBoost is the legacy multiplier policy: "verified" pages get a
-// 2x bump, a source-of-truth flag triples them, and deprecated pages
-// drop to 0.1x. Intended for the opt-in "Verified" search chip where
-// people explicitly want only canonical content at the top.
-func hardTrustBoost(fm map[string]any) float64 {
-	boost := 1.0
-	if status, _ := fm["status"].(string); status != "" {
-		switch strings.ToLower(status) {
-		case "verified":
-			boost *= 2.0
-		case "deprecated":
-			boost *= 0.1
-		case "outdated":
-			boost *= 0.3
-		}
-	}
-	if sot, ok := fm["source-of-truth"]; ok {
-		if b, isBool := sot.(bool); isBool && b {
-			boost *= 3.0
-		}
-	}
-	if conf, ok := fm["confidence"]; ok {
-		var cv float64
-		switch v := conf.(type) {
-		case float64:
-			cv = v
-		case int:
-			cv = float64(v)
-		}
-		if cv > 0 && cv <= 1 {
-			boost *= 1.0 + cv
-		}
-	}
-	return boost
-}
-
-// softTrustBoost is the default-ranker policy: the *same* signals matter
-// but with dampened multipliers so a non-verified but clearly-more-
-// relevant BM25 hit still wins over a verified one-liner. This is what
-// makes trust "quietly helpful" rather than a tiebreaker that buries
-// fresh content.
-func softTrustBoost(fm map[string]any) float64 {
-	boost := 1.0
-	if status, _ := fm["status"].(string); status != "" {
-		switch strings.ToLower(status) {
-		case "verified":
-			boost *= 1.2
-		case "deprecated":
-			boost *= 0.5
-		case "outdated":
-			boost *= 0.7
-		}
-	}
-	if sot, ok := fm["source-of-truth"]; ok {
-		if b, isBool := sot.(bool); isBool && b {
-			boost *= 1.4
-		}
-	}
-	if conf, ok := fm["confidence"]; ok {
-		var cv float64
-		switch v := conf.(type) {
-		case float64:
-			cv = v
-		case int:
-			cv = float64(v)
-		}
-		if cv > 0 && cv <= 1 {
-			boost *= 1.0 + 0.3*cv
-		}
-	}
-	return boost
-}
+func hardTrustBoost(fm map[string]any) float64 { return trustBoost(fm, hardCoeffs) }
+func softTrustBoost(fm map[string]any) float64 { return trustBoost(fm, softCoeffs) }
 
 // StalePages returns pages that are past their next-review date, or haven't
 // been reviewed within staleDays. Excludes deprecated/archived pages.
@@ -1075,13 +1011,11 @@ func (s *SQLite) FindContradictions(ctx context.Context, path string) ([]string,
 		isSoT, _ = sot.(bool)
 	}
 
-	// Find pages sharing any tag/topic via json_each.
-	placeholders := make([]string, len(tags))
 	args := make([]any, len(tags))
 	for i, t := range tags {
-		placeholders[i] = "?"
 		args[i] = strings.ToLower(t)
 	}
+	ph := placeholders(len(tags))
 
 	q := fmt.Sprintf(`
 SELECT DISTINCT fm.path, fm.frontmatter FROM file_meta fm
@@ -1096,8 +1030,7 @@ WHERE fm.path != ?
       WHERE LOWER(jt.value) IN (%s)
     )
   )`,
-		strings.Join(placeholders, ","),
-		strings.Join(placeholders, ","),
+		ph, ph,
 	)
 
 	// args order: tags... tags... path
@@ -1166,8 +1099,6 @@ func extractStringSlice(fm map[string]any, key string) []string {
 	}
 	return nil
 }
-
-// ─── Internals ──────────────────────────────────────────────────────────────
 
 // reindexBatchSize caps the number of files per reindex transaction. A
 // single megabatch holds the write lock for the whole walk — at 10k files
@@ -1274,7 +1205,7 @@ func (s *SQLite) reindexLocked(ctx context.Context) (int, error) {
 				fm = map[string]any{}
 			}
 			if s.computedFields {
-				body := bodyAfterFrontmatter(content)
+				body := []byte(markdown.BodyAfterFrontmatter(content))
 				fm["_word_count"] = len(strings.Fields(string(body)))
 				fm["_link_count"] = len(links.Extract(content))
 				fm["_heading_count"] = len(parsed.Headings)

@@ -74,8 +74,8 @@ func TestGrepSearchPagination(t *testing.T) {
 	if err != nil {
 		t.Fatalf("default: %v", err)
 	}
-	if len(def) != DefaultSearchLimit {
-		t.Fatalf("default limit: want %d got %d", DefaultSearchLimit, len(def))
+	if len(def) != defaultSearchLimit {
+		t.Fatalf("default limit: want %d got %d", defaultSearchLimit, len(def))
 	}
 
 	// Offset past total yields empty result, not an error.

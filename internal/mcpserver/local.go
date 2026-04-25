@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"strings"
 	"sync"
 	"time"
 
@@ -117,48 +116,11 @@ func (b *LocalBackend) Tree(ctx context.Context, path string) (json.RawMessage, 
 	if err := b.init(); err != nil {
 		return nil, err
 	}
-	children, err := buildTreeNodes(ctx, b.stack.Store, path, 10)
+	tree, err := storage.BuildTree(ctx, b.stack.Store, path, 10)
 	if err != nil {
 		return nil, err
 	}
-	root := struct {
-		Path     string     `json:"path"`
-		Name     string     `json:"name"`
-		IsDir    bool       `json:"isDir"`
-		Children []treeNode `json:"children"`
-	}{
-		Path:     path,
-		Name:     filepath.Base(path),
-		IsDir:    true,
-		Children: children,
-	}
-	return json.Marshal(root)
-}
-
-func buildTreeNodes(ctx context.Context, store storage.Storage, path string, depth int) ([]treeNode, error) {
-	entries, err := store.List(ctx, path)
-	if err != nil {
-		return nil, err
-	}
-	nodes := make([]treeNode, 0, len(entries))
-	for _, e := range entries {
-		node := treeNode{
-			Path:  e.Path,
-			Name:  e.Name,
-			IsDir: e.IsDir,
-			Size:  e.Size,
-		}
-		if e.IsDir && depth > 0 {
-			children, err := buildTreeNodes(ctx, store, e.Path, depth-1)
-			if err != nil {
-				node.Children = []treeNode{}
-			} else {
-				node.Children = children
-			}
-		}
-		nodes = append(nodes, node)
-	}
-	return nodes, nil
+	return json.Marshal(tree)
 }
 
 func (b *LocalBackend) Search(ctx context.Context, query string, limit, offset int, pathPrefix string) ([]SearchResult, error) {
@@ -236,7 +198,7 @@ func (b *LocalBackend) QueryMetaOr(ctx context.Context, andFilters, orFilters []
 
 	parsedAnd := make([]search.MetaFilter, 0, len(andFilters))
 	for _, raw := range andFilters {
-		f, err := parseMetaFilter(raw)
+		f, err := search.ParseMetaFilter(raw)
 		if err != nil {
 			return nil, err
 		}
@@ -245,7 +207,7 @@ func (b *LocalBackend) QueryMetaOr(ctx context.Context, andFilters, orFilters []
 
 	parsedOr := make([]search.MetaFilter, 0, len(orFilters))
 	for _, raw := range orFilters {
-		f, err := parseMetaFilter(raw)
+		f, err := search.ParseMetaFilter(raw)
 		if err != nil {
 			return nil, err
 		}
@@ -262,34 +224,6 @@ func (b *LocalBackend) QueryMetaOr(ctx context.Context, andFilters, orFilters []
 		out[i] = MetaResult{Path: r.Path, Frontmatter: fm}
 	}
 	return out, nil
-}
-
-func parseMetaFilter(expr string) (search.MetaFilter, error) {
-	for _, op := range []string{"!=", "<=", ">=", "<>", "=", "<", ">"} {
-		if i := strings.Index(expr, op); i > 0 {
-			return search.MetaFilter{
-				Field: strings.TrimSpace(expr[:i]),
-				Op:    op,
-				Value: strings.TrimSpace(expr[i+len(op):]),
-			}, nil
-		}
-	}
-	lower := strings.ToLower(expr)
-	if i := strings.Index(lower, " not like "); i > 0 {
-		return search.MetaFilter{
-			Field: strings.TrimSpace(expr[:i]),
-			Op:    "NOT LIKE",
-			Value: strings.TrimSpace(expr[i+len(" not like "):]),
-		}, nil
-	}
-	if i := strings.Index(lower, " like "); i > 0 {
-		return search.MetaFilter{
-			Field: strings.TrimSpace(expr[:i]),
-			Op:    "LIKE",
-			Value: strings.TrimSpace(expr[i+len(" like "):]),
-		}, nil
-	}
-	return search.MetaFilter{}, fmt.Errorf("invalid filter %q — expected <field><op><value>", expr)
 }
 
 func (b *LocalBackend) ViewRefresh(ctx context.Context, path string) (bool, error) {

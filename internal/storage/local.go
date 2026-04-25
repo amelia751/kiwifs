@@ -48,23 +48,31 @@ func (l *Local) AbsPath(path string) string {
 	return filepath.Join(l.root, clean)
 }
 
-func (l *Local) guardPath(path string) (string, error) {
-	abs := l.AbsPath(path)
-	rel, err := filepath.Rel(l.root, abs)
-	if err != nil || strings.HasPrefix(rel, "..") {
-		return "", fmt.Errorf("path outside root: %s", path)
+// GuardPath resolves userPath against root and rejects any result that
+// escapes root via ".." or other traversal. It returns the absolute path.
+func GuardPath(root, userPath string) (string, error) {
+	clean := filepath.Clean("/" + userPath)
+	abs := filepath.Join(root, clean)
+	rel, err := filepath.Rel(root, abs)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("path traversal denied: %s", userPath)
 	}
-	// Resolve symlinks and re-check — a symlink inside root can point outside.
+	return abs, nil
+}
+
+func (l *Local) guardPath(path string) (string, error) {
+	abs, err := GuardPath(l.root, path)
+	if err != nil {
+		return "", err
+	}
 	evaluated, err := filepath.EvalSymlinks(abs)
 	if err != nil {
 		if os.IsNotExist(err) {
-			// Target doesn't exist yet (write to new file). Check the
-			// deepest existing ancestor instead.
 			return l.guardAncestor(abs)
 		}
 		return "", fmt.Errorf("eval symlinks: %w", err)
 	}
-	rel, err = filepath.Rel(l.root, evaluated)
+	rel, err := filepath.Rel(l.root, evaluated)
 	if err != nil || strings.HasPrefix(rel, "..") {
 		return "", fmt.Errorf("path outside root (symlink): %s", path)
 	}

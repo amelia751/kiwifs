@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kiwifs/kiwifs/internal/markdown"
 	"gopkg.in/yaml.v3"
 )
 
@@ -134,9 +135,9 @@ func TestParseProvenanceHeader(t *testing.T) {
 // markdown file apart so each test can assert on the YAML independently.
 func mustSplit(t *testing.T, content []byte) (fm, body []byte) {
 	t.Helper()
-	f, b, err := splitFrontmatter(content)
+	f, b, err := markdown.SplitFrontmatter(content)
 	if err != nil {
-		t.Fatalf("splitFrontmatter: %v\ncontent=%q", err, content)
+		t.Fatalf("SplitFrontmatter: %v\ncontent=%q", err, content)
 	}
 	if f == nil {
 		t.Fatalf("expected frontmatter, got nil (body=%q)", b)

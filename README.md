@@ -90,7 +90,7 @@ The files are the truth. Everything else is a derivative index you can rebuild.
 KiwiFS implements [Karpathy's LLM Wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) as production infrastructure. The pattern: raw sources in, compiled wiki out, agent maintains it over time.
 
 ```bash
-kiwifs init --template agent-knowledge
+kiwifs init --template knowledge
 ```
 
 ```
@@ -109,7 +109,7 @@ The agent reads `SCHEMA.md` to understand how to maintain the wiki. Three operat
 - **Query** — search the wiki to answer a question.
 - **Lint** — audit for orphan pages, broken links, contradictions, stale content.
 
-Other templates: `team-wiki`, `runbook`, `research`, or start blank with `kiwifs init`.
+Other templates: `wiki`, `runbook`, `research`, or start blank with `kiwifs init`.
 
 ---
 
@@ -297,7 +297,7 @@ Every feature is accessible via `kiwifs <command>`:
 | Command | What it does |
 |---|---|
 | `kiwifs serve` | Start the server (REST API + web UI + optional NFS/S3/WebDAV) |
-| `kiwifs init` | Scaffold a knowledge base from a template (`agent-knowledge`, `team-wiki`, `runbook`, `research`, or blank) |
+| `kiwifs init` | Scaffold a knowledge base from a template (`knowledge`, `wiki`, `runbook`, `research`, or blank) |
 | `kiwifs mcp` | Start a Model Context Protocol server (for Claude, Cursor, etc.) |
 | `kiwifs mount` | FUSE-mount a remote KiwiFS server as a local folder |
 | `kiwifs reindex` | Rebuild search indexes from files (FTS5 + vector + metadata) |
@@ -330,7 +330,7 @@ go build -o kiwifs .
 ### 2. Initialize
 
 ```bash
-kiwifs init --template agent-knowledge --root ./knowledge
+kiwifs init --template knowledge --root ./knowledge
 # Creates SCHEMA.md, index.md, log.md, concepts/, entities/, reports/
 ```
 

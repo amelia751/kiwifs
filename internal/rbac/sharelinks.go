@@ -1,7 +1,6 @@
 package rbac
 
 import (
-	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -12,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/kiwifs/kiwifs/internal/markdown"
 	"golang.org/x/crypto/bcrypt"
 	"gopkg.in/yaml.v3"
 )
@@ -26,7 +26,7 @@ const (
 // PageVisibility extracts the visibility field from YAML frontmatter.
 // Returns VisibilityInternal when the field is absent or unparseable.
 func PageVisibility(content []byte) string {
-	fm, _, err := splitFrontmatter(content)
+	fm, _, err := markdown.SplitFrontmatter(content)
 	if err != nil || len(fm) == 0 {
 		return VisibilityInternal
 	}
@@ -41,42 +41,6 @@ func PageVisibility(content []byte) string {
 		return meta.Visibility
 	default:
 		return VisibilityInternal
-	}
-}
-
-func splitFrontmatter(content []byte) (fm, body []byte, err error) {
-	delim := []byte("---")
-	line, rest, ok := bytes.Cut(content, []byte("\n"))
-	if !ok {
-		return nil, content, nil
-	}
-	if !bytes.Equal(bytes.TrimRight(line, "\r"), delim) {
-		return nil, content, nil
-	}
-	scanner := rest
-	pos := 0
-	for {
-		nl := bytes.IndexByte(scanner, '\n')
-		var current []byte
-		if nl < 0 {
-			current = scanner
-		} else {
-			current = scanner[:nl]
-		}
-		if bytes.Equal(bytes.TrimRight(current, "\r"), delim) {
-			fm = rest[:pos]
-			if nl < 0 {
-				body = nil
-			} else {
-				body = scanner[nl+1:]
-			}
-			return fm, body, nil
-		}
-		if nl < 0 {
-			return nil, nil, nil
-		}
-		pos += nl + 1
-		scanner = scanner[nl+1:]
 	}
 }
 

@@ -273,8 +273,6 @@ func loadSchema(opts Options, b Backend, ctx context.Context) string {
 	return content
 }
 
-// --- Tool handlers ---
-
 func handleRead(b Backend) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		args := req.GetArguments()

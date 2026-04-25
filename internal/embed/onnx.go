@@ -50,15 +50,6 @@ var (
 	onnxReg   InferenceFn
 )
 
-// RegisterONNXInference installs a process-wide ONNX inference backend.
-// Intended for `init()` in build-tagged files that pull in the ONNX runtime
-// — keeps the default build free of native dependencies.
-func RegisterONNXInference(fn InferenceFn) {
-	onnxRegMu.Lock()
-	defer onnxRegMu.Unlock()
-	onnxReg = fn
-}
-
 // NewONNX constructs an ONNX embedder. modelPath must exist on disk; dims
 // is required because callers (vector store config) need it before the
 // first Embed() call.

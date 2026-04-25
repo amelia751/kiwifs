@@ -69,10 +69,11 @@ func RegenerateView(ctx context.Context, store storage.Storage, exec *Executor, 
 		newContent = before + viewMarker + "\n" + rendered + "\n" + viewEndMarker + after
 	} else {
 		// No marker found — append after the closing ---
-		fmEnd := findFrontmatterEnd(s)
-		if fmEnd < 0 {
+		_, body, splitErr := markdown.SplitFrontmatter(content)
+		if splitErr != nil || body == nil {
 			return false, fmt.Errorf("view %s: cannot locate frontmatter end", path)
 		}
+		fmEnd := len(s) - len(body)
 		after := s[fmEnd:]
 		newContent = s[:fmEnd] + "\n" + viewMarker + "\n" + rendered + "\n" + viewEndMarker + after
 	}
@@ -87,36 +88,4 @@ func RegenerateView(ctx context.Context, store storage.Storage, exec *Executor, 
 	return true, nil
 }
 
-func findFrontmatterEnd(s string) int {
-	if !strings.HasPrefix(strings.TrimLeft(s, "\n\r"), "---") {
-		return -1
-	}
-	trimmed := strings.TrimLeft(s, "\n\r")
-	rest := trimmed[3:]
-	idx := strings.Index(rest, "\n---")
-	if idx < 0 {
-		return -1
-	}
-	offset := len(s) - len(trimmed)
-	return offset + 3 + idx + 4
-}
 
-// IsComputedView checks if content has kiwi-view: true in its frontmatter.
-func IsComputedView(content []byte) bool {
-	fm, err := markdown.Frontmatter(content)
-	if err != nil || fm == nil {
-		return false
-	}
-	v, _ := fm["kiwi-view"].(bool)
-	return v
-}
-
-// ViewQuery extracts the kiwi-query from a computed view's frontmatter.
-func ViewQuery(content []byte) string {
-	fm, err := markdown.Frontmatter(content)
-	if err != nil || fm == nil {
-		return ""
-	}
-	q, _ := fm["kiwi-query"].(string)
-	return strings.TrimSpace(q)
-}

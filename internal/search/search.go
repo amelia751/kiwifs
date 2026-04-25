@@ -27,13 +27,9 @@ type Result struct {
 	TrustScore float64 `json:"trustScore,omitempty"`
 }
 
-// DefaultSearchLimit is the default number of results returned when the
-// caller doesn't ask for a specific page size.
-const DefaultSearchLimit = 50
+const defaultSearchLimit = 50
 
-// MaxSearchLimit caps pagination so a malicious ?limit=999999 can't force
-// the server to build a huge JSON response in memory.
-const MaxSearchLimit = 200
+const maxSearchLimit = 200
 
 // Searcher searches across all knowledge files and (for index-backed engines)
 // keeps the index in sync with filesystem writes.
@@ -44,9 +40,9 @@ const MaxSearchLimit = 200
 // between files during the walk so a long search bows out on cancel.
 type Searcher interface {
 	// Search runs a full-text query. limit == 0 means "use the engine
-	// default" (DefaultSearchLimit). Negative values are treated as zero.
+	// default" (defaultSearchLimit). Negative values are treated as zero.
 	// offset < 0 is treated as zero. Engines should cap limit at
-	// MaxSearchLimit even if the caller forgets to.
+	// maxSearchLimit even if the caller forgets to.
 	// pathPrefix, when non-empty, restricts results to paths starting with
 	// that prefix (server-side filtering, not post-fetch).
 	Search(ctx context.Context, query string, limit, offset int, pathPrefix string) ([]Result, error)
@@ -102,14 +98,14 @@ type Resyncer interface {
 	Resync(ctx context.Context) (added, removed int, err error)
 }
 
-// NormalizeLimit clamps a caller-supplied limit into [1, MaxSearchLimit].
+// NormalizeLimit clamps a caller-supplied limit into [1, maxSearchLimit].
 // Zero (or negative) means "use the default".
 func NormalizeLimit(limit int) int {
 	if limit <= 0 {
-		return DefaultSearchLimit
+		return defaultSearchLimit
 	}
-	if limit > MaxSearchLimit {
-		return MaxSearchLimit
+	if limit > maxSearchLimit {
+		return maxSearchLimit
 	}
 	return limit
 }

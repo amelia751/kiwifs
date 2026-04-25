@@ -1,8 +1,5 @@
-// Package pipeline is the single write funnel used by every access protocol.
-//
-// Writes arriving through REST, WebDAV, NFS, or S3 all end here, so versioning,
-// search indexing, link extraction, and SSE broadcast happen exactly once per
-// change — regardless of which protocol delivered it.
+// Package pipeline is the single write funnel for all protocols (REST, WebDAV,
+// NFS, S3) — versioning, indexing, and SSE happen exactly once per change.
 package pipeline
 
 import (
@@ -126,10 +123,7 @@ func coalesce(actor string) string {
 	return actor
 }
 
-// New builds a pipeline. Pass nil for linker, hub, or vectors when those
-// aren't wired. vectors is nil when [search.vector] is disabled.
-// root is the knowledge root directory; when non-empty, uncommitted path
-// tracking is enabled at <root>/.kiwi/state/uncommitted.log.
+// New builds a pipeline. Pass nil for optional dependencies (linker, hub, vectors).
 func New(
 	store storage.Storage,
 	versioner versioning.Versioner,
@@ -163,11 +157,7 @@ type metaIndexer interface {
 	RemoveMeta(ctx context.Context, path string) error
 }
 
-// allRemover is the optional interface index-backed searchers implement to
-// drop every table entry for a path in a single atomic transaction. Running
-// the three deletes (docs/links/file_meta) as independent statements risks
-// a crash between them leaving the indices drifted against the storage
-// layer; RemoveAll folds them into one tx.
+// allRemover wraps docs/links/file_meta deletes in one tx to avoid index drift.
 type allRemover interface {
 	RemoveAll(ctx context.Context, path string) error
 }
@@ -195,9 +185,6 @@ func (p *Pipeline) indexFile(ctx context.Context, path string, content []byte) {
 }
 
 // deindexFile removes a path from every index. Caller must hold writeMu.
-// Prefers the searcher's RemoveAll when available so docs/links/file_meta
-// all drop in one transaction; falls back to the three-call path for grep
-// search, which has no RemoveAll equivalent.
 func (p *Pipeline) deindexFile(ctx context.Context, path string) {
 	if ra, ok := p.Searcher.(allRemover); ok {
 		if err := ra.RemoveAll(ctx, path); err != nil {
@@ -223,6 +210,13 @@ func (p *Pipeline) deindexFile(ctx context.Context, path string) {
 	}
 }
 
+func (p *Pipeline) commitAndTrack(ctx context.Context, path, actor string) {
+	if err := p.Versioner.Commit(ctx, path, actor, fmt.Sprintf("%s: %s", actor, path)); err != nil {
+		log.Printf("pipeline: versioner.Commit(%s): %v", path, err)
+		p.trackUncommitted(path)
+	}
+}
+
 // broadcast sends an event to all SSE subscribers if the hub is wired, and
 // fires the cache-invalidation callback (if any) so layers caching derived
 // views — like the graph endpoint — can drop their entries on any write.
@@ -243,20 +237,13 @@ func (p *Pipeline) broadcast(ev events.Event) {
 	}
 }
 
-// inflightEntry records both the timestamp and the content hash (etag) of
-// the last pipeline-originated write so the echo-suppression path can
-// dedup by time OR by content. A watcher firing long after the write but
-// with the same content is still a duplicate.
+// inflightEntry tracks recent writes for fsnotify echo suppression.
 type inflightEntry struct {
 	at   time.Time
 	etag string
 }
 
-// markInflight records that we just touched `path` so the fsnotify-driven
-// Observe path can skip the echo event. The entry auto-expires after
-// inflightWindow to avoid unbounded map growth, but we keep an extended
-// etag memory (see markInflightEtag) in a second map so identical-content
-// echoes that arrive after the short window are still discarded.
+// markInflight records a recent write so Observe can suppress the fsnotify echo.
 func (p *Pipeline) markInflight(path string) {
 	p.markInflightEtag(path, "")
 }
@@ -324,41 +311,18 @@ func (p *Pipeline) tryPreDelete(path string) {
 }
 
 // Write persists a single file and fans out to versioner, searcher, linker,
-// and the SSE hub. Returns the new ETag so HTTP handlers can echo it.
-//
-// ctx is checked at entry and again just before each blocking step so a
-// caller-cancelled request (HTTP client disconnect, server shutdown) bows
-// out before doing further work. ctx is not yet plumbed into Store /
-// Versioner / Searcher — those are Phase 2-4.
-//
-// Side-effect errors (versioner / searcher / linker) are logged and then
-// intentionally non-fatal: a failed commit must not make the write itself
-// look failed to the caller, and the watcher/reindex paths will recover on
-// next iteration. Silent swallowing hides real problems (a broken git
-// install can drop an entire audit trail) — so log everything.
+// and the SSE hub. Side-effect errors (versioner/searcher/linker) are logged
+// but non-fatal — the watcher/reindex paths recover on next iteration.
 func (p *Pipeline) Write(ctx context.Context, path string, content []byte, actor string) (Result, error) {
 	return p.WriteWithOpts(ctx, path, content, actor, WriteOpts{})
 }
 
-// StreamInMemoryThreshold bounds the size of an upload we'll fully buffer
-// in RAM before hitting pipeline.Write. Requests above this threshold go
-// through WriteStream, which spools the body to a temp file first and
-// avoids accumulating gigabytes for a single S3 / WebDAV upload.
-//
-// 16 MB comfortably fits agent-generated markdown runs and CSV exports;
-// large media files (screen recordings, datasets) will take the streaming
-// path.
+// StreamInMemoryThreshold: uploads above this spool to a temp file via
+// WriteStream instead of buffering in RAM.
 const StreamInMemoryThreshold = 16 * 1024 * 1024
 
-// WriteStream persists a potentially-large payload without buffering the
-// whole body in memory. The caller passes an io.Reader (e.g. an HTTP
-// request body) and a hint at the expected length (-1 if unknown). Small
-// payloads fall back to the normal Write path so the fast common case
-// stays fast; anything bigger streams into a temp file and then swaps it
-// into the store with a single rename. Knowledge files (.md and friends)
-// are still indexed, since we need the bytes in memory anyway for the
-// FTS/vector fan-out — the indexing path runs on a size-capped branch so
-// a 500 MB markdown file skips indexing but still gets versioned.
+// WriteStream persists a large payload by spooling to a temp file. Small
+// payloads (< StreamInMemoryThreshold) fall back to Write.
 func (p *Pipeline) WriteStream(ctx context.Context, path string, body io.Reader, sizeHint int64, actor string) (Result, error) {
 	if path == "" {
 		return Result{}, fmt.Errorf("path is required")
@@ -452,10 +416,7 @@ func (p *Pipeline) WriteStream(ctx context.Context, path string, body io.Reader,
 		tmpName = "" // handed off to the store
 	}
 	actor = coalesce(actor)
-	if err := p.Versioner.Commit(ctx, path, actor, fmt.Sprintf("%s: %s", actor, path)); err != nil {
-		log.Printf("pipeline: versioner.Commit(%s): %v", path, err)
-		p.trackUncommitted(path)
-	}
+	p.commitAndTrack(ctx, path, actor)
 	if knowledgeIndex {
 		p.indexFile(ctx, path, content)
 	}
@@ -510,24 +471,15 @@ func (p *Pipeline) WriteWithOpts(ctx context.Context, path string, content []byt
 	if err := p.Store.Write(ctx, path, content); err != nil {
 		return Result{}, err
 	}
-	if err := p.Versioner.Commit(ctx, path, actor, fmt.Sprintf("%s: %s", actor, path)); err != nil {
-		log.Printf("pipeline: versioner.Commit(%s): %v", path, err)
-		p.trackUncommitted(path)
-	}
+	p.commitAndTrack(ctx, path, actor)
 	p.indexFile(ctx, path, content)
 	etag := ETag(content)
 	p.broadcast(events.Event{Op: "write", Path: path, Actor: actor, ETag: etag})
 	return Result{Path: path, ETag: etag}, nil
 }
 
-// Observe runs every pipeline side effect *except* the storage write, for
-// callers that already put the file on disk themselves — the fsnotify
-// watcher is the obvious example: when an agent writes directly to a
-// mounted root, the file is already on disk by the time we detect it.
-//
-// This keeps the watcher behind the same funnel as REST/NFS/WebDAV/S3
-// (versioning, search, links, vectors, SSE) without doubling up the disk
-// write that would otherwise re-fire fsnotify in an echo loop.
+// Observe runs pipeline side effects (versioning, search, links, SSE) without
+// writing to disk — used by the fsnotify watcher when the file already exists.
 func (p *Pipeline) Observe(ctx context.Context, path string, content []byte, actor string) Result {
 	etag := ETag(content)
 	// Echo suppression, two layers:
@@ -544,10 +496,7 @@ func (p *Pipeline) Observe(ctx context.Context, path string, content []byte, act
 	actor = coalesce(actor)
 	p.writeMu.Lock()
 	defer p.writeMu.Unlock()
-	if err := p.Versioner.Commit(ctx, path, actor, fmt.Sprintf("%s: %s", actor, path)); err != nil {
-		log.Printf("pipeline: versioner.Commit(%s): %v", path, err)
-		p.trackUncommitted(path)
-	}
+	p.commitAndTrack(ctx, path, actor)
 	p.indexFile(ctx, path, content)
 	// Stamp the etag so a second fsnotify batch for the same content
 	// is deduped (some editors re-touch mtime without changing bytes).
@@ -576,16 +525,8 @@ func (p *Pipeline) ObserveDelete(ctx context.Context, path, actor string) {
 	p.broadcast(events.Event{Op: "delete", Path: path, Actor: actor})
 }
 
-// BulkWrite persists many files under a single git commit. Used for atomic
-// multi-file agent runs so the history shows one entry per logical
-// operation.
-//
-// Atomicity: before writing any file, we capture the current on-disk state
-// of every target so we can roll back if a later file fails partway. The
-// rollback isn't perfect — between our write and our roll-back another
-// process could observe the intermediate state — but it keeps the
-// on-disk/indexed picture consistent at rest, which is the guarantee
-// callers actually depend on.
+// BulkWrite persists many files under a single git commit. On partial
+// failure it rolls back to the pre-write state (best-effort, not ACID).
 func (p *Pipeline) BulkWrite(ctx context.Context, files []struct {
 	Path    string
 	Content []byte
@@ -739,23 +680,8 @@ func (p *Pipeline) CommitOnly(ctx context.Context, path, actor, message string) 
 	}
 }
 
-// ETag returns the git blob hash of the content — the same value that
-// `git hash-object` would emit. Using the real blob hash (not a sha256
-// prefix) means the ETag is also a usable handle into the object store
-// when git versioning is active, so clients can fetch a historical blob
-// by its ETag without a separate lookup.
-//
-// Security note: SHA-1 is cryptographically broken for collision resistance
-// (SHAttered, 2017), but ETags are a cache-correctness mechanism — they
-// detect accidental content changes, not adversarial attacks. HTTP RFC 7232
-// has no requirement for collision resistance in ETags. We intentionally
-// use SHA-1 here because (a) it matches git's object model so the ETag IS
-// the blob ID, and (b) switching to SHA-256 would break this identity and
-// require a parallel hash. Git itself still defaults to SHA-1 (the SHA-256
-// transition is opt-in). If the git backend migrates to SHA-256, this
-// function should follow.
-//
-// Format: sha1("blob <size>\0<content>"), hex-encoded.
+// ETag returns the git blob hash — sha1("blob <size>\0<content>") — so the
+// ETag doubles as a git object ID when versioning is active.
 func ETag(content []byte) string {
 	h := sha1.New()
 	fmt.Fprintf(h, "blob %d\x00", len(content))

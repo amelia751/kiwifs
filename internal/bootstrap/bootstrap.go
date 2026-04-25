@@ -111,7 +111,7 @@ func Build(name, root string, cfg *config.Config) (*Stack, error) {
 	if iv := janitorInterval(cfg); iv > 0 {
 		staleDays := cfg.Janitor.StaleDays
 		if staleDays <= 0 {
-			staleDays = 90
+			staleDays = janitor.DefaultStaleDays
 		}
 		scanner := janitor.New(root, store, searcher, staleDays)
 		opts := janitor.ScheduleOptions{

@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-git/go-billy/v5"
 	"github.com/kiwifs/kiwifs/internal/pipeline"
+	"github.com/kiwifs/kiwifs/internal/storage"
 	"github.com/willscott/go-nfs"
 	nfshelper "github.com/willscott/go-nfs/helpers"
 )
@@ -309,18 +310,8 @@ func (fs *kiwiFS) Rename(oldpath, newpath string) error {
 	return nil
 }
 
-// safePath joins filename onto fs.root and rejects any result that escapes
-// the root. Using filepath.Rel + a ".." prefix check is the only correct
-// way — a plain strings.HasPrefix(full, root) is trivially bypassable
-// (e.g. "/data/knowledge-evil" passes when root is "/data/knowledge").
 func (fs *kiwiFS) safePath(filename string) (string, error) {
-	clean := filepath.Clean("/" + filepath.ToSlash(filename))
-	full := filepath.Join(fs.root, clean)
-	rel, err := filepath.Rel(fs.root, full)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("path traversal denied: %s", filename)
-	}
-	return full, nil
+	return storage.GuardPath(fs.root, filepath.ToSlash(filename))
 }
 
 // kiwiFile wraps file operations, routing writes through the pipeline.
