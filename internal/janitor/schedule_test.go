@@ -46,7 +46,7 @@ we get a realistic workspace.`)
 	}
 	defer hub.Unsubscribe(sub)
 
-	s := NewScheduler(scanner, hub, ScheduleOptions{
+	s := NewScheduler(scanner, hub, nil, ScheduleOptions{
 		Interval:    10 * time.Second, // long enough not to fire a second tick in this test
 		InitialScan: true,
 	})

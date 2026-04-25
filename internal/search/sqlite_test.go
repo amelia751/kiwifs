@@ -2,14 +2,18 @@ package search
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/kiwifs/kiwifs/internal/storage"
+	_ "modernc.org/sqlite"
 )
 
 var ctxBG = context.Background()
@@ -287,7 +291,7 @@ func TestReindexBatched(t *testing.T) {
 	defer s.Close()
 
 	var n int
-	if err := s.readDB.QueryRow(`SELECT COUNT(*) FROM docs`).Scan(&n); err != nil {
+	if err := s.readDB.QueryRow(`SELECT COUNT(*) FROM doc_paths`).Scan(&n); err != nil {
 		t.Fatalf("count: %v", err)
 	}
 	if n != total {
@@ -332,13 +336,13 @@ func TestResyncReconcilesOutOfBandChanges(t *testing.T) {
 	}
 
 	var count int
-	if err := s.readDB.QueryRow(`SELECT COUNT(*) FROM docs WHERE path = 'fresh.md'`).Scan(&count); err != nil {
+	if err := s.readDB.QueryRow(`SELECT COUNT(*) FROM doc_paths WHERE path = 'fresh.md'`).Scan(&count); err != nil {
 		t.Fatalf("count fresh: %v", err)
 	}
 	if count != 1 {
 		t.Fatalf("expected fresh.md to be indexed, got %d rows", count)
 	}
-	if err := s.readDB.QueryRow(`SELECT COUNT(*) FROM docs WHERE path = 'stale.md'`).Scan(&count); err != nil {
+	if err := s.readDB.QueryRow(`SELECT COUNT(*) FROM doc_paths WHERE path = 'stale.md'`).Scan(&count); err != nil {
 		t.Fatalf("count stale: %v", err)
 	}
 	if count != 0 {
@@ -366,7 +370,7 @@ func TestRemoveAllClearsEveryTable(t *testing.T) {
 	}
 
 	for _, q := range []string{
-		`SELECT COUNT(*) FROM docs WHERE path = 'a.md'`,
+		`SELECT COUNT(*) FROM doc_paths WHERE path = 'a.md'`,
 		`SELECT COUNT(*) FROM links WHERE source = 'a.md'`,
 		`SELECT COUNT(*) FROM file_meta WHERE path = 'a.md'`,
 	} {
@@ -377,5 +381,193 @@ func TestRemoveAllClearsEveryTable(t *testing.T) {
 		if n != 0 {
 			t.Fatalf("%q left %d rows", q, n)
 		}
+	}
+}
+
+func TestMigrationFromOldSchema(t *testing.T) {
+	dir := t.TempDir()
+	store, err := storage.NewLocal(dir)
+	if err != nil {
+		t.Fatalf("storage: %v", err)
+	}
+	if err := store.Write(context.Background(), "hello.md", []byte("# Hello World\nSome content here")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	stateDir := dir + "/.kiwi/state"
+	if merr := os.MkdirAll(stateDir, 0755); merr != nil {
+		t.Fatalf("mkdir: %v", merr)
+	}
+	dbPath := stateDir + "/search.db"
+	db, err := openTestDB(dbPath)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	_, err = db.Exec(`CREATE VIRTUAL TABLE docs USING fts5(
+		path UNINDEXED, content,
+		tokenize = 'porter unicode61 remove_diacritics 1')`)
+	if err != nil {
+		t.Fatalf("old schema: %v", err)
+	}
+	_, _ = db.Exec(`INSERT INTO docs(path, content) VALUES ('hello.md', '# Hello World')`)
+	db.Close()
+
+	s, err := NewSQLite(dir, store)
+	if err != nil {
+		t.Fatalf("NewSQLite after migration: %v", err)
+	}
+	defer s.Close()
+
+	results, err := s.Search(context.Background(), "hello", 10, 0, "")
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(results) == 0 {
+		t.Fatalf("expected search results after migration, got 0")
+	}
+	if results[0].Path != "hello.md" {
+		t.Fatalf("expected hello.md, got %s", results[0].Path)
+	}
+}
+
+func openTestDB(path string) (*sql.DB, error) {
+	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)", path)
+	return sql.Open("sqlite", dsn)
+}
+
+func TestBenchmarkContentless(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping benchmark in short mode")
+	}
+	const fileCount = 1000
+	dir := t.TempDir()
+	store, err := storage.NewLocal(dir)
+	if err != nil {
+		t.Fatalf("storage: %v", err)
+	}
+
+	var totalRaw int64
+	for i := 0; i < fileCount; i++ {
+		body := fmt.Sprintf(`---
+status: published
+tags:
+  - tag%d
+  - common
+---
+# Document %d — Architecture Decision Record
+
+This is document number %d with realistic content that simulates a real knowledge base.
+It contains multiple paragraphs of text covering various engineering topics.
+
+## Context and Problem Statement
+
+We need to decide on the deployment strategy for the new microservices architecture.
+The current monolith deployment takes 45 minutes and requires downtime. Kubernetes
+offers rolling deployments but adds operational complexity. The team has experience
+with Docker but limited exposure to container orchestration at scale.
+
+## Decision Drivers
+
+- Deployment frequency target: 10+ per day
+- Zero-downtime requirement from SLA commitments
+- Team skill gap in container orchestration and observability
+- Budget constraints on infrastructure spend
+- Compliance requirements for audit trails and access control
+
+## Considered Options
+
+### Option A: Blue-Green Deployment with Load Balancer
+
+Traditional approach using two identical environments. The load balancer switches
+traffic atomically between blue and green. Simple rollback by switching back.
+Infrastructure cost doubles since both environments run simultaneously.
+
+### Option B: Kubernetes Rolling Updates
+
+Gradual pod replacement with health checks. Built-in rollback via ReplicaSet history.
+Requires investment in monitoring, alerting, and incident response procedures.
+Service mesh adds mutual TLS and traffic management capabilities.
+
+### Option C: Serverless Functions
+
+Event-driven architecture using cloud functions. Pay-per-invocation pricing.
+Cold start latency concerns for real-time endpoints. Vendor lock-in risk.
+Limited debugging and observability tooling compared to containers.
+
+## Technical Implementation Details
+
+Database migrations require careful schema changes with backward compatibility.
+The indexing strategy uses B-tree indexes for equality lookups and GIN indexes
+for full-text search. Query optimization includes prepared statements, connection
+pooling, and read replica routing for analytics workloads.
+
+Performance tuning techniques include caching at multiple layers: application-level
+LRU caches, Redis for session state, CDN for static assets, and database query
+result caching. Load testing showed the system handles 5000 concurrent requests
+with p99 latency under 200ms when properly tuned.
+
+## References
+
+- [[architecture-overview]] — System architecture diagram
+- [[deployment-runbook]] — Step-by-step deployment guide
+- [[monitoring-setup]] — Grafana dashboards and alert rules
+`, i%50, i, i)
+		path := fmt.Sprintf("docs/file-%04d.md", i)
+		if err := store.Write(context.Background(), path, []byte(body)); err != nil {
+			t.Fatalf("write %d: %v", i, err)
+		}
+		totalRaw += int64(len(body))
+	}
+
+	start := time.Now()
+	s, err := NewSQLite(dir, store)
+	if err != nil {
+		t.Fatalf("NewSQLite: %v", err)
+	}
+	defer s.Close()
+	reindexDur := time.Since(start)
+
+	s.writeDB.ExecContext(context.Background(), `PRAGMA wal_checkpoint(TRUNCATE)`)
+	dbPath := filepath.Join(dir, ".kiwi", "state", "search.db")
+	var dbSize int64
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		if fi, serr := os.Stat(dbPath + suffix); serr == nil {
+			dbSize += fi.Size()
+		}
+	}
+	ratio := float64(dbSize) / float64(totalRaw)
+
+	searchStart := time.Now()
+	for i := 0; i < 100; i++ {
+		if _, err := s.Search(context.Background(), "kubernetes deployment", 20, 0, ""); err != nil {
+			t.Fatalf("search: %v", err)
+		}
+	}
+	searchDur := time.Since(searchStart) / 100
+
+	batchStart := time.Now()
+	entries := make([]IndexEntry, 100)
+	for i := range entries {
+		entries[i] = IndexEntry{
+			Path:    fmt.Sprintf("batch/b-%d.md", i),
+			Content: []byte(fmt.Sprintf("# Batch %d\nBatch content for testing indexing speed.", i)),
+		}
+	}
+	if err := s.IndexBatch(context.Background(), entries); err != nil {
+		t.Fatalf("IndexBatch: %v", err)
+	}
+	batchDur := time.Since(batchStart)
+
+	t.Logf("=== Contentless FTS5 Benchmark ===")
+	t.Logf("Files:          %d", fileCount)
+	t.Logf("Raw content:    %.2f MB", float64(totalRaw)/(1024*1024))
+	t.Logf("DB size:        %.2f MB", float64(dbSize)/(1024*1024))
+	t.Logf("Index/raw:      %.2fx", ratio)
+	t.Logf("Reindex time:   %s", reindexDur.Round(time.Millisecond))
+	t.Logf("Search latency: %s (avg of 100)", searchDur.Round(time.Microsecond))
+	t.Logf("IndexBatch 100: %s", batchDur.Round(time.Millisecond))
+
+	if ratio > 2.0 {
+		t.Errorf("index/raw ratio %.2fx exceeds 2.0x target (want <1.5x)", ratio)
 	}
 }

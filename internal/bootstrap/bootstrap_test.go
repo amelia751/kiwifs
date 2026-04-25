@@ -58,8 +58,8 @@ func TestBuildWithGit(t *testing.T) {
 	}
 	defer stack.Close()
 
-	if _, ok := stack.Versioner.(*versioning.Git); !ok {
-		t.Fatalf("Versioner = %T, want *versioning.Git", stack.Versioner)
+	if _, ok := stack.Versioner.(*versioning.AsyncGit); !ok {
+		t.Fatalf("Versioner = %T, want *versioning.AsyncGit (async is default for git)", stack.Versioner)
 	}
 	// NewGit runs `git init` when .git is missing — verify it did.
 	if _, err := os.Stat(filepath.Join(dir, ".git")); err != nil {

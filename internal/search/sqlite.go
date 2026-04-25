@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"log"
 	"os"
 	"path/filepath"
@@ -85,6 +86,12 @@ var (
 	hardCoeffs = trustCoeffs{2.0, 0.1, 0.3, 3.0, 1.0}
 	softCoeffs = trustCoeffs{1.2, 0.5, 0.7, 1.4, 0.3}
 )
+
+func pathRowID(path string) int64 {
+	h := fnv.New64a()
+	h.Write([]byte(path))
+	return int64(h.Sum64() >> 1)
+}
 
 // SQLite is a Searcher backed by SQLite FTS5. Pure-Go (no CGo).
 // The index lives at <root>/.kiwi/state/search.db and is fully rebuildable
@@ -189,13 +196,20 @@ func NewSQLite(root string, store storage.Storage) (*SQLite, error) {
 }
 
 func (s *SQLite) createSchema(ctx context.Context) error {
-	// `porter` applies English stemming on top of the `unicode61` tokenizer.
-	// `remove_diacritics 1` folds é → e etc. so queries match regardless of accents.
+	if err := s.migrateContentless(ctx); err != nil {
+		return err
+	}
+
 	const ddl = `
 CREATE VIRTUAL TABLE IF NOT EXISTS docs USING fts5(
 	path UNINDEXED,
 	content,
+	content='',
 	tokenize = 'porter unicode61 remove_diacritics 1'
+);
+CREATE TABLE IF NOT EXISTS doc_paths (
+	rowid INTEGER PRIMARY KEY,
+	path TEXT NOT NULL UNIQUE
 );
 CREATE TABLE IF NOT EXISTS links (
 	source TEXT NOT NULL,
@@ -222,16 +236,36 @@ CREATE INDEX IF NOT EXISTS idx_meta_visibility ON file_meta(json_extract(frontma
 		return fmt.Errorf("create schema: %w", err)
 	}
 
-	// Migration: add tasks column if it doesn't exist (for pre-v0.2 databases)
 	s.writeDB.ExecContext(ctx, `ALTER TABLE file_meta ADD COLUMN tasks TEXT NOT NULL DEFAULT '[]'`)
 
 	return nil
 }
 
+// migrateContentless detects a pre-contentless FTS5 docs table and drops it
+// so createSchema can recreate it with content=''. The reindex at startup
+// will repopulate it.
+func (s *SQLite) migrateContentless(ctx context.Context) error {
+	var ddl string
+	err := s.writeDB.QueryRowContext(ctx,
+		`SELECT sql FROM sqlite_master WHERE type='table' AND name='docs'`).Scan(&ddl)
+	if err != nil {
+		return nil
+	}
+	if strings.Contains(ddl, "content=") {
+		return nil
+	}
+	log.Printf("kiwifs search: migrating to contentless FTS5, reindexing...")
+	if _, err := s.writeDB.ExecContext(ctx, `DROP TABLE IF EXISTS docs`); err != nil {
+		return fmt.Errorf("drop old docs: %w", err)
+	}
+	s.writeDB.ExecContext(ctx, `DROP TABLE IF EXISTS doc_paths`)
+	return nil
+}
+
 func (s *SQLite) isEmpty(ctx context.Context) (bool, error) {
 	var n int
-	if err := s.readDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM docs`).Scan(&n); err != nil {
-		return false, fmt.Errorf("count docs: %w", err)
+	if err := s.readDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM doc_paths`).Scan(&n); err != nil {
+		return false, fmt.Errorf("count doc_paths: %w", err)
 	}
 	return n == 0, nil
 }
@@ -244,14 +278,19 @@ func (s *SQLite) Search(ctx context.Context, query string, limit, offset int, pa
 	limit = NormalizeLimit(limit)
 	offset = NormalizeOffset(offset)
 
-	sqlQ := `SELECT path, snippet(docs, 1, '<mark>', '</mark>', '…', 16) AS snip, bm25(docs) AS score FROM docs WHERE docs MATCH ?`
+	sqlQ := `SELECT dp.path, bm25(docs) AS score
+FROM docs
+INNER JOIN doc_paths dp ON dp.rowid = docs.rowid
+WHERE docs MATCH ?`
 	args := []any{q}
 	if pathPrefix != "" {
-		sqlQ += ` AND path LIKE ?`
+		sqlQ += ` AND dp.path LIKE ?`
 		args = append(args, pathPrefix+"%")
 	}
-	sqlQ += ` ORDER BY rank LIMIT ? OFFSET ?`
+	sqlQ += ` ORDER BY bm25(docs) LIMIT ? OFFSET ?`
 	args = append(args, limit, offset)
+
+	queryTerms := strings.Fields(strings.ToLower(query))
 
 	rows, err := s.readDB.QueryContext(ctx, sqlQ, args...)
 	if err != nil {
@@ -259,11 +298,7 @@ func (s *SQLite) Search(ctx context.Context, query string, limit, offset int, pa
 		if fallback == "" || fallback == q {
 			return nil, fmt.Errorf("search: %w", err)
 		}
-		if pathPrefix != "" {
-			args[0] = fallback
-		} else {
-			args[0] = fallback
-		}
+		args[0] = fallback
 		rows, err = s.readDB.QueryContext(ctx, sqlQ, args...)
 		if err != nil {
 			return nil, fmt.Errorf("search (fallback): %w", err)
@@ -273,15 +308,17 @@ func (s *SQLite) Search(ctx context.Context, query string, limit, offset int, pa
 
 	var results []Result
 	for rows.Next() {
-		var path, snip string
+		var path string
 		var score float64
-		if err := rows.Scan(&path, &snip, &score); err != nil {
+		if err := rows.Scan(&path, &score); err != nil {
 			return nil, err
 		}
+		snip := ""
+		if content, rerr := s.store.Read(ctx, path); rerr == nil {
+			snip = generateSnippet(content, queryTerms, 160)
+		}
 		results = append(results, Result{
-			Path: path,
-			// Flip sign so "higher = more relevant" at the API boundary.
-			// FTS5's bm25() returns negative numbers for hits.
+			Path:    path,
 			Score:   -score,
 			Snippet: snip,
 			Matches: []Match{{Line: 0, Text: snip}},
@@ -290,29 +327,111 @@ func (s *SQLite) Search(ctx context.Context, query string, limit, offset int, pa
 	return results, rows.Err()
 }
 
+func generateSnippet(content []byte, queryTerms []string, maxLen int) string {
+	lines := strings.Split(string(content), "\n")
+	bestIdx := -1
+	for i, line := range lines {
+		lower := strings.ToLower(line)
+		for _, term := range queryTerms {
+			clean := strings.Trim(term, `"`)
+			if clean != "" && strings.Contains(lower, clean) {
+				bestIdx = i
+				break
+			}
+		}
+		if bestIdx >= 0 {
+			break
+		}
+	}
+	if bestIdx < 0 {
+		if len(lines) > 0 {
+			s := strings.TrimSpace(lines[0])
+			if len(s) > maxLen {
+				return s[:maxLen] + "…"
+			}
+			return s
+		}
+		return ""
+	}
+	line := strings.TrimSpace(lines[bestIdx])
+	if len(line) > maxLen {
+		line = line[:maxLen] + "…"
+	}
+	for _, term := range queryTerms {
+		clean := strings.Trim(term, `"`)
+		if clean == "" {
+			continue
+		}
+		lower := strings.ToLower(line)
+		idx := strings.Index(lower, clean)
+		if idx >= 0 {
+			matched := line[idx : idx+len(clean)]
+			line = line[:idx] + "<mark>" + matched + "</mark>" + line[idx+len(clean):]
+		}
+	}
+	return line
+}
+
 func (s *SQLite) Index(ctx context.Context, path string, content []byte) error {
 	if !storage.IsKnowledgeFile(path) {
 		return nil
 	}
-	// writeDB's single connection serialises every writer, so no per-struct
-	// mutex is needed here.
+	rowid := pathRowID(path)
 	tx, err := s.writeDB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM docs WHERE path = ?`, path); err != nil {
+	if _, err := tx.ExecContext(ctx,
+		`INSERT OR REPLACE INTO doc_paths(rowid, path) VALUES (?, ?)`,
+		rowid, path); err != nil {
 		tx.Rollback()
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO docs(path, content) VALUES (?, ?)`, path, string(content)); err != nil {
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO docs(rowid, path, content) VALUES (?, ?, ?)`,
+		rowid, path, string(content)); err != nil {
 		tx.Rollback()
 		return err
 	}
 	return tx.Commit()
 }
 
+func (s *SQLite) IndexBatch(ctx context.Context, files []IndexEntry) error {
+	if len(files) == 0 {
+		return nil
+	}
+	tx, err := s.writeDB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	docStmt, err := tx.PrepareContext(ctx, `INSERT INTO docs(rowid, path, content) VALUES (?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer docStmt.Close()
+	pathStmt, err := tx.PrepareContext(ctx, `INSERT OR REPLACE INTO doc_paths(rowid, path) VALUES (?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer pathStmt.Close()
+	for _, f := range files {
+		if !storage.IsKnowledgeFile(f.Path) {
+			continue
+		}
+		rid := pathRowID(f.Path)
+		if _, err := pathStmt.ExecContext(ctx, rid, f.Path); err != nil {
+			return fmt.Errorf("index batch doc_path %s: %w", f.Path, err)
+		}
+		if _, err := docStmt.ExecContext(ctx, rid, f.Path, string(f.Content)); err != nil {
+			return fmt.Errorf("index batch doc %s: %w", f.Path, err)
+		}
+	}
+	return tx.Commit()
+}
+
 func (s *SQLite) Remove(ctx context.Context, path string) error {
-	_, err := s.writeDB.ExecContext(ctx, `DELETE FROM docs WHERE path = ?`, path)
+	_, err := s.writeDB.ExecContext(ctx, `DELETE FROM doc_paths WHERE path = ?`, path)
 	return err
 }
 
@@ -326,7 +445,7 @@ func (s *SQLite) RemoveAll(ctx context.Context, path string) error {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `DELETE FROM docs WHERE path = ?`, path); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM doc_paths WHERE path = ?`, path); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM links WHERE source = ?`, path); err != nil {
@@ -343,7 +462,7 @@ func (s *SQLite) Reindex(ctx context.Context) (int, error) {
 }
 
 func (s *SQLite) Resync(ctx context.Context) (added, removed int, err error) {
-	rows, err := s.readDB.QueryContext(ctx, `SELECT path FROM docs`)
+	rows, err := s.readDB.QueryContext(ctx, `SELECT path FROM doc_paths`)
 	if err != nil {
 		return 0, 0, fmt.Errorf("list indexed: %w", err)
 	}
@@ -1118,6 +1237,9 @@ func (s *SQLite) reindexLocked(ctx context.Context) (int, error) {
 	if _, err := s.writeDB.ExecContext(ctx, `DELETE FROM docs`); err != nil {
 		return 0, fmt.Errorf("truncate docs: %w", err)
 	}
+	if _, err := s.writeDB.ExecContext(ctx, `DELETE FROM doc_paths`); err != nil {
+		return 0, fmt.Errorf("truncate doc_paths: %w", err)
+	}
 	if _, err := s.writeDB.ExecContext(ctx, `DELETE FROM links`); err != nil {
 		return 0, fmt.Errorf("truncate links: %w", err)
 	}
@@ -1129,19 +1251,19 @@ func (s *SQLite) reindexLocked(ctx context.Context) (int, error) {
 	count := 0
 
 	var (
-		tx                          *sql.Tx
-		docStmt, linkStmt, metaStmt *sql.Stmt
+		tx                                    *sql.Tx
+		docStmt, pathStmt, linkStmt, metaStmt *sql.Stmt
 	)
-	// Reusable open-batch helper. Keeping it closure-local makes the "begin
-	// tx + prepare three statements" sequence atomic at the source level —
-	// any new prepared statement has to go through this one place.
 	openBatch := func() error {
 		var perr error
 		tx, perr = s.writeDB.BeginTx(ctx, nil)
 		if perr != nil {
 			return perr
 		}
-		if docStmt, perr = tx.PrepareContext(ctx, `INSERT INTO docs(path, content) VALUES (?, ?)`); perr != nil {
+		if docStmt, perr = tx.PrepareContext(ctx, `INSERT INTO docs(rowid, path, content) VALUES (?, ?, ?)`); perr != nil {
+			return perr
+		}
+		if pathStmt, perr = tx.PrepareContext(ctx, `INSERT OR REPLACE INTO doc_paths(rowid, path) VALUES (?, ?)`); perr != nil {
 			return perr
 		}
 		if linkStmt, perr = tx.PrepareContext(ctx, `INSERT OR IGNORE INTO links(source, target, target_lc) VALUES (?, ?, ?)`); perr != nil {
@@ -1156,6 +1278,10 @@ func (s *SQLite) reindexLocked(ctx context.Context) (int, error) {
 		if docStmt != nil {
 			docStmt.Close()
 			docStmt = nil
+		}
+		if pathStmt != nil {
+			pathStmt.Close()
+			pathStmt = nil
 		}
 		if linkStmt != nil {
 			linkStmt.Close()
@@ -1191,8 +1317,12 @@ func (s *SQLite) reindexLocked(ctx context.Context) (int, error) {
 		if err != nil {
 			return nil
 		}
-		if _, err := docStmt.ExecContext(ctx, e.Path, string(content)); err != nil {
+		rid := pathRowID(e.Path)
+		if _, err := docStmt.ExecContext(ctx, rid, e.Path, string(content)); err != nil {
 			return fmt.Errorf("insert doc %s: %w", e.Path, err)
+		}
+		if _, err := pathStmt.ExecContext(ctx, rid, e.Path); err != nil {
+			return fmt.Errorf("insert doc_path %s: %w", e.Path, err)
 		}
 		for _, t := range links.Unique(links.Extract(content)) {
 			if _, err := linkStmt.ExecContext(ctx, e.Path, t, strings.ToLower(t)); err != nil {

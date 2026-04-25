@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/kiwifs/kiwifs/internal/events"
+	"github.com/kiwifs/kiwifs/internal/versioning"
 )
 
 // ScheduleOptions controls the background janitor loop. The zero value is
@@ -40,9 +41,10 @@ type ScheduleOptions struct {
 // exits cleanly when ctx is cancelled or Stop() is called. A second
 // Start on the same Scheduler is a no-op.
 type Scheduler struct {
-	scanner *Scanner
-	hub     *events.Hub
-	opts    ScheduleOptions
+	scanner   *Scanner
+	hub       *events.Hub
+	versioner versioning.Versioner
+	opts      ScheduleOptions
 
 	mu       sync.Mutex
 	started  bool
@@ -54,8 +56,8 @@ type Scheduler struct {
 // NewScheduler wires a scanner to an SSE hub. The hub may be nil — the
 // scheduler still runs and the ScanResult is cached on the struct for
 // the API handler to read.
-func NewScheduler(scanner *Scanner, hub *events.Hub, opts ScheduleOptions) *Scheduler {
-	return &Scheduler{scanner: scanner, hub: hub, opts: opts, stopCh: make(chan struct{})}
+func NewScheduler(scanner *Scanner, hub *events.Hub, ver versioning.Versioner, opts ScheduleOptions) *Scheduler {
+	return &Scheduler{scanner: scanner, hub: hub, versioner: ver, opts: opts, stopCh: make(chan struct{})}
 }
 
 // Start runs the scheduling loop in a goroutine and returns immediately.
@@ -191,4 +193,10 @@ func (s *Scheduler) runOnce(ctx context.Context) {
 	}
 	log.Printf("janitor: scheduled scan found %d issue(s) (%d errors, %d warnings) across %d pages in %s",
 		len(res.Issues), counts["error"], counts["warning"], res.Scanned, duration)
+
+	if gc, ok := s.versioner.(versioning.GCer); ok {
+		if err := gc.GC(scanCtx); err != nil {
+			log.Printf("janitor: git gc: %v", err)
+		}
+	}
 }

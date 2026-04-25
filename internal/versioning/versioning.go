@@ -45,6 +45,12 @@ type Versioner interface {
 	Blame(ctx context.Context, path string) ([]BlameLine, error)
 }
 
+// GCer is the optional interface versioners implement when they support
+// garbage collection — currently only Git (`git gc --auto`).
+type GCer interface {
+	GC(ctx context.Context) error
+}
+
 // Unstager is the optional interface versioners implement when they have
 // a staging area separate from the working tree — currently only Git.
 // Pipeline calls Unstage on bulk-write rollback so a failed `git commit`

@@ -119,7 +119,7 @@ func Build(name, root string, cfg *config.Config) (*Stack, error) {
 			Jitter:      60 * time.Second,
 			InitialScan: cfg.Janitor.StartupScan,
 		}
-		janitorSched = janitor.NewScheduler(scanner, hub, opts)
+		janitorSched = janitor.NewScheduler(scanner, hub, ver, opts)
 		server.SetJanitorScheduler(janitorSched)
 	}
 
@@ -169,6 +169,11 @@ func Build(name, root string, cfg *config.Config) (*Stack, error) {
 
 func (s *Stack) Close() error {
 	var firstErr error
+	if c, ok := s.Versioner.(interface{ Close() error }); ok {
+		if err := c.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
 	if s.Vectors != nil {
 		if err := s.Vectors.Close(); err != nil && firstErr == nil {
 			firstErr = err
@@ -189,6 +194,18 @@ func buildVersioner(prefix, root string, cfg *config.Config) versioning.Versione
 		if err != nil {
 			log.Printf("%sgit versioning unavailable (%v) — running without versioning", prefix, err)
 			return versioning.NewNoop()
+		}
+		asyncEnabled := cfg.Versioning.AsyncCommit == nil || *cfg.Versioning.AsyncCommit
+		if asyncEnabled {
+			var opts []versioning.AsyncOption
+			if cfg.Versioning.BatchWindowMs > 0 {
+				opts = append(opts, versioning.WithBatchWindow(time.Duration(cfg.Versioning.BatchWindowMs)*time.Millisecond))
+			}
+			if cfg.Versioning.BatchMaxSize > 0 {
+				opts = append(opts, versioning.WithBatchMaxSize(cfg.Versioning.BatchMaxSize))
+			}
+			log.Printf("%sgit versioning: async commits enabled", prefix)
+			return versioning.NewAsyncGit(v, opts...)
 		}
 		return v
 	case "cow":

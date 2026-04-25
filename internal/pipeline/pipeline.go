@@ -184,6 +184,24 @@ func (p *Pipeline) indexFile(ctx context.Context, path string, content []byte) {
 	}
 }
 
+// indexFileNonSearch indexes links, meta, and vectors but skips the search
+// index (used when search was already handled by IndexBatch).
+func (p *Pipeline) indexFileNonSearch(ctx context.Context, path string, content []byte) {
+	if p.Linker != nil {
+		if err := p.Linker.IndexLinks(ctx, path, links.Extract(content)); err != nil {
+			log.Printf("pipeline: linker.IndexLinks(%s): %v", path, err)
+		}
+	}
+	if meta, ok := p.Searcher.(metaIndexer); ok {
+		if err := meta.IndexMeta(ctx, path, content); err != nil {
+			log.Printf("pipeline: searcher.IndexMeta(%s): %v", path, err)
+		}
+	}
+	if p.Vectors != nil {
+		p.Vectors.Enqueue(path, content)
+	}
+}
+
 // deindexFile removes a path from every index. Caller must hold writeMu.
 func (p *Pipeline) deindexFile(ctx context.Context, path string) {
 	if ra, ok := p.Searcher.(allRemover); ok {
@@ -625,9 +643,24 @@ func (p *Pipeline) BulkWrite(ctx context.Context, files []struct {
 			rollback(i)
 			return nil, fmt.Errorf("write %s: %w", f.Path, err)
 		}
-		p.indexFile(ctx, f.Path, f.Content)
 		paths = append(paths, f.Path)
 		out = append(out, Result{Path: f.Path, ETag: ETag(f.Content)})
+	}
+	if bi, ok := p.Searcher.(search.BatchIndexer); ok {
+		entries := make([]search.IndexEntry, len(files))
+		for i, f := range files {
+			entries[i] = search.IndexEntry{Path: f.Path, Content: f.Content}
+		}
+		if err := bi.IndexBatch(ctx, entries); err != nil {
+			log.Printf("pipeline: searcher.IndexBatch: %v", err)
+		}
+		for _, f := range files {
+			p.indexFileNonSearch(ctx, f.Path, f.Content)
+		}
+	} else {
+		for _, f := range files {
+			p.indexFile(ctx, f.Path, f.Content)
+		}
 	}
 	if message == "" {
 		message = fmt.Sprintf("%s: bulk write — %d files", actor, len(paths))

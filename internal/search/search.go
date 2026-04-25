@@ -91,6 +91,18 @@ type ContradictionDetector interface {
 	FindContradictions(ctx context.Context, path string) ([]string, error)
 }
 
+// IndexEntry is a single file for IndexBatch.
+type IndexEntry struct {
+	Path    string
+	Content []byte
+}
+
+// BatchIndexer is implemented by search backends that support batched index
+// writes (one transaction for N files instead of N transactions).
+type BatchIndexer interface {
+	IndexBatch(ctx context.Context, files []IndexEntry) error
+}
+
 // Resyncer is implemented by search backends that support an incremental
 // reconciliation with underlying storage (used at startup to catch
 // out-of-band filesystem changes made while the server was down).
