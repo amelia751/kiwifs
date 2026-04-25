@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"path/filepath"
 	"time"
 
 	"github.com/kiwifs/kiwifs/internal/api"
@@ -204,6 +205,8 @@ func buildVersioner(prefix, root string, cfg *config.Config) versioning.Versione
 			if cfg.Versioning.BatchMaxSize > 0 {
 				opts = append(opts, versioning.WithBatchMaxSize(cfg.Versioning.BatchMaxSize))
 			}
+			ulog := filepath.Join(root, ".kiwi", "state", "uncommitted.log")
+			opts = append(opts, versioning.WithUncommittedLog(ulog))
 			log.Printf("%sgit versioning: async commits enabled", prefix)
 			return versioning.NewAsyncGit(v, opts...)
 		}
