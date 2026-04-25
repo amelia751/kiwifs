@@ -183,6 +183,10 @@ export function KiwiQuery({ source, isComputedView, onNavigate }: Props) {
   );
 }
 
+function isCalendarQuery(dql: string): boolean {
+  return /^\s*CALENDAR\b/i.test(dql);
+}
+
 function renderResult(
   data: QueryResponse,
   dql: string,
@@ -190,6 +194,10 @@ function renderResult(
   onCopy?: () => void,
   copied?: boolean,
 ) {
+  if (isCalendarQuery(dql)) {
+    return renderCalendar(data, onNavigate, onCopy, copied);
+  }
+
   if (data.groups && data.groups.length > 0) {
     return renderGroups(data, onCopy, copied);
   }
@@ -252,6 +260,178 @@ function renderResult(
           Showing {data.rows.length}+ results
         </div>
       )}
+      {onCopy && (
+        <button
+          onClick={onCopy}
+          className="text-muted-foreground hover:text-foreground mt-1 text-xs underline"
+        >
+          {copied ? "Copied!" : "Copy as DQL"}
+        </button>
+      )}
+    </div>
+  );
+}
+
+type CalendarEntry = { path: string; date: string };
+
+function parseCalendarData(data: QueryResponse): {
+  dateField: string;
+  entries: CalendarEntry[];
+  byDate: Map<string, CalendarEntry[]>;
+} {
+  const cols = data.columns ?? [];
+  const dateField = cols.find((c) => c !== "_path" && c !== "path") ?? cols[0] ?? "date";
+
+  const entries: CalendarEntry[] = [];
+  const byDate = new Map<string, CalendarEntry[]>();
+
+  for (const row of data.rows) {
+    const raw = row[dateField];
+    if (raw == null) continue;
+    const dateStr = String(raw).slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) continue;
+    const entry: CalendarEntry = {
+      path: String(row["_path"] ?? row["path"] ?? ""),
+      date: dateStr,
+    };
+    entries.push(entry);
+    const existing = byDate.get(dateStr);
+    if (existing) existing.push(entry);
+    else byDate.set(dateStr, [entry]);
+  }
+
+  return { dateField, entries, byDate };
+}
+
+function getMonthsFromEntries(entries: CalendarEntry[]): string[] {
+  const months = new Set<string>();
+  for (const e of entries) {
+    months.add(e.date.slice(0, 7));
+  }
+  const sorted = [...months].sort();
+  if (sorted.length === 0) {
+    const now = new Date();
+    sorted.push(`${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`);
+  }
+  return sorted;
+}
+
+const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+const MONTH_NAMES = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+];
+
+function renderMonthGrid(
+  yearMonth: string,
+  byDate: Map<string, CalendarEntry[]>,
+  onNavigate?: (path: string) => void,
+) {
+  const [y, m] = yearMonth.split("-").map(Number);
+  const firstDay = new Date(y, m - 1, 1);
+  const daysInMonth = new Date(y, m, 0).getDate();
+  // Monday=0 ... Sunday=6
+  let startDow = firstDay.getDay() - 1;
+  if (startDow < 0) startDow = 6;
+
+  const cells: (number | null)[] = [];
+  for (let i = 0; i < startDow; i++) cells.push(null);
+  for (let d = 1; d <= daysInMonth; d++) cells.push(d);
+  while (cells.length % 7 !== 0) cells.push(null);
+
+  return (
+    <div key={yearMonth} className="mb-4">
+      <div className="mb-1 text-sm font-semibold">
+        {MONTH_NAMES[m - 1]} {y}
+      </div>
+      <div
+        className="grid gap-px"
+        style={{ gridTemplateColumns: "repeat(7, 1fr)" }}
+      >
+        {WEEKDAYS.map((d) => (
+          <div
+            key={d}
+            className="text-muted-foreground py-1 text-center text-xs font-medium"
+          >
+            {d}
+          </div>
+        ))}
+        {cells.map((day, i) => {
+          if (day == null) {
+            return <div key={`empty-${i}`} className="p-1" />;
+          }
+          const dateStr = `${yearMonth}-${String(day).padStart(2, "0")}`;
+          const hits = byDate.get(dateStr);
+          const count = hits?.length ?? 0;
+          const isToday =
+            dateStr ===
+            new Date().toISOString().slice(0, 10);
+
+          return (
+            <div
+              key={dateStr}
+              className={[
+                "relative rounded p-1 text-center text-xs",
+                count > 0
+                  ? "bg-primary/20 font-medium cursor-pointer hover:bg-primary/40"
+                  : "",
+                isToday ? "ring-1 ring-primary" : "",
+              ]
+                .filter(Boolean)
+                .join(" ")}
+              title={
+                count > 0
+                  ? hits!.map((e) => e.path).join(", ")
+                  : undefined
+              }
+              onClick={
+                count === 1 && onNavigate
+                  ? () => onNavigate(hits![0].path)
+                  : undefined
+              }
+            >
+              {day}
+              {count > 1 && (
+                <span className="text-muted-foreground ml-0.5 text-[9px]">
+                  ({count})
+                </span>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function renderCalendar(
+  data: QueryResponse,
+  onNavigate?: (path: string) => void,
+  onCopy?: () => void,
+  copied?: boolean,
+) {
+  const { entries, byDate } = parseCalendarData(data);
+
+  if (entries.length === 0) {
+    return (
+      <div className="kiwi-query-empty text-muted-foreground text-sm">
+        No results with valid dates.
+      </div>
+    );
+  }
+
+  const months = getMonthsFromEntries(entries);
+
+  return (
+    <div className="overflow-x-auto">
+      <div className="inline-flex gap-4">
+        {months.map((ym) => renderMonthGrid(ym, byDate, onNavigate))}
+      </div>
+      <div className="text-muted-foreground mt-1 text-xs">
+        {entries.length} entry{entries.length !== 1 ? "ies" : "y"} across{" "}
+        {byDate.size} day{byDate.size !== 1 ? "s" : ""}
+      </div>
       {onCopy && (
         <button
           onClick={onCopy}

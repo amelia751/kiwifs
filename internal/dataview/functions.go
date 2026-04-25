@@ -3,8 +3,6 @@ package dataview
 import "fmt"
 
 // FuncCompiler emits SQL + bound args for a built-in function call.
-// The `args` parameter contains already-compiled SQL fragments for each
-// argument (field references are already wrapped in json_extract).
 type FuncCompiler func(args []compiledArg) (sql string, params []any, err error)
 
 // compiledArg is the SQL fragment + bound params for one function argument.
@@ -13,89 +11,77 @@ type compiledArg struct {
 	Params []any
 }
 
+type simpleFuncDef struct {
+	arity    int    // exact arity (-1 for variadic)
+	minArity int
+	maxArity int
+	template string // e.g. "lower(%s)" — %s placeholders filled with arg SQL
+}
+
+var simpleFuncs = map[string]simpleFuncDef{
+	"lower":      {arity: 1, template: "lower(%s)"},
+	"upper":      {arity: 1, template: "upper(%s)"},
+	"date":       {arity: 1, template: "date(%s)"},
+	"typeof":     {arity: 1, template: "typeof(%s)"},
+	"number":     {arity: 1, template: "CAST(%s AS REAL)"},
+	"string":     {arity: 1, template: "CAST(%s AS TEXT)"},
+	"sum":        {arity: 1, template: "SUM(%s)"},
+	"average":    {arity: 1, template: "AVG(%s)"},
+	"min":        {arity: 1, template: "MIN(%s)"},
+	"max":        {arity: 1, template: "MAX(%s)"},
+	"nonnull":    {arity: 1, template: "(%s IS NOT NULL)"},
+	"striptime":  {arity: 1, template: "date(%s)"},
+	"days_since": {arity: 1, template: "(julianday('now') - julianday(%s))"},
+	"default":    {arity: 2, template: "COALESCE(%s, %s)"},
+	"startswith": {arity: 2, template: "(%s LIKE %s || '%%')"},
+	"endswith":   {arity: 2, template: "(%s LIKE '%%' || %s)"},
+	"matches":    {arity: 2, template: "(%s LIKE %s)"},
+	"join":       {arity: 2, template: "GROUP_CONCAT(%s, %s)"},
+	"replace":    {arity: 3, template: "REPLACE(%s, %s, %s)"},
+}
+
+func compileSimpleFunc(name string, def simpleFuncDef) FuncCompiler {
+	return func(args []compiledArg) (string, []any, error) {
+		if def.arity > 0 && len(args) != def.arity {
+			return "", nil, fmt.Errorf("%s() requires %d argument(s)", name, def.arity)
+		}
+		if def.arity == -1 && (len(args) < def.minArity || len(args) > def.maxArity) {
+			return "", nil, fmt.Errorf("%s() requires %d-%d arguments", name, def.minArity, def.maxArity)
+		}
+		sqlArgs := make([]any, len(args))
+		var params []any
+		for i, a := range args {
+			sqlArgs[i] = a.SQL
+			params = append(params, a.Params...)
+		}
+		return fmt.Sprintf(def.template, sqlArgs...), params, nil
+	}
+}
+
 var funcRegistry = map[string]FuncCompiler{
-	// Existing
 	"contains":   compileContains,
-	"startswith": compileStartsWith,
-	"endswith":   compileEndsWith,
-	"matches":    compileMatches,
 	"length":     compileLength,
-	"lower":      compileLower,
-	"upper":      compileUpper,
-	"default":    compileDefault,
-	"date":       compileDate,
 	"now":        compileNow,
-	"days_since": compileDaysSince,
-
-	// Conditional/utility
-	"choice": compileChoice,
-	"typeof": compileTypeof,
-	"number": compileNumber,
-	"string": compileString,
-
-	// String functions
-	"replace":      compileReplace,
-	"substring":    compileSubstring,
-	"join":         compileJoin,
-	"regextest":    compileRegexTest,
+	"choice":     compileChoice,
+	"substring":  compileSubstring,
+	"regextest":  compileRegexTest,
 	"regexreplace": compileRegexReplace,
-
-	// Aggregation
-	"sum":     compileSum,
-	"average": compileAverage,
-	"min":     compileMin,
-	"max":     compileMax,
-
-	// List/array
-	"nonnull": compileNonNull,
-
-	// Date/duration
 	"dateformat": compileDateFormat,
-	"striptime":  compileStripTime,
 	"round":      compileRound,
+}
+
+func init() {
+	for name, def := range simpleFuncs {
+		funcRegistry[name] = compileSimpleFunc(name, def)
+	}
 }
 
 func compileContains(args []compiledArg) (string, []any, error) {
 	if len(args) != 2 {
 		return "", nil, fmt.Errorf("contains() requires 2 arguments")
 	}
-	field := args[0]
-	value := args[1]
 	sql := fmt.Sprintf("EXISTS (SELECT 1 FROM json_each(file_meta.frontmatter, %s) AS _je WHERE _je.value = %s)",
-		field.SQL, value.SQL)
-	var params []any
-	params = append(params, field.Params...)
-	params = append(params, value.Params...)
-	return sql, params, nil
-}
-
-func compileStartsWith(args []compiledArg) (string, []any, error) {
-	if len(args) != 2 {
-		return "", nil, fmt.Errorf("startsWith() requires 2 arguments")
-	}
-	sql := fmt.Sprintf("(%s LIKE %s || '%%')", args[0].SQL, args[1].SQL)
-	var params []any
-	params = append(params, args[0].Params...)
-	params = append(params, args[1].Params...)
-	return sql, params, nil
-}
-
-func compileEndsWith(args []compiledArg) (string, []any, error) {
-	if len(args) != 2 {
-		return "", nil, fmt.Errorf("endsWith() requires 2 arguments")
-	}
-	sql := fmt.Sprintf("(%s LIKE '%%' || %s)", args[0].SQL, args[1].SQL)
-	var params []any
-	params = append(params, args[0].Params...)
-	params = append(params, args[1].Params...)
-	return sql, params, nil
-}
-
-func compileMatches(args []compiledArg) (string, []any, error) {
-	if len(args) != 2 {
-		return "", nil, fmt.Errorf("matches() requires 2 arguments")
-	}
-	sql := fmt.Sprintf("(%s LIKE %s)", args[0].SQL, args[1].SQL)
+		args[0].SQL, args[1].SQL)
 	var params []any
 	params = append(params, args[0].Params...)
 	params = append(params, args[1].Params...)
@@ -106,46 +92,17 @@ func compileLength(args []compiledArg) (string, []any, error) {
 	if len(args) != 1 {
 		return "", nil, fmt.Errorf("length() requires 1 argument")
 	}
+	// args[0].SQL is a JSON path like '$.name' for FieldRef args (due to
+	// special-casing in compileFuncCall). We need json_extract for the ELSE
+	// branch so length operates on the actual value, not the path literal.
 	sql := fmt.Sprintf(
-		"CASE json_type(file_meta.frontmatter, %s) WHEN 'array' THEN json_array_length(file_meta.frontmatter, %s) ELSE length(%s) END",
+		"CASE json_type(file_meta.frontmatter, %s) WHEN 'array' THEN json_array_length(file_meta.frontmatter, %s) ELSE length(json_extract(file_meta.frontmatter, %s)) END",
 		args[0].SQL, args[0].SQL, args[0].SQL)
 	var params []any
 	params = append(params, args[0].Params...)
 	params = append(params, args[0].Params...)
 	params = append(params, args[0].Params...)
 	return sql, params, nil
-}
-
-func compileLower(args []compiledArg) (string, []any, error) {
-	if len(args) != 1 {
-		return "", nil, fmt.Errorf("lower() requires 1 argument")
-	}
-	return fmt.Sprintf("lower(%s)", args[0].SQL), args[0].Params, nil
-}
-
-func compileUpper(args []compiledArg) (string, []any, error) {
-	if len(args) != 1 {
-		return "", nil, fmt.Errorf("upper() requires 1 argument")
-	}
-	return fmt.Sprintf("upper(%s)", args[0].SQL), args[0].Params, nil
-}
-
-func compileDefault(args []compiledArg) (string, []any, error) {
-	if len(args) != 2 {
-		return "", nil, fmt.Errorf("default() requires 2 arguments")
-	}
-	sql := fmt.Sprintf("COALESCE(%s, %s)", args[0].SQL, args[1].SQL)
-	var params []any
-	params = append(params, args[0].Params...)
-	params = append(params, args[1].Params...)
-	return sql, params, nil
-}
-
-func compileDate(args []compiledArg) (string, []any, error) {
-	if len(args) != 1 {
-		return "", nil, fmt.Errorf("date() requires 1 argument")
-	}
-	return fmt.Sprintf("date(%s)", args[0].SQL), args[0].Params, nil
 }
 
 func compileNow(args []compiledArg) (string, []any, error) {
@@ -155,56 +112,11 @@ func compileNow(args []compiledArg) (string, []any, error) {
 	return "datetime('now')", nil, nil
 }
 
-func compileDaysSince(args []compiledArg) (string, []any, error) {
-	if len(args) != 1 {
-		return "", nil, fmt.Errorf("days_since() requires 1 argument")
-	}
-	sql := fmt.Sprintf("(julianday('now') - julianday(%s))", args[0].SQL)
-	return sql, args[0].Params, nil
-}
-
-// --- Conditional/utility functions ---
-
 func compileChoice(args []compiledArg) (string, []any, error) {
 	if len(args) != 3 {
 		return "", nil, fmt.Errorf("choice() requires 3 arguments (condition, ifTrue, ifFalse)")
 	}
 	sql := fmt.Sprintf("CASE WHEN %s THEN %s ELSE %s END", args[0].SQL, args[1].SQL, args[2].SQL)
-	var params []any
-	params = append(params, args[0].Params...)
-	params = append(params, args[1].Params...)
-	params = append(params, args[2].Params...)
-	return sql, params, nil
-}
-
-func compileTypeof(args []compiledArg) (string, []any, error) {
-	if len(args) != 1 {
-		return "", nil, fmt.Errorf("typeof() requires 1 argument")
-	}
-	return fmt.Sprintf("typeof(%s)", args[0].SQL), args[0].Params, nil
-}
-
-func compileNumber(args []compiledArg) (string, []any, error) {
-	if len(args) != 1 {
-		return "", nil, fmt.Errorf("number() requires 1 argument")
-	}
-	return fmt.Sprintf("CAST(%s AS REAL)", args[0].SQL), args[0].Params, nil
-}
-
-func compileString(args []compiledArg) (string, []any, error) {
-	if len(args) != 1 {
-		return "", nil, fmt.Errorf("string() requires 1 argument")
-	}
-	return fmt.Sprintf("CAST(%s AS TEXT)", args[0].SQL), args[0].Params, nil
-}
-
-// --- String functions ---
-
-func compileReplace(args []compiledArg) (string, []any, error) {
-	if len(args) != 3 {
-		return "", nil, fmt.Errorf("replace() requires 3 arguments (str, old, new)")
-	}
-	sql := fmt.Sprintf("REPLACE(%s, %s, %s)", args[0].SQL, args[1].SQL, args[2].SQL)
 	var params []any
 	params = append(params, args[0].Params...)
 	params = append(params, args[1].Params...)
@@ -224,17 +136,6 @@ func compileSubstring(args []compiledArg) (string, []any, error) {
 		return fmt.Sprintf("SUBSTR(%s, %s, %s)", args[0].SQL, args[1].SQL, args[2].SQL), params, nil
 	}
 	return fmt.Sprintf("SUBSTR(%s, %s)", args[0].SQL, args[1].SQL), params, nil
-}
-
-func compileJoin(args []compiledArg) (string, []any, error) {
-	if len(args) != 2 {
-		return "", nil, fmt.Errorf("join() requires 2 arguments (list, separator)")
-	}
-	sql := fmt.Sprintf("GROUP_CONCAT(%s, %s)", args[0].SQL, args[1].SQL)
-	var params []any
-	params = append(params, args[0].Params...)
-	params = append(params, args[1].Params...)
-	return sql, params, nil
 }
 
 func compileRegexTest(args []compiledArg) (string, []any, error) {
@@ -260,47 +161,6 @@ func compileRegexReplace(args []compiledArg) (string, []any, error) {
 	return sql, params, nil
 }
 
-// --- Aggregation functions ---
-
-func compileSum(args []compiledArg) (string, []any, error) {
-	if len(args) != 1 {
-		return "", nil, fmt.Errorf("sum() requires 1 argument")
-	}
-	return fmt.Sprintf("SUM(%s)", args[0].SQL), args[0].Params, nil
-}
-
-func compileAverage(args []compiledArg) (string, []any, error) {
-	if len(args) != 1 {
-		return "", nil, fmt.Errorf("average() requires 1 argument")
-	}
-	return fmt.Sprintf("AVG(%s)", args[0].SQL), args[0].Params, nil
-}
-
-func compileMin(args []compiledArg) (string, []any, error) {
-	if len(args) != 1 {
-		return "", nil, fmt.Errorf("min() requires 1 argument")
-	}
-	return fmt.Sprintf("MIN(%s)", args[0].SQL), args[0].Params, nil
-}
-
-func compileMax(args []compiledArg) (string, []any, error) {
-	if len(args) != 1 {
-		return "", nil, fmt.Errorf("max() requires 1 argument")
-	}
-	return fmt.Sprintf("MAX(%s)", args[0].SQL), args[0].Params, nil
-}
-
-// --- List/array functions ---
-
-func compileNonNull(args []compiledArg) (string, []any, error) {
-	if len(args) != 1 {
-		return "", nil, fmt.Errorf("nonnull() requires 1 argument")
-	}
-	return fmt.Sprintf("%s IS NOT NULL", args[0].SQL), args[0].Params, nil
-}
-
-// --- Date/duration functions ---
-
 func compileDateFormat(args []compiledArg) (string, []any, error) {
 	if len(args) != 2 {
 		return "", nil, fmt.Errorf("dateformat() requires 2 arguments (date, format)")
@@ -310,13 +170,6 @@ func compileDateFormat(args []compiledArg) (string, []any, error) {
 	params = append(params, args[1].Params...)
 	params = append(params, args[0].Params...)
 	return sql, params, nil
-}
-
-func compileStripTime(args []compiledArg) (string, []any, error) {
-	if len(args) != 1 {
-		return "", nil, fmt.Errorf("striptime() requires 1 argument")
-	}
-	return fmt.Sprintf("date(%s)", args[0].SQL), args[0].Params, nil
 }
 
 func compileRound(args []compiledArg) (string, []any, error) {

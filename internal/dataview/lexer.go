@@ -40,63 +40,20 @@ const (
 	TokBacktick // `quoted ident`
 )
 
+var tokenNames = [...]string{
+	TokEOF: "EOF", TokIdent: "IDENT", TokString: "STRING", TokNumber: "NUMBER",
+	TokBool: "BOOL", TokNil: "NIL", TokAnd: "AND", TokOr: "OR", TokNot: "NOT",
+	TokIn: "IN", TokLike: "LIKE", TokBetween: "BETWEEN", TokIs: "IS", TokNull: "NULL",
+	TokEq: "=", TokNeq: "!=", TokLt: "<", TokGt: ">", TokLte: "<=", TokGte: ">=",
+	TokLParen: "(", TokRParen: ")", TokLBracket: "[", TokRBracket: "]",
+	TokComma: ",", TokDot: ".", TokBacktick: "`",
+}
+
 func (t TokenType) String() string {
-	switch t {
-	case TokEOF:
-		return "EOF"
-	case TokIdent:
-		return "IDENT"
-	case TokString:
-		return "STRING"
-	case TokNumber:
-		return "NUMBER"
-	case TokBool:
-		return "BOOL"
-	case TokNil:
-		return "NIL"
-	case TokAnd:
-		return "AND"
-	case TokOr:
-		return "OR"
-	case TokNot:
-		return "NOT"
-	case TokIn:
-		return "IN"
-	case TokLike:
-		return "LIKE"
-	case TokBetween:
-		return "BETWEEN"
-	case TokIs:
-		return "IS"
-	case TokNull:
-		return "NULL"
-	case TokEq:
-		return "="
-	case TokNeq:
-		return "!="
-	case TokLt:
-		return "<"
-	case TokGt:
-		return ">"
-	case TokLte:
-		return "<="
-	case TokGte:
-		return ">="
-	case TokLParen:
-		return "("
-	case TokRParen:
-		return ")"
-	case TokLBracket:
-		return "["
-	case TokRBracket:
-		return "]"
-	case TokComma:
-		return ","
-	case TokDot:
-		return "."
-	default:
-		return "?"
+	if int(t) < len(tokenNames) && tokenNames[t] != "" {
+		return tokenNames[t]
 	}
+	return "?"
 }
 
 // Token is a single lexical unit.

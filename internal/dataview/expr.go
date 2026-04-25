@@ -159,6 +159,16 @@ func (p *ExprParser) infixBP() int {
 	}
 }
 
+var infixOps = map[TokenType]Operator{
+	TokEq:  OpEq,
+	TokNeq: OpNeq,
+	TokLt:  OpLt,
+	TokGt:  OpGt,
+	TokLte: OpLte,
+	TokGte: OpGte,
+	TokLike: OpLike,
+}
+
 func (p *ExprParser) parseInfix(left Expr, bp int) (Expr, error) {
 	tok := p.peek()
 	switch tok.Type {
@@ -176,55 +186,14 @@ func (p *ExprParser) parseInfix(left Expr, bp int) (Expr, error) {
 			return nil, err
 		}
 		return &BinaryExpr{Left: left, Op: OpOr, Right: right}, nil
-	case TokEq:
+	case TokEq, TokNeq, TokLt, TokGt, TokLte, TokGte, TokLike:
+		op := infixOps[tok.Type]
 		p.advance()
 		right, err := p.parseExpr(bp + 1)
 		if err != nil {
 			return nil, err
 		}
-		return &BinaryExpr{Left: left, Op: OpEq, Right: right}, nil
-	case TokNeq:
-		p.advance()
-		right, err := p.parseExpr(bp + 1)
-		if err != nil {
-			return nil, err
-		}
-		return &BinaryExpr{Left: left, Op: OpNeq, Right: right}, nil
-	case TokLt:
-		p.advance()
-		right, err := p.parseExpr(bp + 1)
-		if err != nil {
-			return nil, err
-		}
-		return &BinaryExpr{Left: left, Op: OpLt, Right: right}, nil
-	case TokGt:
-		p.advance()
-		right, err := p.parseExpr(bp + 1)
-		if err != nil {
-			return nil, err
-		}
-		return &BinaryExpr{Left: left, Op: OpGt, Right: right}, nil
-	case TokLte:
-		p.advance()
-		right, err := p.parseExpr(bp + 1)
-		if err != nil {
-			return nil, err
-		}
-		return &BinaryExpr{Left: left, Op: OpLte, Right: right}, nil
-	case TokGte:
-		p.advance()
-		right, err := p.parseExpr(bp + 1)
-		if err != nil {
-			return nil, err
-		}
-		return &BinaryExpr{Left: left, Op: OpGte, Right: right}, nil
-	case TokLike:
-		p.advance()
-		right, err := p.parseExpr(bp + 1)
-		if err != nil {
-			return nil, err
-		}
-		return &BinaryExpr{Left: left, Op: OpLike, Right: right}, nil
+		return &BinaryExpr{Left: left, Op: op, Right: right}, nil
 	case TokIn:
 		return p.parseIn(left, false)
 	case TokBetween:

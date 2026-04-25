@@ -11,6 +11,7 @@ import (
 )
 
 const viewMarker = "<!-- kiwi:auto -->"
+const viewEndMarker = "<!-- /kiwi-view -->"
 
 // ViewMarker returns the marker string used to delimit auto-generated content.
 func ViewMarker() string { return viewMarker }
@@ -53,20 +54,27 @@ func RegenerateView(ctx context.Context, store storage.Storage, exec *Executor, 
 	}
 	rendered := Render(result, format)
 
-	// Rebuild the file: frontmatter + marker + rendered output
+	// Rebuild the file: replace only between start and end markers
 	s := string(content)
 	markerIdx := strings.Index(s, viewMarker)
 
 	var newContent string
 	if markerIdx >= 0 {
-		newContent = s[:markerIdx] + viewMarker + "\n" + rendered + "\n"
+		before := s[:markerIdx]
+		after := ""
+		rest := s[markerIdx+len(viewMarker):]
+		if endIdx := strings.Index(rest, viewEndMarker); endIdx >= 0 {
+			after = rest[endIdx+len(viewEndMarker):]
+		}
+		newContent = before + viewMarker + "\n" + rendered + "\n" + viewEndMarker + after
 	} else {
 		// No marker found — append after the closing ---
 		fmEnd := findFrontmatterEnd(s)
 		if fmEnd < 0 {
 			return false, fmt.Errorf("view %s: cannot locate frontmatter end", path)
 		}
-		newContent = s[:fmEnd] + "\n" + viewMarker + "\n" + rendered + "\n"
+		after := s[fmEnd:]
+		newContent = s[:fmEnd] + "\n" + viewMarker + "\n" + rendered + "\n" + viewEndMarker + after
 	}
 
 	if bytes.Equal(content, []byte(newContent)) {

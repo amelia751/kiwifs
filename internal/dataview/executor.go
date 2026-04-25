@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -316,27 +318,151 @@ func matchTaskWhere(expr Expr, t taskRow) bool {
 			left := evalTaskField(e.Left, t)
 			right := evalTaskField(e.Right, t)
 			return fmt.Sprintf("%v", left) != fmt.Sprintf("%v", right)
+		case OpLt, OpGt, OpLte, OpGte:
+			return compareTaskValues(evalTaskField(e.Left, t), evalTaskField(e.Right, t), e.Op)
+		case OpLike:
+			left := fmt.Sprintf("%v", evalTaskField(e.Left, t))
+			pattern := fmt.Sprintf("%v", evalTaskField(e.Right, t))
+			return matchLikePattern(left, pattern)
+		case OpNotLike:
+			left := fmt.Sprintf("%v", evalTaskField(e.Left, t))
+			pattern := fmt.Sprintf("%v", evalTaskField(e.Right, t))
+			return !matchLikePattern(left, pattern)
+		case OpIn:
+			return matchTaskIn(evalTaskField(e.Left, t), e.Right, t)
+		case OpNotIn:
+			return !matchTaskIn(evalTaskField(e.Left, t), e.Right, t)
 		}
 	case *UnaryExpr:
 		if e.Op == OpNot {
 			return !matchTaskWhere(e.Expr, t)
 		}
+	case *IsNullExpr:
+		val := evalTaskField(e.Expr, t)
+		isNull := val == nil
+		if e.Negate {
+			return !isNull
+		}
+		return isNull
+	case *BetweenExpr:
+		val := evalTaskField(e.Expr, t)
+		low := evalTaskField(e.Low, t)
+		high := evalTaskField(e.High, t)
+		return compareTaskValues(val, low, OpGte) && compareTaskValues(val, high, OpLte)
+	case *FuncCall:
+		if strings.ToLower(e.Name) == "contains" && len(e.Args) == 2 {
+			slice := evalTaskField(e.Args[0], t)
+			needle := fmt.Sprintf("%v", evalTaskField(e.Args[1], t))
+			if tags, ok := slice.([]string); ok {
+				for _, tag := range tags {
+					if tag == needle {
+						return true
+					}
+				}
+			}
+			return false
+		}
 	}
-	return true
+	return false
+}
+
+func compareTaskValues(left, right any, op Operator) bool {
+	lf, lok := toFloat(left)
+	rf, rok := toFloat(right)
+	if lok && rok {
+		switch op {
+		case OpLt:
+			return lf < rf
+		case OpGt:
+			return lf > rf
+		case OpLte:
+			return lf <= rf
+		case OpGte:
+			return lf >= rf
+		}
+	}
+	ls, rs := fmt.Sprintf("%v", left), fmt.Sprintf("%v", right)
+	cmp := strings.Compare(ls, rs)
+	switch op {
+	case OpLt:
+		return cmp < 0
+	case OpGt:
+		return cmp > 0
+	case OpLte:
+		return cmp <= 0
+	case OpGte:
+		return cmp >= 0
+	}
+	return false
+}
+
+func toFloat(v any) (float64, bool) {
+	switch n := v.(type) {
+	case float64:
+		return n, true
+	case int64:
+		return float64(n), true
+	case int:
+		return float64(n), true
+	case string:
+		f, err := strconv.ParseFloat(n, 64)
+		return f, err == nil
+	}
+	return 0, false
+}
+
+func matchLikePattern(value, pattern string) bool {
+	v := strings.ToLower(value)
+	p := strings.ToLower(pattern)
+	prefix := strings.HasPrefix(p, "%")
+	suffix := strings.HasSuffix(p, "%")
+	core := strings.Trim(p, "%")
+	if prefix && suffix {
+		return strings.Contains(v, core)
+	}
+	if suffix {
+		return strings.HasPrefix(v, core)
+	}
+	if prefix {
+		return strings.HasSuffix(v, core)
+	}
+	return v == core
+}
+
+func matchTaskIn(needle any, listExpr Expr, t taskRow) bool {
+	list, ok := listExpr.(*ListExpr)
+	if !ok {
+		return false
+	}
+	ns := fmt.Sprintf("%v", needle)
+	for _, item := range list.Items {
+		if fmt.Sprintf("%v", evalTaskField(item, t)) == ns {
+			return true
+		}
+	}
+	return false
 }
 
 func evalTaskField(expr Expr, t taskRow) any {
 	switch e := expr.(type) {
 	case *FieldRef:
-		switch e.Path {
-		case "completed":
+		switch {
+		case e.Path == "completed":
 			return t.Completed
-		case "text":
+		case e.Path == "text":
 			return t.Text
-		case "due":
+		case e.Path == "due":
 			return t.Due
-		case "line":
+		case e.Path == "line":
 			return int64(t.Line)
+		case e.Path == "tags":
+			return t.Tags
+		case strings.HasPrefix(e.Path, "meta."):
+			key := strings.TrimPrefix(e.Path, "meta.")
+			if t.Meta != nil {
+				return t.Meta[key]
+			}
+			return nil
 		}
 		return nil
 	case *Literal:
@@ -382,56 +508,24 @@ func (e *Executor) execSelect(ctx context.Context, sqlStr string, args []any, pl
 		for i := range fieldVals {
 			fieldPtrs[i] = &fieldVals[i]
 		}
-		var fmRaw string
+		var path, fmRaw string
 
 		var scanDest []any
-		if plan.WithoutID {
-			scanDest = append(scanDest, fieldPtrs...)
-			scanDest = append(scanDest, &fmRaw)
-		} else {
-			var path string
+		if !plan.WithoutID {
 			scanDest = append(scanDest, &path)
-			scanDest = append(scanDest, fieldPtrs...)
-			scanDest = append(scanDest, &fmRaw)
-
-			if err := rows.Scan(scanDest...); err != nil {
-				return nil, err
-			}
-
-			var fm map[string]any
-			if fmRaw != "" {
-				_ = json.Unmarshal([]byte(fmRaw), &fm)
-			}
-
-			row := map[string]any{
-				"_path": path,
-				"path":  path,
-			}
-			for i, fs := range plan.Fields {
-				val := fieldVals[i]
-				if b, ok := val.([]byte); ok {
-					val = string(b)
-				}
-				name := fs.Expr
-				if fs.Alias != "" {
-					name = fs.Alias
-				}
-				row[name] = val
-			}
-			result.Rows = append(result.Rows, row)
-			continue
 		}
+		scanDest = append(scanDest, fieldPtrs...)
+		scanDest = append(scanDest, &fmRaw)
 
 		if err := rows.Scan(scanDest...); err != nil {
 			return nil, err
 		}
 
-		var fm map[string]any
-		if fmRaw != "" {
-			_ = json.Unmarshal([]byte(fmRaw), &fm)
-		}
-
 		row := make(map[string]any)
+		if !plan.WithoutID {
+			row["_path"] = path
+			row["path"] = path
+		}
 		for i, fs := range plan.Fields {
 			val := fieldVals[i]
 			if b, ok := val.([]byte); ok {

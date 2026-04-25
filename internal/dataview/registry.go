@@ -69,12 +69,13 @@ func (r *Registry) Scan(ctx context.Context) error {
 }
 
 // OnWrite checks if any registered view's FROM scope overlaps the written path.
-// If so, marks those views as stale.
+// If so, marks those views as stale. Tag-scoped views are always invalidated
+// since we can't cheaply check if the written file has matching tags.
 func (r *Registry) OnWrite(path string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for viewPath, plan := range r.views {
-		if plan.From == "" || strings.HasPrefix(path, plan.From) {
+		if plan.From == "" || strings.HasPrefix(path, plan.From) || len(plan.FromTags) > 0 {
 			r.stale[viewPath] = true
 		}
 	}

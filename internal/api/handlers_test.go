@@ -1088,3 +1088,82 @@ func TestHandler_QueryAggregate_UnionBypass(t *testing.T) {
 		t.Fatalf("want 400 for UNION injection, got %d %s", rec.Code, rec.Body.String())
 	}
 }
+
+func TestHandler_ViewRefresh(t *testing.T) {
+	s, _ := buildSQLiteTestServer(t)
+
+	// Seed some data files
+	for _, f := range []struct {
+		path, body string
+	}{
+		{"students/a.md", "---\nname: Alpha\nstatus: active\n---\n"},
+		{"students/b.md", "---\nname: Beta\nstatus: draft\n---\n"},
+	} {
+		req := httptest.NewRequest(http.MethodPut, "/api/kiwi/file?path="+f.path, strings.NewReader(f.body))
+		rec := httptest.NewRecorder()
+		s.echo.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("PUT %s: %d %s", f.path, rec.Code, rec.Body.String())
+		}
+	}
+
+	// Create a computed view file
+	viewBody := "---\nkiwi-view: true\nkiwi-query: TABLE name FROM \"students/\"\n---\n<!-- kiwi:auto -->\n"
+	req := httptest.NewRequest(http.MethodPut, "/api/kiwi/file?path=views/test.md", strings.NewReader(viewBody))
+	rec := httptest.NewRecorder()
+	s.echo.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT view: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// Refresh the view
+	refreshBody := `{"path":"views/test.md"}`
+	req = httptest.NewRequest(http.MethodPost, "/api/kiwi/view/refresh", strings.NewReader(refreshBody))
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	s.echo.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /view/refresh: %d %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp["path"] != "views/test.md" {
+		t.Errorf("path = %q, want views/test.md", resp["path"])
+	}
+}
+
+func TestHandler_Query_FormatTable(t *testing.T) {
+	s, _ := buildSQLiteTestServer(t)
+
+	for _, f := range []struct {
+		path, body string
+	}{
+		{"a.md", "---\nname: Alpha\nstatus: active\n---\n"},
+		{"b.md", "---\nname: Beta\nstatus: draft\n---\n"},
+	} {
+		req := httptest.NewRequest(http.MethodPut, "/api/kiwi/file?path="+f.path, strings.NewReader(f.body))
+		rec := httptest.NewRecorder()
+		s.echo.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("PUT %s: %d %s", f.path, rec.Code, rec.Body.String())
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, `/api/kiwi/query?q=TABLE+name&format=table`, nil)
+	rec := httptest.NewRecorder()
+	s.echo.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /query format=table: %d %s", rec.Code, rec.Body.String())
+	}
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "| ") {
+		t.Errorf("expected markdown table with '| ', got:\n%s", body)
+	}
+	if !strings.Contains(body, "Alpha") {
+		t.Errorf("expected Alpha in table output, got:\n%s", body)
+	}
+}

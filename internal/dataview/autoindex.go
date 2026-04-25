@@ -128,6 +128,11 @@ func CollectFields(plan *QueryPlan) []string {
 			fields = append(fields, plan.Sort)
 		}
 	}
+	for _, ss := range plan.Sorts {
+		if _, implicit := resolveField(ss.Field); !implicit {
+			fields = append(fields, ss.Field)
+		}
+	}
 	if plan.Where != nil {
 		fields = append(fields, collectExprFields(plan.Where)...)
 	}

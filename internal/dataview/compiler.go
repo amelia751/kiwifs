@@ -45,10 +45,6 @@ func (c *compiler) compileTask() (string, []any, error) {
 	var sb strings.Builder
 	sb.WriteString("SELECT file_meta.path, file_meta.tasks FROM file_meta")
 
-	if err := c.writeFromAndFlatten(&sb); err != nil {
-		return "", nil, err
-	}
-
 	// Add base condition: only files with tasks
 	var conditions []string
 	conditions = append(conditions, "json_array_length(file_meta.tasks) > 0")
@@ -350,78 +346,28 @@ func (c *compiler) compileExpr(expr Expr) (string, []any, error) {
 	}
 }
 
+var binaryOpFmt = map[Operator]string{
+	OpAnd:     "(%s AND %s)",
+	OpOr:      "(%s OR %s)",
+	OpIn:      "%s IN %s",
+	OpNotIn:   "%s NOT IN %s",
+	OpLike:    "%s LIKE %s",
+	OpNotLike: "%s NOT LIKE %s",
+}
+
 func (c *compiler) compileBinary(e *BinaryExpr) (string, []any, error) {
-	switch e.Op {
-	case OpAnd:
-		left, lp, err := c.compileExpr(e.Left)
-		if err != nil {
-			return "", nil, err
-		}
-		right, rp, err := c.compileExpr(e.Right)
-		if err != nil {
-			return "", nil, err
-		}
-		return fmt.Sprintf("(%s AND %s)", left, right), append(lp, rp...), nil
-
-	case OpOr:
-		left, lp, err := c.compileExpr(e.Left)
-		if err != nil {
-			return "", nil, err
-		}
-		right, rp, err := c.compileExpr(e.Right)
-		if err != nil {
-			return "", nil, err
-		}
-		return fmt.Sprintf("(%s OR %s)", left, right), append(lp, rp...), nil
-
-	case OpIn, OpNotIn:
-		left, lp, err := c.compileExpr(e.Left)
-		if err != nil {
-			return "", nil, err
-		}
-		right, rp, err := c.compileExpr(e.Right)
-		if err != nil {
-			return "", nil, err
-		}
-		opStr := "IN"
-		if e.Op == OpNotIn {
-			opStr = "NOT IN"
-		}
-		return fmt.Sprintf("%s %s %s", left, opStr, right), append(lp, rp...), nil
-
-	case OpLike:
-		left, lp, err := c.compileExpr(e.Left)
-		if err != nil {
-			return "", nil, err
-		}
-		right, rp, err := c.compileExpr(e.Right)
-		if err != nil {
-			return "", nil, err
-		}
-		return fmt.Sprintf("%s LIKE %s", left, right), append(lp, rp...), nil
-
-	case OpNotLike:
-		left, lp, err := c.compileExpr(e.Left)
-		if err != nil {
-			return "", nil, err
-		}
-		right, rp, err := c.compileExpr(e.Right)
-		if err != nil {
-			return "", nil, err
-		}
-		return fmt.Sprintf("%s NOT LIKE %s", left, right), append(lp, rp...), nil
-
-	default:
-		left, lp, err := c.compileExpr(e.Left)
-		if err != nil {
-			return "", nil, err
-		}
-		right, rp, err := c.compileExpr(e.Right)
-		if err != nil {
-			return "", nil, err
-		}
-		return fmt.Sprintf("%s %s %s", left, e.Op.String(), right), append(lp, rp...), nil
+	left, lp, err := c.compileExpr(e.Left)
+	if err != nil {
+		return "", nil, err
 	}
+	right, rp, err := c.compileExpr(e.Right)
+	if err != nil {
+		return "", nil, err
+	}
+	if tmpl, ok := binaryOpFmt[e.Op]; ok {
+		return fmt.Sprintf(tmpl, left, right), append(lp, rp...), nil
+	}
+	return fmt.Sprintf("%s %s %s", left, e.Op.String(), right), append(lp, rp...), nil
 }
 
 func (c *compiler) compileUnary(e *UnaryExpr) (string, []any, error) {
@@ -459,18 +405,9 @@ func (c *compiler) compileFuncCall(e *FuncCall) (string, []any, error) {
 	}
 
 	cArgs := make([]compiledArg, len(e.Args))
+	nameLower := strings.ToLower(e.Name)
 	for i, arg := range e.Args {
-		if strings.ToLower(e.Name) == "contains" && i == 0 {
-			if fr, ok := arg.(*FieldRef); ok {
-				if err := validateFieldPath(fr.Path); err != nil {
-					return "", nil, err
-				}
-				cArgs[i] = compiledArg{SQL: fmt.Sprintf("'$.%s'", fr.Path)}
-				continue
-			}
-		}
-
-		if strings.ToLower(e.Name) == "length" && i == 0 {
+		if (nameLower == "contains" || nameLower == "length") && i == 0 {
 			if fr, ok := arg.(*FieldRef); ok {
 				if err := validateFieldPath(fr.Path); err != nil {
 					return "", nil, err

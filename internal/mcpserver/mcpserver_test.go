@@ -789,3 +789,62 @@ func TestRemoteResolveWikiLinks(t *testing.T) {
 		}
 	})
 }
+
+func TestMCP_KiwiQuery(t *testing.T) {
+	b, _ := setupTestBackend(t)
+	defer b.Close()
+
+	handler := handleQuery(b)
+	req := mcp.CallToolRequest{}
+	req.Params.Name = "kiwi_query"
+	req.Params.Arguments = map[string]any{
+		"query":  `TABLE _path`,
+		"format": "table",
+	}
+
+	result, err := handler(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+	text, _ := result.Content[0].(mcp.TextContent)
+	if !strings.Contains(text.Text, "|") {
+		t.Errorf("expected markdown table, got:\n%s", text.Text)
+	}
+}
+
+func TestMCP_KiwiViewRefresh(t *testing.T) {
+	b, tmp := setupTestBackend(t)
+	defer b.Close()
+
+	// Write a computed view file
+	viewContent := "---\nkiwi-view: true\nkiwi-query: TABLE _path\n---\n<!-- kiwi:auto -->\n"
+	viewPath := filepath.Join(tmp, "views")
+	os.MkdirAll(viewPath, 0o755)
+	os.WriteFile(filepath.Join(viewPath, "test.md"), []byte(viewContent), 0o644)
+
+	// Re-index so the view file appears in file_meta
+	b.init()
+	if b.stack != nil && b.stack.Searcher != nil {
+		if sq, ok := b.stack.Searcher.(interface{ Reindex(context.Context) (int, error) }); ok {
+			sq.Reindex(context.Background())
+		}
+	}
+
+	handler := handleViewRefresh(b)
+	req := mcp.CallToolRequest{}
+	req.Params.Name = "kiwi_view_refresh"
+	req.Params.Arguments = map[string]any{
+		"path": "views/test.md",
+	}
+
+	result, err := handler(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+}

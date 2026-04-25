@@ -101,7 +101,7 @@ func setupTestDB(t *testing.T) *sql.DB {
 
 	// Add a file with tasks for TASK query tests
 	taskFM, _ := json.Marshal(map[string]any{"name": "Project Plan", "status": "active"})
-	taskJSON := `[{"text":"Buy groceries","completed":true,"line":3,"tags":["shopping"]},{"text":"Send email","completed":false,"line":4,"due":"2026-05-01"},{"text":"Read chapter 3","completed":false,"line":5,"tags":["study"]}]`
+	taskJSON := `[{"text":"Buy groceries","completed":true,"line":3,"tags":["shopping"],"meta":{"priority":1}},{"text":"Send email","completed":false,"line":4,"due":"2026-05-01","meta":{"priority":2}},{"text":"Read chapter 3","completed":false,"line":5,"tags":["study"],"meta":{"priority":1}}]`
 	_, err = db.Exec(`INSERT INTO file_meta(path, frontmatter, tasks, updated_at) VALUES (?, ?, ?, ?)`,
 		"projects/plan.md", string(taskFM), taskJSON, "2026-04-24T12:00:00Z")
 	if err != nil {
@@ -732,12 +732,23 @@ func TestIntegration_MultipleSort(t *testing.T) {
 	exec := NewExecutor(db)
 
 	result, err := exec.Query(context.Background(),
-		`TABLE name, status SORT status ASC SORT name ASC`, 0, 0)
+		`TABLE name, status FROM "students/" SORT status ASC SORT name ASC`, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Rows) < 2 {
-		t.Fatal("expected multiple rows")
+	if len(result.Rows) != 3 {
+		t.Fatalf("got %d rows, want 3", len(result.Rows))
+	}
+	// status ASC, then name ASC within same status:
+	// active: Amit, Priya; inactive: Chen
+	if result.Rows[0]["name"] != "Amit Patel" {
+		t.Errorf("row[0].name = %v, want Amit Patel", result.Rows[0]["name"])
+	}
+	if result.Rows[1]["name"] != "Priya Sharma" {
+		t.Errorf("row[1].name = %v, want Priya Sharma", result.Rows[1]["name"])
+	}
+	if result.Rows[2]["name"] != "Chen Wei" {
+		t.Errorf("row[2].name = %v, want Chen Wei", result.Rows[2]["name"])
 	}
 }
 
@@ -811,6 +822,19 @@ func TestIntegration_Calendar(t *testing.T) {
 	if len(result.Rows) != 3 {
 		t.Fatalf("got %d rows, want 3", len(result.Rows))
 	}
+	found := false
+	for _, col := range result.Columns {
+		if col == "last_active" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("columns = %v, want 'last_active' present", result.Columns)
+	}
+	val, ok := result.Rows[0]["last_active"].(string)
+	if !ok || val == "" {
+		t.Errorf("expected non-empty last_active string, got %v", result.Rows[0]["last_active"])
+	}
 }
 
 func TestParseQuery_ComputedColumn(t *testing.T) {
@@ -855,10 +879,14 @@ func TestIntegration_ComputedColumn(t *testing.T) {
 	if !found {
 		t.Errorf("columns = %v, want 'Score' present", result.Columns)
 	}
-	// Priya has 0.1, should appear as 0.1 after round(..., 1)
-	val := result.Rows[1]["Score"] // Priya is second alphabetically after Amit (but let's just check one exists)
-	if val == nil {
-		t.Error("expected computed 'Score' value, got nil")
+	// SORT name ASC → [Amit(0.7), Chen(0.9), Priya(0.1)]
+	amit := result.Rows[0]["Score"]
+	if amit != 0.7 {
+		t.Errorf("Amit Score = %v, want 0.7", amit)
+	}
+	priya := result.Rows[2]["Score"]
+	if priya != 0.1 {
+		t.Errorf("Priya Score = %v, want 0.1", priya)
 	}
 }
 
@@ -1050,5 +1078,281 @@ func TestIntegration_FuncNonNull(t *testing.T) {
 	}
 	if len(result.Rows) != 1 {
 		t.Fatalf("got %d rows, want 1 (derivatives.md)", len(result.Rows))
+	}
+}
+
+func TestIntegration_TaskWhereLike(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+	exec := NewExecutor(db)
+
+	result, err := exec.Query(context.Background(),
+		`TASK WHERE text LIKE "%groceries%"`, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Rows) != 1 {
+		t.Fatalf("got %d rows, want 1", len(result.Rows))
+	}
+	if result.Rows[0]["text"] != "Buy groceries" {
+		t.Errorf("text = %v, want Buy groceries", result.Rows[0]["text"])
+	}
+}
+
+func TestIntegration_TaskWhereComparison(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+	exec := NewExecutor(db)
+
+	result, err := exec.Query(context.Background(),
+		`TASK WHERE line > 3`, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// line 4 ("Send email") and line 5 ("Read chapter 3")
+	if len(result.Rows) != 2 {
+		t.Fatalf("got %d rows, want 2 (tasks on lines 4+)", len(result.Rows))
+	}
+}
+
+func TestIntegration_TaskWhereTag(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+	exec := NewExecutor(db)
+
+	result, err := exec.Query(context.Background(),
+		`TASK WHERE contains(tags, "shopping")`, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Rows) != 1 {
+		t.Fatalf("got %d rows, want 1", len(result.Rows))
+	}
+	if result.Rows[0]["text"] != "Buy groceries" {
+		t.Errorf("text = %v, want Buy groceries", result.Rows[0]["text"])
+	}
+}
+
+func TestIntegration_RegexReplace(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+	exec := NewExecutor(db)
+
+	result, err := exec.Query(context.Background(),
+		`TABLE regexreplace(name, "\\s+.*", "") AS "First" FROM "students/" SORT name ASC`, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Rows) != 3 {
+		t.Fatalf("got %d rows, want 3", len(result.Rows))
+	}
+	first := result.Rows[0]["First"]
+	if first != "Amit" {
+		t.Errorf("First = %v, want Amit", first)
+	}
+}
+
+func TestIntegration_ExtField(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	// Insert a .json file
+	fm, _ := json.Marshal(map[string]any{"name": "Config"})
+	_, err := db.Exec(`INSERT INTO file_meta(path, frontmatter, tasks, updated_at) VALUES (?, ?, ?, ?)`,
+		"config/settings.json", string(fm), "[]", "2026-04-24T12:00:00Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	exec := NewExecutor(db)
+	result, err := exec.Query(context.Background(),
+		`TABLE _ext WHERE _path = "config/settings.json"`, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Rows) != 1 {
+		t.Fatalf("got %d rows, want 1", len(result.Rows))
+	}
+	ext := result.Rows[0]["_ext"]
+	if ext != ".json" {
+		t.Errorf("_ext = %v, want .json", ext)
+	}
+
+	// Also verify .md still works
+	result2, err := exec.Query(context.Background(),
+		`TABLE _ext WHERE _path = "students/priya.md"`, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result2.Rows) != 1 {
+		t.Fatalf("got %d rows, want 1", len(result2.Rows))
+	}
+	if result2.Rows[0]["_ext"] != ".md" {
+		t.Errorf("_ext = %v, want .md", result2.Rows[0]["_ext"])
+	}
+}
+
+func TestRegistry_TagViewInvalidation(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	exec := NewExecutor(db)
+	store := newMemStore()
+	reg := NewRegistry(exec, store)
+
+	plan := &QueryPlan{
+		Type:     "table",
+		FromTags: []TagFilter{{Tag: "physics"}},
+		Fields:   []FieldSpec{{Expr: "name"}},
+		Limit:    50,
+	}
+	reg.Register("views/physics.md", plan)
+	reg.MarkFresh("views/physics.md")
+
+	if reg.IsStale("views/physics.md") {
+		t.Fatal("view should start fresh")
+	}
+
+	// Write a file in an unrelated folder — tag views should still invalidate
+	reg.OnWrite("notes/random.md")
+
+	if !reg.IsStale("views/physics.md") {
+		t.Error("tag-scoped view should be stale after any write")
+	}
+}
+
+func TestRegenerateView_PreservesContentAfterMarker(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	exec := NewExecutor(db)
+	exec.SetLimits(10000, 5*time.Second)
+	store := newMemStore()
+
+	viewFile := "views/preserve.md"
+	_ = store.Write(context.Background(), viewFile, []byte(
+		"---\nkiwi-view: true\nkiwi-query: TABLE name FROM \"students/\"\n---\n"+
+			"<!-- kiwi:auto -->\nold content\n<!-- /kiwi-view -->\n\n## Notes\n\nThis should survive regeneration.\n",
+	))
+
+	changed, err := RegenerateView(context.Background(), store, exec, viewFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
+		t.Fatal("expected view to change")
+	}
+
+	content, _ := store.Read(context.Background(), viewFile)
+	body := string(content)
+	if !strings.Contains(body, "## Notes") {
+		t.Errorf("content after end marker was lost:\n%s", body)
+	}
+	if !strings.Contains(body, "This should survive regeneration.") {
+		t.Errorf("prose below end marker was lost:\n%s", body)
+	}
+	if strings.Contains(body, "old content") {
+		t.Errorf("old content between markers was not replaced:\n%s", body)
+	}
+}
+
+func TestRegenerateView_BackwardCompat_NoEndMarker(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	exec := NewExecutor(db)
+	exec.SetLimits(10000, 5*time.Second)
+	store := newMemStore()
+
+	viewFile := "views/compat.md"
+	_ = store.Write(context.Background(), viewFile, []byte(
+		"---\nkiwi-view: true\nkiwi-query: TABLE name FROM \"students/\"\n---\n"+
+			"<!-- kiwi:auto -->\nold stuff\n",
+	))
+
+	changed, err := RegenerateView(context.Background(), store, exec, viewFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
+		t.Fatal("expected view to change")
+	}
+
+	content, _ := store.Read(context.Background(), viewFile)
+	body := string(content)
+	if !strings.Contains(body, "<!-- /kiwi-view -->") {
+		t.Error("expected end marker to be added")
+	}
+	if strings.Contains(body, "old stuff") {
+		t.Error("old content should be replaced")
+	}
+}
+
+func TestCollectFields_MultiSort(t *testing.T) {
+	plan := &QueryPlan{
+		Type: "table",
+		Sorts: []SortSpec{
+			{Field: "status", Order: "asc"},
+			{Field: "name", Order: "asc"},
+		},
+		Limit: 50,
+	}
+	fields := CollectFields(plan)
+	want := map[string]bool{"status": true, "name": true}
+	for _, f := range fields {
+		delete(want, f)
+	}
+	if len(want) > 0 {
+		t.Errorf("missing fields from CollectFields: %v", want)
+	}
+}
+
+func TestIntegration_TaskWhereMeta(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+	exec := NewExecutor(db)
+
+	result, err := exec.Query(context.Background(),
+		`TASK WHERE meta.priority = 1`, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// "Buy groceries" (priority 1) and "Read chapter 3" (priority 1)
+	if len(result.Rows) != 2 {
+		t.Fatalf("got %d rows, want 2", len(result.Rows))
+	}
+}
+
+func TestIntegration_RegexTest(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+	exec := NewExecutor(db)
+
+	result, err := exec.Query(context.Background(),
+		`TABLE name WHERE regextest("^A.*", name) FROM "students/"`, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Rows) != 1 {
+		t.Fatalf("got %d rows, want 1 (only Amit)", len(result.Rows))
+	}
+	if result.Rows[0]["name"] != "Amit Patel" {
+		t.Errorf("name = %v, want Amit Patel", result.Rows[0]["name"])
+	}
+}
+
+func TestIntegration_TaskWhereBetween(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+	exec := NewExecutor(db)
+
+	result, err := exec.Query(context.Background(),
+		`TASK WHERE line BETWEEN 3 AND 4`, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// line 3 ("Buy groceries") and line 4 ("Send email")
+	if len(result.Rows) != 2 {
+		t.Fatalf("got %d rows, want 2", len(result.Rows))
 	}
 }
