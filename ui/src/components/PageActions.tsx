@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Copy, Download, MoreHorizontal, Move, Trash2 } from "lucide-react";
+import { Copy, Download, MoreHorizontal, Move, Scale, Share2, Trash2 } from "lucide-react";
 import { api } from "@/lib/api";
 import { stem } from "@/lib/paths";
 import { Button } from "@/components/ui/button";
@@ -18,6 +18,8 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { KiwiShareDialog } from "./KiwiShareDialog";
+import { KiwiDecisionWizard } from "./KiwiDecisionWizard";
 
 type Props = {
   path: string;
@@ -28,9 +30,12 @@ type Props = {
 
 export function PageActions({ path, onDeleted, onDuplicated, onMoved }: Props) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const [shareOpen, setShareOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [moveOpen, setMoveOpen] = useState(false);
   const [dupOpen, setDupOpen] = useState(false);
+  const [decisionOpen, setDecisionOpen] = useState(false);
+  const [decisionBody, setDecisionBody] = useState("");
   const [newPath, setNewPath] = useState("");
   const [dupPath, setDupPath] = useState("");
   const [busy, setBusy] = useState(false);
@@ -104,11 +109,25 @@ export function PageActions({ path, onDeleted, onDuplicated, onMoved }: Props) {
     <>
       <Popover open={menuOpen} onOpenChange={setMenuOpen}>
         <PopoverTrigger asChild>
-          <Button variant="ghost" size="icon" className="h-8 w-8">
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8"
+            aria-label="Page actions"
+            title="Page actions"
+          >
             <MoreHorizontal className="h-4 w-4" />
           </Button>
         </PopoverTrigger>
         <PopoverContent align="end" className="w-48 p-1">
+          <MenuButton
+            icon={<Share2 className="h-3.5 w-3.5" />}
+            label="Share"
+            onClick={() => {
+              setMenuOpen(false);
+              setShareOpen(true);
+            }}
+          />
           <MenuButton
             icon={<Copy className="h-3.5 w-3.5" />}
             label="Duplicate"
@@ -133,6 +152,21 @@ export function PageActions({ path, onDeleted, onDuplicated, onMoved }: Props) {
             icon={<Download className="h-3.5 w-3.5" />}
             label="Export as Markdown"
             onClick={handleExport}
+          />
+          <MenuButton
+            icon={<Scale className="h-3.5 w-3.5" />}
+            label="Convert to decision"
+            onClick={async () => {
+              setMenuOpen(false);
+              setError(null);
+              try {
+                const { content } = await api.readFile(path);
+                setDecisionBody(content);
+                setDecisionOpen(true);
+              } catch (e) {
+                setError(String(e));
+              }
+            }}
           />
           <div className="h-px bg-border my-1" />
           <MenuButton
@@ -233,6 +267,15 @@ export function PageActions({ path, onDeleted, onDuplicated, onMoved }: Props) {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <KiwiShareDialog path={path} open={shareOpen} onOpenChange={setShareOpen} />
+
+      <KiwiDecisionWizard
+        open={decisionOpen}
+        onOpenChange={setDecisionOpen}
+        sourcePath={path}
+        sourceBody={decisionBody}
+      />
     </>
   );
 }

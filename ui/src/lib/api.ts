@@ -94,6 +94,58 @@ export type SpaceMeta = {
   sizeBytes: number;
 };
 
+export type JanitorIssue = {
+  kind: string;
+  path: string;
+  message: string;
+  related?: string[];
+  suggestion?: string;
+  severity: "info" | "warning" | "error";
+};
+
+export type JanitorResult = {
+  issues: JanitorIssue[];
+  scanned: number;
+  healthy: number;
+  timestamp: string;
+};
+
+export type WorkflowTask = {
+  id: string;
+  title: string;
+  status: "todo" | "in-progress" | "done" | "blocked";
+  assignee?: string;
+  dueDate?: string;
+  completedAt?: string;
+  completedBy?: string;
+};
+
+export type WorkflowApproval = {
+  status: "pending" | "approved" | "rejected";
+  approver?: string;
+  date?: string;
+  comment?: string;
+};
+
+export type WorkflowMeta = {
+  type: string;
+  tasks: WorkflowTask[];
+  approval?: WorkflowApproval;
+  dueDate?: string;
+  progress: number;
+};
+
+export type ShareLink = {
+  id: string;
+  path: string;
+  token: string;
+  expiresAt?: string;
+  password?: string;
+  createdBy: string;
+  createdAt: string;
+  viewCount: number;
+};
+
 const DEFAULT_ACTOR = "human:web-ui";
 
 let _currentSpace: string | null = null;
@@ -395,5 +447,100 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(theme),
     });
+  },
+
+  // ─── Frontmatter patch ─────────────────────────────────────────────────────
+
+  async updateMeta(
+    path: string,
+    updates: Record<string, unknown>,
+  ): Promise<{ path: string; etag: string }> {
+    return request(`${kiwiBase()}/meta`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path, updates }),
+    });
+  },
+
+  // ─── Trust / Verification ──────────────────────────────────────────────────
+
+  async verifiedSearch(q: string, limit?: number, offset?: number): Promise<SearchResponse> {
+    const qs = new URLSearchParams({ q });
+    if (limit != null) qs.set("limit", String(limit));
+    if (offset != null) qs.set("offset", String(offset));
+    return request(`${kiwiBase()}/search/verified?${qs}`);
+  },
+
+  async stalePages(days?: number): Promise<{ staleDays: number; count: number; results: MetaResult[] }> {
+    const qs = new URLSearchParams();
+    if (days != null) qs.set("days", String(days));
+    const suffix = qs.toString() ? `?${qs}` : "";
+    return request(`${kiwiBase()}/stale${suffix}`);
+  },
+
+  async contradictions(path: string): Promise<{ path: string; contradictions: string[] }> {
+    const qs = new URLSearchParams({ path });
+    return request(`${kiwiBase()}/contradictions?${qs}`);
+  },
+
+  // ─── Janitor ───────────────────────────────────────────────────────────────
+
+  async janitorScan(staleDays?: number): Promise<JanitorResult> {
+    const qs = new URLSearchParams();
+    if (staleDays != null) qs.set("staleDays", String(staleDays));
+    const suffix = qs.toString() ? `?${qs}` : "";
+    return request(`${kiwiBase()}/janitor${suffix}`);
+  },
+
+  // ─── Workflow ──────────────────────────────────────────────────────────────
+
+  async getWorkflow(path: string): Promise<WorkflowMeta> {
+    const qs = new URLSearchParams({ path });
+    return request(`${kiwiBase()}/workflow?${qs}`);
+  },
+
+  async updateTask(path: string, taskId: string, status: string): Promise<{ path: string; etag: string }> {
+    return request(`${kiwiBase()}/workflow/task`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path, taskId, status }),
+    });
+  },
+
+  async updateApproval(
+    path: string,
+    status: string,
+    comment?: string,
+  ): Promise<{ path: string; etag: string }> {
+    return request(`${kiwiBase()}/workflow/approval`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path, status, ...(comment ? { comment } : {}) }),
+    });
+  },
+
+  // ─── Share Links ───────────────────────────────────────────────────────────
+
+  async createShareLink(path: string, expiresIn?: string, password?: string): Promise<ShareLink> {
+    return request(`${kiwiBase()}/share`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path, ...(expiresIn ? { expiresIn } : {}), ...(password ? { password } : {}) }),
+    });
+  },
+
+  async listShareLinks(path: string): Promise<ShareLink[]> {
+    const qs = new URLSearchParams({ path });
+    return request(`${kiwiBase()}/share?${qs}`);
+  },
+
+  async revokeShareLink(id: string): Promise<void> {
+    return request(`${kiwiBase()}/share/${id}`, { method: "DELETE" });
+  },
+
+  // URL that produces the publicly-shareable page for a given token.
+  publicShareUrl(token: string): string {
+    const base = typeof window !== "undefined" ? window.location.origin : "";
+    return `${base}/api/kiwi/public/${token}`;
   },
 };

@@ -45,6 +45,9 @@ import {
 type Props = {
   tree: TreeEntry | null;
   activePath?: string | null;
+  // refreshKey lets the parent force a re-fetch after writes so renames and
+  // new pages appear in the graph without a full page reload.
+  refreshKey?: number;
   onNavigate: (path: string) => void;
   onClose: () => void;
 };
@@ -122,23 +125,32 @@ function buildGraph(
     });
   }
 
-  // Initial seed positions — ForceAtlas2 explodes if all nodes share (0,0).
+  // Initial seed positions — ForceAtlas2 explodes if all nodes share
+  // (0,0). The circular layout gives every node a distinct starting
+  // point even in tiny graphs.
   circular.assign(g, { scale: 100 });
-  forceAtlas2.assign(g, {
-    iterations: 200,
-    settings: {
-      gravity: 1,
-      scalingRatio: 10,
-      slowDown: 2,
-      barnesHutOptimize: g.order > 200,
-      strongGravityMode: false,
-    },
-  });
+  // ForceAtlas2 needs ≥3 nodes *and* at least one edge to converge.
+  // With 1-2 nodes or a fully disconnected graph it produces NaN
+  // positions, which Sigma renders as a blank canvas. Keep the
+  // circular seed in those cases — we still want to visualise the
+  // pages, we just skip the physics step that can't run.
+  if (g.order >= 3 && g.size >= 1) {
+    forceAtlas2.assign(g, {
+      iterations: 200,
+      settings: {
+        gravity: 1,
+        scalingRatio: 10,
+        slowDown: 2,
+        barnesHutOptimize: g.order > 200,
+        strongGravityMode: false,
+      },
+    });
+  }
 
   return { graph: g, dirs: Array.from(dirSet).sort(), tags: Array.from(tagSet).sort(), theme };
 }
 
-export function KiwiGraph({ tree, activePath, onNavigate, onClose }: Props) {
+export function KiwiGraph({ tree, activePath, refreshKey, onNavigate, onClose }: Props) {
   const [resp, setResp] = useState<GraphResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [dirFilter, setDirFilter] = useState<string>("");
@@ -149,6 +161,7 @@ export function KiwiGraph({ tree, activePath, onNavigate, onClose }: Props) {
 
   useEffect(() => {
     let cancelled = false;
+    setError(null);
     api
       .graph()
       .then((r) => {
@@ -160,7 +173,7 @@ export function KiwiGraph({ tree, activePath, onNavigate, onClose }: Props) {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [refreshKey]);
 
   useEffect(() => {
     const obs = new MutationObserver(() =>
@@ -256,7 +269,35 @@ export function KiwiGraph({ tree, activePath, onNavigate, onClose }: Props) {
         )}
         {built && built.graph.order === 0 && (
           <div className="absolute inset-0 grid place-items-center text-sm text-muted-foreground">
-            No pages yet.
+            <div className="max-w-md text-center space-y-2 px-6">
+              <div className="text-base font-medium text-foreground">
+                No pages yet
+              </div>
+              <p>
+                The graph view shows how your pages connect. Create a few
+                markdown files and link between them with{" "}
+                <code className="font-mono text-xs px-1 py-0.5 rounded bg-muted">
+                  [[page-name]]
+                </code>{" "}
+                to see your knowledge graph.
+              </p>
+            </div>
+          </div>
+        )}
+        {built && built.graph.order > 0 && built.graph.size === 0 && (
+          <div className="absolute inset-0 grid place-items-center text-sm text-muted-foreground pointer-events-none">
+            <div className="max-w-md text-center space-y-2 px-6 bg-card/80 backdrop-blur rounded-lg py-4 border border-border/60">
+              <div className="text-base font-medium text-foreground">
+                {built.graph.order} page{built.graph.order === 1 ? "" : "s"}, no links yet
+              </div>
+              <p>
+                Add{" "}
+                <code className="font-mono text-xs px-1 py-0.5 rounded bg-muted">
+                  [[page-name]]
+                </code>{" "}
+                wikilinks between your pages to see them cluster by topic.
+              </p>
+            </div>
           </div>
         )}
         {built && built.graph.order > 0 && (

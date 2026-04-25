@@ -138,13 +138,25 @@ export function KiwiHistory({ path, onClose, onRestored }: Props) {
     if (!selectedHash) return;
     setRestoring(true);
     try {
+      // Grab the current ETag first so the restore goes through optimistic
+      // locking like any normal edit — otherwise a concurrent writer's changes
+      // would be silently wiped out by the restore.
+      const current = await api.readFile(path).catch(() => ({ etag: null }));
       const content = await api.readVersion(path, selectedHash);
-      await api.writeFile(path, content);
+      await api.writeFile(path, content, current.etag || undefined);
       setConfirmRestore(false);
       onRestored?.();
       onClose();
     } catch (e) {
-      setContentError(String(e));
+      const msg = String(e);
+      if (msg.includes("409")) {
+        setContentError(
+          "This page changed since you opened history. Close and reopen the " +
+            "panel to see the latest version, then retry the restore.",
+        );
+      } else {
+        setContentError(msg);
+      }
     } finally {
       setRestoring(false);
     }

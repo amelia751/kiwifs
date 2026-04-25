@@ -380,6 +380,8 @@ function CommentsList({
                   size="icon"
                   onClick={() => onToggleResolve(c.id)}
                   title={c.resolved ? "Unresolve" : "Resolve"}
+                  aria-label={c.resolved ? "Unresolve comment" : "Resolve comment"}
+                  aria-pressed={c.resolved ? true : false}
                   className="h-7 w-7 text-muted-foreground"
                 >
                   {c.resolved ? <Circle className="h-3.5 w-3.5" /> : <CheckCircle className="h-3.5 w-3.5" />}
@@ -388,7 +390,8 @@ function CommentsList({
                   variant="ghost"
                   size="icon"
                   onClick={() => onDelete(c.id)}
-                  title="Delete"
+                  title="Delete comment"
+                  aria-label="Delete comment"
                   className="h-7 w-7 text-muted-foreground hover:text-destructive"
                 >
                   <Trash2 className="h-3.5 w-3.5" />

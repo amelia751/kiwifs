@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import {
+  Activity,
   Check,
   ChevronDown,
   ChevronRight,
@@ -20,14 +21,28 @@ import {
 } from "lucide-react";
 import { KiwiTree } from "./components/KiwiTree";
 import { KiwiPage } from "./components/KiwiPage";
-import { KiwiEditor } from "./components/KiwiEditor";
 import { KiwiSearch } from "./components/KiwiSearch";
-import { KiwiGraph } from "./components/KiwiGraph";
-import { KiwiHistory } from "./components/KiwiHistory";
-import { KiwiThemeEditor } from "./components/KiwiThemeEditor";
+import { KiwiToasts } from "./components/KiwiToasts";
+import { KiwiFirstRunTour } from "./components/KiwiFirstRunTour";
 import { NewPageDialog } from "./components/NewPageDialog";
 import { KeyboardShortcuts } from "./components/KeyboardShortcuts";
 import { SpaceSelector } from "./components/SpaceSelector";
+
+// Heavy panels open on demand; code-splitting them trims ~1.5 MB off the
+// initial bundle and first paint.
+const KiwiEditor = lazy(() => import("./components/KiwiEditor").then((m) => ({ default: m.KiwiEditor })));
+const KiwiGraph = lazy(() => import("./components/KiwiGraph").then((m) => ({ default: m.KiwiGraph })));
+const KiwiHistory = lazy(() => import("./components/KiwiHistory").then((m) => ({ default: m.KiwiHistory })));
+const KiwiThemeEditor = lazy(() => import("./components/KiwiThemeEditor").then((m) => ({ default: m.KiwiThemeEditor })));
+const KiwiJanitor = lazy(() => import("./components/KiwiJanitor").then((m) => ({ default: m.KiwiJanitor })));
+
+function LazyPanelFallback({ label }: { label: string }) {
+  return (
+    <div className="p-6 text-xs text-muted-foreground" role="status">
+      Loading {label}…
+    </div>
+  );
+}
 import { useRecentPages } from "./hooks/useRecentPages";
 import { useStarredPages } from "./hooks/useStarredPages";
 import { usePinnedPages } from "./hooks/usePinnedPages";
@@ -61,9 +76,30 @@ export default function App() {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [themeEditorOpen, setThemeEditorOpen] = useState(false);
+  const [janitorOpen, setJanitorOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(() => {
-    try { return localStorage.getItem("kiwifs-sidebar") !== "collapsed"; } catch { return true; }
+    try {
+      // On phones / narrow tablets we start closed so the editor gets
+      // the full viewport width; users can still open the drawer.
+      if (typeof window !== "undefined" && window.matchMedia("(max-width: 900px)").matches) {
+        return false;
+      }
+      return localStorage.getItem("kiwifs-sidebar") !== "collapsed";
+    } catch { return true; }
   });
+  const [isMobile, setIsMobile] = useState(() => {
+    try {
+      return typeof window !== "undefined" && window.matchMedia("(max-width: 900px)").matches;
+    } catch { return false; }
+  });
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const mql = window.matchMedia("(max-width: 900px)");
+    const apply = () => setIsMobile(mql.matches);
+    apply();
+    mql.addEventListener?.("change", apply);
+    return () => mql.removeEventListener?.("change", apply);
+  }, []);
   const [sidebarWidth, setSidebarWidth] = useState(() => {
     try {
       const saved = localStorage.getItem("kiwifs-sidebar-width");
@@ -206,6 +242,7 @@ export default function App() {
     setGraphOpen(false);
     setHistoryOpen(false);
     recordVisit(path);
+    if (isMobile) setSidebarOpen(false);
   }
 
   const toggleSidebar = useCallback((open: boolean) => {
@@ -215,6 +252,8 @@ export default function App() {
 
   return (
     <TooltipProvider delayDuration={250}>
+      <KiwiToasts />
+      <KiwiFirstRunTour />
       <div className="h-full flex flex-col bg-background text-foreground">
         {/* ── Header: full-width app bar ── */}
         <header className="h-12 shrink-0 border-b border-border bg-card flex items-center px-3 gap-2">
@@ -255,6 +294,9 @@ export default function App() {
           <div className="flex items-center gap-0.5">
             <ToolbarButton onClick={() => { setNewFolder(undefined); setNewOpen(true); }} label="New page (⌘N)">
               <Plus className="h-4 w-4" />
+            </ToolbarButton>
+            <ToolbarButton onClick={() => setJanitorOpen(true)} label="Knowledge health">
+              <Activity className="h-4 w-4" />
             </ToolbarButton>
             <ToolbarButton onClick={() => setGraphOpen((v) => !v)} label="Knowledge graph">
               <Network className="h-4 w-4" />
@@ -325,13 +367,27 @@ export default function App() {
         </header>
 
         {/* ── Body: sidebar + content ── */}
-        <div className="flex-1 flex overflow-hidden">
+        <div className="flex-1 flex overflow-hidden relative">
+          {/* Mobile scrim: tap anywhere to close the drawer. */}
+          {isMobile && sidebarOpen && (
+            <div
+              className="absolute inset-0 z-30 bg-background/60 backdrop-blur-sm"
+              onClick={() => toggleSidebar(false)}
+              aria-hidden="true"
+            />
+          )}
           {/* Sidebar */}
           <aside
-            className={"shrink-0 border-r border-border bg-card flex flex-col overflow-hidden" + (resizing.current ? "" : " transition-[width] duration-200")}
-            style={{ width: sidebarOpen ? sidebarWidth : 0 }}
+            className={
+              (isMobile
+                ? "absolute inset-y-0 left-0 z-40 border-r border-border bg-card flex flex-col overflow-hidden shadow-xl"
+                : "shrink-0 border-r border-border bg-card flex flex-col overflow-hidden") +
+              (resizing.current ? "" : " transition-[width] duration-200")
+            }
+            style={{ width: sidebarOpen ? (isMobile ? Math.min(sidebarWidth, 320) : sidebarWidth) : 0 }}
+            aria-hidden={!sidebarOpen}
           >
-            <div className="flex flex-col h-full" style={{ minWidth: sidebarWidth }}>
+            <div className="flex flex-col h-full" style={{ minWidth: isMobile ? Math.min(sidebarWidth, 320) : sidebarWidth }}>
               {/* Space selector */}
               <SpaceSelector onSwitch={handleSpaceSwitch} />
 
@@ -447,38 +503,47 @@ export default function App() {
           {/* Main content area */}
           <main className="flex-1 overflow-auto kiwi-scroll relative">
             {themeEditorOpen ? (
-              <KiwiThemeEditor
-                onClose={() => setThemeEditorOpen(false)}
-                onPresetReset={() => setPreset(preset)}
-              />
+              <Suspense fallback={<LazyPanelFallback label="theme editor" />}>
+                <KiwiThemeEditor
+                  onClose={() => setThemeEditorOpen(false)}
+                  onPresetReset={() => setPreset(preset)}
+                />
+              </Suspense>
             ) : graphOpen ? (
-              <KiwiGraph
-                tree={tree}
-                activePath={activePath}
-                onNavigate={(p) => {
-                  setGraphOpen(false);
-                  navigate(p);
-                }}
-                onClose={() => setGraphOpen(false)}
-              />
+              <Suspense fallback={<LazyPanelFallback label="graph" />}>
+                <KiwiGraph
+                  tree={tree}
+                  activePath={activePath}
+                  refreshKey={refreshKey}
+                  onNavigate={(p) => {
+                    setGraphOpen(false);
+                    navigate(p);
+                  }}
+                  onClose={() => setGraphOpen(false)}
+                />
+              </Suspense>
             ) : historyOpen && activePath ? (
-              <KiwiHistory
-                path={activePath}
-                onClose={() => setHistoryOpen(false)}
-                onRestored={() => setRefreshKey((k) => k + 1)}
-              />
+              <Suspense fallback={<LazyPanelFallback label="history" />}>
+                <KiwiHistory
+                  path={activePath}
+                  onClose={() => setHistoryOpen(false)}
+                  onRestored={() => setRefreshKey((k) => k + 1)}
+                />
+              </Suspense>
             ) : editing && activePath ? (
-              <KiwiEditor
-                path={activePath}
-                tree={tree}
-                saveRef={editorRef}
-                onClose={() => setEditing(false)}
-                onNavigate={navigate}
-                onSaved={() => {
-                  setEditing(false);
-                  setRefreshKey((k) => k + 1);
-                }}
-              />
+              <Suspense fallback={<LazyPanelFallback label="editor" />}>
+                <KiwiEditor
+                  path={activePath}
+                  tree={tree}
+                  saveRef={editorRef}
+                  onClose={() => setEditing(false)}
+                  onNavigate={navigate}
+                  onSaved={() => {
+                    setEditing(false);
+                    setRefreshKey((k) => k + 1);
+                  }}
+                />
+              </Suspense>
             ) : activePath ? (
               <KiwiPage
                 path={activePath}
@@ -507,6 +572,7 @@ export default function App() {
                   setSearchOpen(true);
                 }}
                 refreshKey={refreshKey}
+                onRefresh={() => setRefreshKey((k) => k + 1)}
               />
             ) : (
               <WelcomeScreen
@@ -545,6 +611,18 @@ export default function App() {
         open={shortcutsOpen}
         onOpenChange={setShortcutsOpen}
       />
+      {janitorOpen && (
+        <Suspense fallback={null}>
+          <KiwiJanitor
+            open={janitorOpen}
+            onOpenChange={setJanitorOpen}
+            onNavigate={(p) => {
+              setJanitorOpen(false);
+              navigate(p);
+            }}
+          />
+        </Suspense>
+      )}
     </TooltipProvider>
   );
 }

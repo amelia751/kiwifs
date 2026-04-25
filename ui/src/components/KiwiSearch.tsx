@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Calendar, Clock, File, Filter, FolderOpen, Sparkles, X } from "lucide-react";
+import { Calendar, Clock, File, Filter, FolderOpen, Shield, Sparkles, X } from "lucide-react";
 import {
   CommandDialog,
   CommandEmpty,
@@ -69,9 +69,11 @@ export function KiwiSearch({ open, onOpenChange, onSelect, tree, initialQuery }:
   const [hits, setHits] = useState<Hit[]>([]);
   const [loading, setLoading] = useState(false);
   const [unavailable, setUnavailable] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
   const [dirFilter, setDirFilter] = useState("");
   const [dateFilter, setDateFilter] = useState("");
   const [recents, setRecents] = useState<string[]>([]);
+  const [verifiedOnly, setVerifiedOnly] = useState(false);
   const debounce = useRef<number | null>(null);
 
   const dirs = topDirs(tree);
@@ -98,9 +100,11 @@ export function KiwiSearch({ open, onOpenChange, onSelect, tree, initialQuery }:
       setHits([]);
       setLoading(false);
       setUnavailable(false);
+      setSearchError(null);
       return;
     }
     setLoading(true);
+    setSearchError(null);
     debounce.current = window.setTimeout(() => {
       const modifiedAfter = dateFilterToISO(dateFilter);
       const { text: textQuery, filters: metaFilters } = parseFieldFilters(query);
@@ -119,7 +123,9 @@ export function KiwiSearch({ open, onOpenChange, onSelect, tree, initialQuery }:
           return;
         }
         const ftsPromise = searchQ
-          ? api.search(searchQ, modifiedAfter ? { modifiedAfter } : undefined)
+          ? (verifiedOnly
+              ? api.verifiedSearch(searchQ)
+              : api.search(searchQ, modifiedAfter ? { modifiedAfter } : undefined))
           : Promise.resolve(null);
         Promise.all([ftsPromise, metaPromise]).then(([ftsRes, metaPaths]) => {
           let results: Hit[] = [];
@@ -143,7 +149,12 @@ export function KiwiSearch({ open, onOpenChange, onSelect, tree, initialQuery }:
           }
           setHits(results);
           setUnavailable(false);
-        }).catch(() => setHits([]))
+        }).catch((e) => {
+          // Surface real search failures instead of pretending the result set
+          // is empty — a 500 from FTS is a very different UX from "no hits".
+          setHits([]);
+          setSearchError(String(e));
+        })
           .finally(() => setLoading(false));
       } else {
         api
@@ -170,7 +181,9 @@ export function KiwiSearch({ open, onOpenChange, onSelect, tree, initialQuery }:
           })
           .catch((e) => {
             setHits([]);
-            setUnavailable(String(e).includes("503"));
+            const msg = String(e);
+            setUnavailable(msg.includes("503"));
+            if (!msg.includes("503")) setSearchError(msg);
           })
           .finally(() => setLoading(false));
       }
@@ -178,7 +191,7 @@ export function KiwiSearch({ open, onOpenChange, onSelect, tree, initialQuery }:
     return () => {
       if (debounce.current) window.clearTimeout(debounce.current);
     };
-  }, [query, mode, dateFilter]);
+  }, [query, mode, dateFilter, verifiedOnly]);
 
   function handleSelect(path: string) {
     if (query.trim()) saveRecentSearch(query.trim());
@@ -216,6 +229,12 @@ export function KiwiSearch({ open, onOpenChange, onSelect, tree, initialQuery }:
           onClick={() => setMode("semantic")}
           label="Semantic"
           icon={<Sparkles className="h-3 w-3" />}
+        />
+        <ModeChip
+          active={verifiedOnly}
+          onClick={() => setVerifiedOnly((v) => !v)}
+          label="Verified"
+          icon={<Shield className="h-3 w-3" />}
         />
         {dirs.length > 0 && (
           <>
@@ -307,7 +326,12 @@ export function KiwiSearch({ open, onOpenChange, onSelect, tree, initialQuery }:
             </CommandItem>
           </CommandGroup>
         )}
-        {query && filtered.length === 0 && !loading && !unavailable ? (
+        {searchError && !loading && (
+          <div className="mx-3 my-2 rounded-md border border-destructive/40 bg-destructive/10 text-destructive px-3 py-2 text-xs font-mono break-words">
+            Search failed: {searchError}
+          </div>
+        )}
+        {query && filtered.length === 0 && !loading && !unavailable && !searchError ? (
           <CommandEmpty>No results.</CommandEmpty>
         ) : null}
         {filtered.map((r) => (

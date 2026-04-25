@@ -286,6 +286,141 @@ All commands support `--help` for full flag reference.
 
 ---
 
+## Advanced features
+
+This section covers the pieces that sit on top of the file-first core. Everything here is opt-in and degrades gracefully — a KiwiFS server without any of it still works.
+
+### Verified Knowledge Layer (trust ranking)
+
+Every page can declare a **trust level** in its frontmatter:
+
+```yaml
+---
+trust: verified               # suggestion | validated | verified | source-of-truth
+verified-by: alice@example.com
+verified-at: 2026-04-20
+---
+```
+
+Search results get re-ranked by default: a soft trust boost pushes `verified` pages to the top without hiding anything else. Pass `boost=none` to disable, or hit `GET /api/kiwi/search/verified?q=...` for the hard filter (only canonical answers, aggressively boosted).
+
+Endpoints:
+
+| Endpoint | Behaviour |
+|---|---|
+| `GET /api/kiwi/search?q=...` | default soft trust boost on top of BM25 |
+| `GET /api/kiwi/search?q=...&boost=none` | raw BM25 (no trust signal) |
+| `GET /api/kiwi/search/verified?q=...` | hard boost — `source-of-truth` / `verified` only |
+| `PUT /api/kiwi/trust` | set trust level on a page (audit trail in git) |
+
+### AI Knowledge Janitor (scheduled)
+
+The Janitor scans your knowledge base for stale pages, orphans, duplicates, and broken links. It runs on a timer — not just when someone clicks the panel:
+
+```toml
+# .kiwi/config.toml
+[janitor]
+interval     = "24h"      # "0s" disables the scheduler (manual scan still works)
+stale_days   = 90         # override per space — engineering docs decay faster than HR
+startup_scan = true       # run one scan at boot so the panel isn't empty
+```
+
+Every scheduled scan broadcasts an SSE `janitor.scan` event with a summary count so the UI can surface a badge without polling. Scan results are cached in memory and returned by `GET /api/kiwi/janitor`; pass `?fresh=1` to force a re-scan.
+
+### Decision Memory
+
+Decisions are first-class pages with a guided wizard:
+
+- Click a page's "More" menu → "Convert to decision" to turn a note into a structured decision with alternatives, consequences, and reversal conditions.
+- Or run `kiwifs init --template agent-knowledge` and write into `decisions/` using `.kiwi/templates/decision.md`.
+- Decisions render with a dedicated log view that lists alternatives, impact, and links.
+
+### Workflow pages + reminders
+
+Any page with `due-date`, `tasks`, or `approval` frontmatter becomes a workflow page. The server runs a background reminder scheduler that scans those pages and fires `workflow.reminder` SSE events (plus entries on `GET /api/kiwi/workflow/reminders`) when something is overdue.
+
+```yaml
+---
+title: "New Hire Onboarding: Avery"
+type: onboarding
+due-date: 2026-05-01
+tasks:
+  - id: t1
+    title: "Create company email"
+    status: todo
+    assignee: IT
+approval:
+  status: pending
+  reviewers: [alice@example.com]
+---
+```
+
+### Public + Private Portals + RBAC
+
+Pages can be shared as:
+
+- **Public portals** — read-only HTML views, optional password gate, per-link expiry + revoke.
+- **Private spaces** — gated by API keys or OIDC, with per-space roles (reader / editor / owner).
+- **Per-page ACLs** — add `owner`, `editors`, `readers`, or `teams` to a page's frontmatter and `internal/rbac` enforces them on top of the space-level role.
+
+```yaml
+---
+title: Pricing strategy
+visibility: private
+owner: alice@example.com
+editors: [bob@example.com]
+readers: [team:leadership]
+---
+```
+
+Share links expire with a live countdown in the sidebar dialog (revoked links disappear from the list automatically). See `docs/ADMIN.md` for key management.
+
+### Presence + collaborative awareness
+
+The UI sends a `POST /api/kiwi/presence` heartbeat every ~15s while a page is open. The server maintains an in-memory tracker (`internal/presence`) and broadcasts SSE `presence` events whenever a viewer/editor joins or leaves. Stale entries are swept every minute — shutting your laptop doesn't leave a ghost session.
+
+```bash
+curl -X POST localhost:3333/api/kiwi/presence \
+  -H "X-Actor: alice@example.com" \
+  -d '{"path":"concepts/auth.md","role":"editor"}'
+```
+
+### Theme editor (preview + revert)
+
+`ui/KiwiThemeEditor` lets admins edit the CSS variables for light + dark themes, with a live preview, "unsaved" indicator, and a **Revert** button that restores the last saved state. Leaving with unsaved changes triggers the browser's standard `beforeunload` confirm. Set `[ui] theme_locked = true` in config.toml to freeze the editor for non-admins.
+
+### Onboarding
+
+`kiwifs init --template agent-knowledge` now ships with a `welcome.md` + `concepts/wikilinks.md` + `concepts/frontmatter.md` trio so brand-new workspaces aren't a single blank `index.md`. The web UI also runs a five-card first-run tour the first time it loads; it remembers dismissal in `localStorage`.
+
+### Mobile + accessibility
+
+- **Mobile drawer** — on ≤900 px viewports the sidebar becomes a hamburger overlay with a backdrop scrim; tapping a page auto-closes it.
+- **aria-labels** — every icon-only toolbar button has a screen-reader label and a `title` tooltip.
+- **Friendly error copy** — `ui/lib/friendlyError.ts` translates common backend errors (`sql: no rows`, 401, 409, 412, 413, 429) into human sentences, with a collapsible "Technical details" block for ops.
+
+### Large uploads
+
+S3 + WebDAV uploads over a few MB are spooled to temp files on disk and atomically renamed into the store instead of being buffered in RAM. A 2 GB video upload now runs at O(32 KB) peak memory. The FUSE client supports `--api-key`, `--bearer`, and `--basic-user/--basic-pass` so protected KiwiFS instances mount cleanly.
+
+### Backups + ops
+
+- `kiwifs backup` (or `[backup] remote = "..."` in config) pushes to a git remote on a ticker and **verifies** the push actually landed (`git ls-remote` compared with local HEAD).
+- `/healthz` — liveness probe (always 200 while the process is alive).
+- `/readyz` — readiness probe (200 when storage + search are ready, 503 otherwise).
+- `/metrics` — Prometheus text format: uptime, SSE subscribers, presence page count, janitor issue count, workflow reminder count, build info.
+
+### Hot-reloadable auth
+
+Rotating an API key no longer requires a restart. Send `SIGHUP` to the server and it re-reads `.kiwi/config.toml` and swaps the live key set atomically (OIDC issuer changes still require a restart so the JWKS cache is rebuilt).
+
+```bash
+# Edit api_key in .kiwi/config.toml, then:
+kill -HUP $(pgrep -f 'kiwifs serve')
+```
+
+---
+
 ## Quickstart
 
 ### 1. Install

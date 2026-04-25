@@ -129,7 +129,124 @@ Yes. The UI uses CSS variables prefixed with `--kiwi-`. KiwiFS ships with severa
 
 ### Does the web UI work on mobile?
 
-The UI is responsive but optimized for desktop. Mobile works for reading; editing is best on a larger screen.
+The UI is responsive. On viewports ≤900 px (phone-sized), the sidebar becomes a hamburger drawer with a backdrop scrim; tap a page and the drawer auto-closes. Reading is first-class. Editing works but a full keyboard (iPad with attached keyboard, or a laptop) is still a noticeably better experience.
+
+### Is the UI accessible?
+
+Every icon-only button in the toolbar has an `aria-label` and a `title` tooltip; toggles expose `aria-pressed`. Error banners translate common backend errors (401, 404, 409, 412, 413, 429, `sql: no rows in result set`) into human sentences with an expandable "Technical details" section for developers.
+
+### Do I get a first-run tour?
+
+Yes — the UI shows a five-card tour the first time you load it. It covers the sidebar, wikilinks, the graph, the Knowledge Janitor, and trust/workflow frontmatter. Dismissal is per-browser (localStorage). Reset with:
+
+```js
+localStorage.removeItem("kiwifs-tour-dismissed");
+```
+
+---
+
+## Reverse proxies and SSE
+
+### I'm behind nginx / Cloudflare / an ALB. Do events still work?
+
+They do, but you have to disable response buffering on the SSE route or clients will only see events every ~30 s when the proxy flushes. KiwiFS sends `Cache-Control: no-cache` and an event heartbeat, but most proxies need explicit opt-outs as well.
+
+**nginx**
+
+```nginx
+location /api/kiwi/events {
+  proxy_pass http://kiwifs-backend;
+  proxy_http_version 1.1;
+  proxy_set_header Connection "";
+  proxy_buffering off;
+  proxy_cache off;
+  proxy_read_timeout 1h;
+  chunked_transfer_encoding on;
+}
+```
+
+**Caddy**
+
+```caddy
+kiwi.example.com {
+  reverse_proxy /api/kiwi/events kiwifs-backend {
+    flush_interval -1
+    transport http {
+      read_buffer 0
+    }
+  }
+  reverse_proxy kiwifs-backend
+}
+```
+
+**Cloudflare**
+
+The standard Cloudflare proxy buffers SSE. Either bypass the proxy
+(grey-cloud the DNS record) for the KiwiFS host, or add a **Cache
+Rule** that sets Cache Level to "Bypass" for `/api/kiwi/events`. Free
+tier works either way; Enterprise can use the `Cache-Control:
+no-transform` header we already send.
+
+**AWS ALB**
+
+Set the target group's **HTTP keep-alive** to at least the expected
+SSE idle window (default is 60 s — bump it to 3600 s for long-lived
+editor sessions) and disable any "sticky sessions" LB features that
+buffer responses. ALBs don't buffer SSE bodies themselves, but an
+idle-timeout drop manifests as "events pause at exactly 60 s".
+
+### Does the SPA path need special handling?
+
+Only the fallback route. The UI is served from `/` with a SPA
+catch-all that returns `index.html`, so make sure the proxy doesn't
+treat unknown routes as 404. Example nginx:
+
+```nginx
+location / {
+  proxy_pass http://kiwifs-backend;
+  # Fall back to the SPA for any unknown path; the backend already does
+  # this, so we just need to not intercept.
+}
+```
+
+### Why do I see "events pause then resume"?
+
+Three usual suspects, in order of likelihood:
+
+1. A proxy buffering the response (see the nginx / ALB examples above).
+2. A corporate proxy killing idle HTTP/1.1 connections. KiwiFS sends a
+   `:keep-alive` comment every 15 s specifically to keep these hops
+   happy — if your proxy strips comments, raise
+   `[server] sse_heartbeat = "5s"` in config.
+3. The browser tab backgrounded. Chrome throttles timers on hidden
+   tabs; EventSource reconnects on focus. This is normal.
+
+### Can I use EventSource through an auth header?
+
+Browsers don't let EventSource attach custom headers. KiwiFS supports
+`?token=<bearer>` as a query-string fallback for the `events` endpoint
+exactly for this reason — the server echoes it into the same
+middleware the Authorization header would hit. Use HTTPS in
+production so the token isn't logged by intermediaries.
+
+### How do I know presence + janitor events made it through?
+
+The `/metrics` endpoint exposes a live gauge:
+
+```
+kiwifs_sse_subscribers 4
+```
+
+If the number is zero but you expect clients, the proxy isn't
+keeping the stream alive. Curl the endpoint directly to verify:
+
+```bash
+curl -N -H "Authorization: Bearer $KIWI_API_KEY" \
+  https://kiwi.example.com/api/kiwi/events
+```
+
+You should see `:keep-alive` comments every 15 s and real events when
+you write to a page in another tab.
 
 ---
 

@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { Download, Upload, X } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Download, Upload, Undo2, X } from "lucide-react";
 import { HexColorPicker } from "react-colorful";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
@@ -187,6 +187,14 @@ export function KiwiThemeEditor({ onClose, onPresetReset }: Props) {
   const isDark = document.documentElement.classList.contains("dark");
   const [lightTokens, setLightTokens] = useState<KiwiTokens>({});
   const [darkTokens, setDarkTokens] = useState<KiwiTokens>({});
+  // baseline captures the last-saved theme at mount so we can offer a
+  // working "Revert to saved" button. Without this, an editor that
+  // butchers the foreground color can only recover by clearing local
+  // storage manually — exactly the "sidebar disappears" scenario the
+  // audit flagged.
+  const [baselineLight, setBaselineLight] = useState<KiwiTokens>({});
+  const [baselineDark, setBaselineDark] = useState<KiwiTokens>({});
+  const [savedAt, setSavedAt] = useState<number | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -194,6 +202,8 @@ export function KiwiThemeEditor({ onClose, onPresetReset }: Props) {
     if (existing) {
       setLightTokens(existing.light || {});
       setDarkTokens(existing.dark || {});
+      setBaselineLight(existing.light || {});
+      setBaselineDark(existing.dark || {});
     } else {
       const current = getCurrentTokens();
       if (isDark) {
@@ -203,6 +213,27 @@ export function KiwiThemeEditor({ onClose, onPresetReset }: Props) {
       }
     }
   }, [isDark]);
+
+  // Mark edits dirty so the header can show "unsaved changes" and the
+  // footer can enable the revert button only when it matters.
+  const isDirty = useMemo(() => {
+    return (
+      JSON.stringify(lightTokens) !== JSON.stringify(baselineLight) ||
+      JSON.stringify(darkTokens) !== JSON.stringify(baselineDark)
+    );
+  }, [lightTokens, darkTokens, baselineLight, baselineDark]);
+
+  // Warn before navigating away mid-edit — keeps a 50% typed palette
+  // from vanishing on accidental Esc / Cmd+W.
+  useEffect(() => {
+    if (!isDirty) return undefined;
+    const h = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", h);
+    return () => window.removeEventListener("beforeunload", h);
+  }, [isDirty]);
 
   const activeTokens = isDark ? darkTokens : lightTokens;
   const setActiveTokens = isDark ? setDarkTokens : setLightTokens;
@@ -242,7 +273,17 @@ export function KiwiThemeEditor({ onClose, onPresetReset }: Props) {
     setCustomTheme(overrides);
     applyKiwiTheme(overrides);
     api.putTheme(overrides as unknown as Record<string, unknown>).catch(() => {});
+    setBaselineLight({ ...lightTokens });
+    setBaselineDark({ ...darkTokens });
+    setSavedAt(Date.now());
   }, [lightTokens, darkTokens]);
+
+  const revert = useCallback(() => {
+    const overrides: KiwiThemeOverrides = { light: baselineLight, dark: baselineDark };
+    setLightTokens(baselineLight);
+    setDarkTokens(baselineDark);
+    applyKiwiTheme(overrides);
+  }, [baselineLight, baselineDark]);
 
   const handleExport = useCallback(() => {
     const overrides = { light: lightTokens, dark: darkTokens };
@@ -287,10 +328,25 @@ export function KiwiThemeEditor({ onClose, onPresetReset }: Props) {
     <div className="h-full flex flex-col">
       <header className="flex items-center gap-2 px-6 py-4 border-b border-border shrink-0">
         <h2 className="text-lg font-semibold flex-1">Theme Editor</h2>
+        {isDirty ? (
+          <span className="text-xs text-amber-600 dark:text-amber-400 px-2 py-0.5 rounded bg-amber-500/10">
+            Preview · unsaved
+          </span>
+        ) : savedAt ? (
+          <span className="text-xs text-emerald-600 dark:text-emerald-400 px-2 py-0.5 rounded bg-emerald-500/10">
+            Saved
+          </span>
+        ) : null}
         <span className="text-xs text-muted-foreground px-2 py-0.5 rounded bg-muted">
           {isDark ? "Dark" : "Light"} mode
         </span>
-        <Button variant="ghost" size="icon" onClick={onClose}>
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={onClose}
+          aria-label="Close theme editor"
+          title="Close theme editor"
+        >
           <X className="h-4 w-4" />
         </Button>
       </header>
@@ -389,7 +445,22 @@ export function KiwiThemeEditor({ onClose, onPresetReset }: Props) {
           Reset to preset
         </Button>
         <div className="flex-1" />
-        <Button size="sm" onClick={save}>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={revert}
+          disabled={!isDirty}
+          title="Discard unsaved edits and restore the last saved theme"
+        >
+          <Undo2 className="h-3.5 w-3.5 mr-1.5" />
+          Revert
+        </Button>
+        <Button
+          size="sm"
+          onClick={save}
+          disabled={!isDirty}
+          title={isDirty ? "Publish this theme to everyone" : "No unsaved changes"}
+        >
           Save theme
         </Button>
       </footer>
