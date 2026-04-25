@@ -2,7 +2,10 @@ package versioning
 
 import (
 	"context"
+	"fmt"
 	"log"
+	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -13,6 +16,10 @@ type commitReq struct {
 	message string
 }
 
+// AsyncGit wraps a Versioner and defers commits to a background goroutine
+// that batches them by actor. When the actor changes between consecutive
+// requests, the current batch is flushed before starting a new one — this
+// guarantees that every commit in git is attributed to the correct actor.
 type AsyncGit struct {
 	inner       Versioner
 	pending     chan commitReq
@@ -21,6 +28,13 @@ type AsyncGit struct {
 	stop        chan struct{}
 	batchWindow time.Duration
 	batchMax    int
+
+	// uncommittedLog, when non-empty, is the path to a file where paths
+	// are appended before enqueuing. If the process crashes before the
+	// background loop flushes, DrainUncommitted can recover them on
+	// restart. Without this, a crash loses the channel contents and
+	// the audit trail has a silent gap.
+	uncommittedLog string
 }
 
 type AsyncOption func(*AsyncGit)
@@ -37,6 +51,12 @@ func WithChannelBuffer(n int) AsyncOption {
 	return func(a *AsyncGit) {
 		a.pending = make(chan commitReq, n)
 	}
+}
+
+// WithUncommittedLog sets the path where pending paths are journaled
+// before enqueuing so a crash doesn't silently lose audit trail entries.
+func WithUncommittedLog(path string) AsyncOption {
+	return func(a *AsyncGit) { a.uncommittedLog = path }
 }
 
 func NewAsyncGit(inner Versioner, opts ...AsyncOption) *AsyncGit {
@@ -56,6 +76,7 @@ func NewAsyncGit(inner Versioner, opts ...AsyncOption) *AsyncGit {
 }
 
 func (a *AsyncGit) Commit(_ context.Context, path, actor, message string) error {
+	a.journalPaths(path)
 	select {
 	case a.pending <- commitReq{paths: []string{path}, actor: actor, message: message}:
 	case <-a.stop:
@@ -64,6 +85,7 @@ func (a *AsyncGit) Commit(_ context.Context, path, actor, message string) error 
 }
 
 func (a *AsyncGit) BulkCommit(_ context.Context, paths []string, actor, message string) error {
+	a.journalPaths(paths...)
 	select {
 	case a.pending <- commitReq{paths: paths, actor: actor, message: message}:
 	case <-a.stop:
@@ -72,6 +94,7 @@ func (a *AsyncGit) BulkCommit(_ context.Context, paths []string, actor, message 
 }
 
 func (a *AsyncGit) CommitDelete(_ context.Context, path, actor string) error {
+	a.journalPaths(path)
 	select {
 	case a.pending <- commitReq{paths: []string{path}, actor: actor, message: "delete: " + path}:
 	case <-a.stop:
@@ -110,27 +133,89 @@ func (a *AsyncGit) Close() error {
 	return nil
 }
 
-// run is the background commit loop. It batches incoming commitReqs and
-// flushes them via inner.BulkCommit when the batch window expires or
-// the batch hits batchMax.
+// journalPaths appends paths to the uncommitted log before they enter the
+// channel. If the process crashes after this but before the commit flushes,
+// DrainUncommitted will find them on restart and recommit. The log is
+// cleared after every successful flush.
+func (a *AsyncGit) journalPaths(paths ...string) {
+	if a.uncommittedLog == "" {
+		return
+	}
+	f, err := os.OpenFile(a.uncommittedLog, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Printf("async-git: journal open: %v", err)
+		return
+	}
+	defer f.Close()
+	for _, p := range paths {
+		fmt.Fprintln(f, p)
+	}
+}
+
+// clearJournal removes the uncommitted log after a successful flush.
+func (a *AsyncGit) clearJournal() {
+	if a.uncommittedLog == "" {
+		return
+	}
+	os.Remove(a.uncommittedLog)
+}
+
+// buildMessage constructs a commit message from the batch. Single-path
+// batches use the original message; multi-path batches list every path
+// so `git log` stays useful.
+func buildMessage(actor string, reqs []commitReq) string {
+	if len(reqs) == 1 && len(reqs[0].paths) == 1 {
+		return reqs[0].message
+	}
+	var paths []string
+	for _, r := range reqs {
+		paths = append(paths, r.paths...)
+	}
+	if len(paths) == 1 {
+		return fmt.Sprintf("%s: %s", actor, paths[0])
+	}
+	return fmt.Sprintf("%s: %d files\n\n%s", actor, len(paths), strings.Join(paths, "\n"))
+}
+
+// run is the background commit loop. It batches requests by actor: when a
+// request arrives from a different actor, the current batch is flushed
+// first. This guarantees every git commit is attributed to the correct
+// actor and never mixes authors.
 func (a *AsyncGit) run() {
 	defer a.wg.Done()
 
-	var batch []string
-	var lastActor string
+	var batchReqs []commitReq
+	var batchPaths []string
+	var batchActor string
 	timer := time.NewTimer(a.batchWindow)
 	timer.Stop()
 
 	flush := func() {
-		if len(batch) == 0 {
+		if len(batchPaths) == 0 {
 			return
 		}
+		msg := buildMessage(batchActor, batchReqs)
 		ctx, cancel := context.WithTimeout(context.Background(), gitCmdTimeout)
 		defer cancel()
-		if err := a.inner.BulkCommit(ctx, batch, lastActor, "async batch commit"); err != nil {
-			log.Printf("async-git: flush %d paths failed: %v", len(batch), err)
+		if err := a.inner.BulkCommit(ctx, batchPaths, batchActor, msg); err != nil {
+			log.Printf("async-git: flush %d paths (actor=%s) failed: %v", len(batchPaths), batchActor, err)
+			return
 		}
-		batch = batch[:0]
+		a.clearJournal()
+		batchReqs = batchReqs[:0]
+		batchPaths = batchPaths[:0]
+	}
+
+	appendReq := func(req commitReq) {
+		// Actor changed — flush the current batch so it gets the
+		// correct attribution, then start accumulating for the new actor.
+		if batchActor != "" && req.actor != batchActor {
+			timer.Stop()
+			flush()
+		}
+		batchActor = req.actor
+		batchReqs = append(batchReqs, req)
+		batchPaths = append(batchPaths, req.paths...)
 	}
 
 	for {
@@ -140,9 +225,8 @@ func (a *AsyncGit) run() {
 				flush()
 				return
 			}
-			batch = append(batch, req.paths...)
-			lastActor = req.actor
-			if len(batch) >= a.batchMax {
+			appendReq(req)
+			if len(batchPaths) >= a.batchMax {
 				timer.Stop()
 				flush()
 			} else {
@@ -153,12 +237,10 @@ func (a *AsyncGit) run() {
 			flush()
 
 		case <-a.stop:
-			// Drain remaining items from the channel, then flush.
 			for {
 				select {
 				case req := <-a.pending:
-					batch = append(batch, req.paths...)
-					lastActor = req.actor
+					appendReq(req)
 				default:
 					flush()
 					return
