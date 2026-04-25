@@ -17,11 +17,16 @@ import { KiwiToC } from "./KiwiToC";
 import { KiwiBacklinks } from "./KiwiBacklinks";
 import { KiwiComments } from "./KiwiComments";
 import { KiwiQuery } from "./KiwiQuery";
+import { KiwiTrustBadge } from "./KiwiTrustBadge";
+import { KiwiPageMeta } from "./KiwiPageMeta";
+import { KiwiWorkflow } from "./KiwiWorkflow";
+import { KiwiDecisionLog } from "./KiwiDecisionLog";
 import { PageActions } from "./PageActions";
 import { ShikiCode } from "./ShikiCode";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { buildResolver, remarkWikiLinks } from "@/lib/wikiLinks";
+import { friendlyError } from "@/lib/friendlyError";
 
 type Props = {
   path: string;
@@ -38,6 +43,7 @@ type Props = {
   onMoved?: (newPath: string) => void;
   onTagClick?: (tag: string) => void;
   refreshKey?: number;
+  onRefresh?: () => void;
 };
 
 const CALLOUT_PREFIXES: Array<{ emoji: string; cls: string }> = [
@@ -56,7 +62,7 @@ function splitCallout(text: string): { emoji: string; cls: string; rest: string 
   return null;
 }
 
-export function KiwiPage({ path, tree, onNavigate, onEdit, onHistory, onToggleStar, isStarred, onTogglePin, isPinned, onDeleted, onDuplicated, onMoved, onTagClick, refreshKey }: Props) {
+export function KiwiPage({ path, tree, onNavigate, onEdit, onHistory, onToggleStar, isStarred, onTogglePin, isPinned, onDeleted, onDuplicated, onMoved, onTagClick, refreshKey, onRefresh }: Props) {
   const [content, setContent] = useState<string | null>(null);
   const [lastModified, setLastModified] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -130,10 +136,24 @@ export function KiwiPage({ path, tree, onNavigate, onEdit, onHistory, onToggleSt
   const otherBadges = badges.filter((b) => b.key !== "status" && b.key !== "tags");
 
   if (error) {
+    const friendly = friendlyError(error);
     return (
       <div className="flex flex-col h-full">
         <StickyBreadcrumb path={path} onNavigate={onNavigate} />
-        <div className="p-8 text-sm text-destructive font-mono">{error}</div>
+        <div className="p-8 max-w-lg space-y-2">
+          <div className="text-lg font-semibold">{friendly.title}</div>
+          <div className="text-sm text-muted-foreground">{friendly.detail}</div>
+          {friendly.originalMessage && (
+            <details className="text-xs text-muted-foreground mt-3">
+              <summary className="cursor-pointer hover:text-foreground">
+                Technical details
+              </summary>
+              <pre className="mt-1 font-mono whitespace-pre-wrap">
+                {friendly.originalMessage}
+              </pre>
+            </details>
+          )}
+        </div>
       </div>
     );
   }
@@ -172,12 +192,28 @@ export function KiwiPage({ path, tree, onNavigate, onEdit, onHistory, onToggleSt
               </div>
               <div className="flex items-center gap-2 shrink-0 pt-1">
                 {onTogglePin && (
-                  <Button variant="ghost" size="icon" onClick={onTogglePin} className="h-8 w-8">
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    onClick={onTogglePin}
+                    className="h-8 w-8"
+                    aria-label={isPinned ? "Unpin page" : "Pin page"}
+                    aria-pressed={isPinned ? true : false}
+                    title={isPinned ? "Unpin page" : "Pin page"}
+                  >
                     <Pin className={"h-4 w-4" + (isPinned ? " fill-current text-primary" : "")} />
                   </Button>
                 )}
                 {onToggleStar && (
-                  <Button variant="ghost" size="icon" onClick={onToggleStar} className="h-8 w-8">
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    onClick={onToggleStar}
+                    className="h-8 w-8"
+                    aria-label={isStarred ? "Unstar page" : "Star page"}
+                    aria-pressed={isStarred ? true : false}
+                    title={isStarred ? "Unstar page" : "Star page"}
+                  >
                     <Star className={"h-4 w-4" + (isStarred ? " fill-amber-500 text-amber-500" : "")} />
                   </Button>
                 )}
@@ -259,107 +295,145 @@ export function KiwiPage({ path, tree, onNavigate, onEdit, onHistory, onToggleSt
                 ))}
               </div>
             )}
+
+            {/* ── Trust badge + metadata editor ── */}
+            <div className="mt-3 space-y-3">
+              <KiwiTrustBadge
+                path={path}
+                frontmatter={parsed.meta}
+                onNavigate={onNavigate}
+              />
+              <MetadataPanel
+                path={path}
+                frontmatter={parsed.meta}
+                onSaved={onRefresh}
+              />
+            </div>
           </div>
 
           {/* ── Content zone + ToC ── */}
           <div className="flex gap-6">
             <article className="min-w-0 flex-1">
+              {/* proseRef anchors text-selection features (highlights, comments)
+                  so it must attach to the real content surface in both render
+                  branches — previously only the non-decision branch set it,
+                  which silently broke comments on decision pages. */}
               <div ref={proseRef} className="kiwi-prose">
-                <ReactMarkdown
-                  remarkPlugins={[remarkGfm, remarkMath, [remarkWikiLinks, { resolver }]]}
-                  rehypePlugins={[
-                    rehypeRaw,
-                    rehypeKatex,
-                    rehypeSlug,
-                    [rehypeAutolinkHeadings, { behavior: "wrap" }],
-                  ]}
-                  components={{
-                    a: ({ href, children, ...rest }) => {
-                      const h = href ?? "";
-                      if (h.startsWith("kiwi:")) {
-                        const target = h.slice("kiwi:".length);
-                        return (
-                          <a
-                            href={`#${target}`}
-                            onClick={(e) => {
-                              e.preventDefault();
-                              onNavigate(target);
-                            }}
-                            className="wiki-link"
-                            {...(rest as any)}
-                          >
-                            {children}
-                          </a>
-                        );
-                      }
-                      if (h.startsWith("kiwi-missing:")) {
-                        const target = h.slice("kiwi-missing:".length);
-                        return (
-                          <a
-                            href="#"
-                            onClick={(e) => {
-                              e.preventDefault();
-                              onNavigate(`${target}.md`);
-                            }}
-                            title={`Missing: ${target} — click to create`}
-                            className="wiki-link-missing"
-                            {...(rest as any)}
-                          >
-                            {children}
-                          </a>
-                        );
-                      }
-                      return (
-                        <a
-                          href={h}
-                          target={h.startsWith("http") ? "_blank" : undefined}
-                          rel={h.startsWith("http") ? "noreferrer" : undefined}
-                          {...(rest as any)}
-                        >
-                          {children}
-                        </a>
-                      );
-                    },
-                    code: ({ className, children, ...rest }: any) => {
-                      const match = /language-([A-Za-z0-9_-]+)/.exec(className || "");
-                      const lang = match ? match[1] : undefined;
-                      const raw = String(children).replace(/\n$/, "");
-                      if (lang === "kiwi-query") {
-                        return <KiwiQuery source={raw} onNavigate={onNavigate} />;
-                      }
-                      if (!lang || !raw.includes("\n")) {
-                        return <code className={className} {...rest}>{children}</code>;
-                      }
-                      return <ShikiCode code={raw} lang={lang} />;
-                    },
-                    pre: ({ children }) => <>{children}</>,
-                    img: ({ src, alt, ...rest }) => (
-                      <Zoom wrapElement="span" classDialog="kiwi-zoom-dialog" zoomMargin={32}>
-                        <img src={src as string} alt={alt as string} {...(rest as any)} />
-                      </Zoom>
-                    ),
-                    p: ({ children, ...rest }) => {
-                      const arr = Array.isArray(children) ? children : [children];
-                      const first = arr[0];
-                      if (typeof first === "string") {
-                        const hit = splitCallout(first);
-                        if (hit) {
-                          const rest2 = [hit.rest, ...arr.slice(1)];
+              {parsed.meta.type === "decision" ? (
+                <KiwiDecisionLog
+                  path={path}
+                  frontmatter={parsed.meta}
+                  content={parsed.body}
+                  onNavigate={onNavigate}
+                />
+              ) : (
+                <>
+                  <ReactMarkdown
+                    remarkPlugins={[remarkGfm, remarkMath, [remarkWikiLinks, { resolver }]]}
+                    rehypePlugins={[
+                      rehypeRaw,
+                      rehypeKatex,
+                      rehypeSlug,
+                      [rehypeAutolinkHeadings, { behavior: "wrap" }],
+                    ]}
+                    components={{
+                      a: ({ href, children, ...rest }) => {
+                        const h = href ?? "";
+                        if (h.startsWith("kiwi:")) {
+                          const target = h.slice("kiwi:".length);
                           return (
-                            <div className={`kiwi-callout ${hit.cls}`}>
-                              <span className="mr-1.5">{hit.emoji}</span>
-                              {rest2}
-                            </div>
+                            <a
+                              href={`#${target}`}
+                              onClick={(e) => {
+                                e.preventDefault();
+                                onNavigate(target);
+                              }}
+                              className="wiki-link"
+                              {...(rest as any)}
+                            >
+                              {children}
+                            </a>
                           );
                         }
-                      }
-                      return <p {...(rest as any)}>{children}</p>;
-                    },
-                  }}
-                >
-                  {parsed.body}
-                </ReactMarkdown>
+                        if (h.startsWith("kiwi-missing:")) {
+                          const target = h.slice("kiwi-missing:".length);
+                          return (
+                            <a
+                              href="#"
+                              onClick={(e) => {
+                                e.preventDefault();
+                                onNavigate(`${target}.md`);
+                              }}
+                              title={`Missing: ${target} — click to create`}
+                              className="wiki-link-missing"
+                              {...(rest as any)}
+                            >
+                              {children}
+                            </a>
+                          );
+                        }
+                        return (
+                          <a
+                            href={h}
+                            target={h.startsWith("http") ? "_blank" : undefined}
+                            rel={h.startsWith("http") ? "noreferrer" : undefined}
+                            {...(rest as any)}
+                          >
+                            {children}
+                          </a>
+                        );
+                      },
+                      code: ({ className, children, ...rest }: any) => {
+                        const match = /language-([A-Za-z0-9_-]+)/.exec(className || "");
+                        const lang = match ? match[1] : undefined;
+                        const raw = String(children).replace(/\n$/, "");
+                        if (lang === "kiwi-query") {
+                          return <KiwiQuery source={raw} onNavigate={onNavigate} />;
+                        }
+                        if (!lang || !raw.includes("\n")) {
+                          return <code className={className} {...rest}>{children}</code>;
+                        }
+                        return <ShikiCode code={raw} lang={lang} />;
+                      },
+                      pre: ({ children }) => <>{children}</>,
+                      img: ({ src, alt, ...rest }) => (
+                        <Zoom wrapElement="span" classDialog="kiwi-zoom-dialog" zoomMargin={32}>
+                          <img src={src as string} alt={alt as string} {...(rest as any)} />
+                        </Zoom>
+                      ),
+                      p: ({ children, ...rest }) => {
+                        const arr = Array.isArray(children) ? children : [children];
+                        const first = arr[0];
+                        if (typeof first === "string") {
+                          const hit = splitCallout(first);
+                          if (hit) {
+                            const rest2 = [hit.rest, ...arr.slice(1)];
+                            return (
+                              <div className={`kiwi-callout ${hit.cls}`}>
+                                <span className="mr-1.5">{hit.emoji}</span>
+                                {rest2}
+                              </div>
+                            );
+                          }
+                        }
+                        return <p {...(rest as any)}>{children}</p>;
+                      },
+                    }}
+                  >
+                    {parsed.body}
+                  </ReactMarkdown>
+                </>
+              )}
               </div>
+
+              {/* ── Workflow ── */}
+              {Array.isArray(parsed.meta.tasks) && (
+                <KiwiWorkflow
+                  path={path}
+                  frontmatter={parsed.meta as Record<string, any>}
+                  onRefresh={() => onRefresh?.()}
+                />
+              )}
 
               {/* ── Footer zone: fixed order, collapsible ── */}
               <div className="mt-12 space-y-2">
@@ -510,4 +584,47 @@ function frontmatterBadges(
     out.push({ key, value: String(raw) });
   }
   return out;
+}
+
+// MetadataPanel is a collapsible wrapper that reveals the full trust-metadata
+// editor for a page. Collapsed by default to keep the reading surface clean.
+function MetadataPanel({
+  path,
+  frontmatter,
+  onSaved,
+}: {
+  path: string;
+  frontmatter: Record<string, any>;
+  onSaved?: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <div className="rounded-lg border border-border">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex items-center gap-2 w-full px-4 py-2 text-xs text-muted-foreground hover:text-foreground transition-colors"
+      >
+        {open ? (
+          <ChevronDown className="h-3.5 w-3.5" />
+        ) : (
+          <ChevronRight className="h-3.5 w-3.5" />
+        )}
+        Page metadata
+        <span className="ml-auto text-[10px] uppercase tracking-wide">
+          owner · status · review dates
+        </span>
+      </button>
+      {open && (
+        <div className="border-t border-border p-1">
+          <KiwiPageMeta
+            path={path}
+            frontmatter={frontmatter}
+            onSaved={onSaved}
+          />
+        </div>
+      )}
+    </div>
+  );
 }

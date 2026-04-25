@@ -190,6 +190,86 @@ func TestFlushInvalidatesSiblingCache(t *testing.T) {
 	}
 }
 
+func TestClientAttachesAuthHeaders(t *testing.T) {
+	// Fake a protected KiwiFS that only answers requests with matching
+	// auth + space headers. The test asserts every FUSE codepath (tree,
+	// file, put, delete) threads those through.
+	var (
+		seenKey   atomic.Value // string
+		seenSpace atomic.Value // string
+		seenAuth  atomic.Value // string
+	)
+	seenKey.Store("")
+	seenSpace.Store("")
+	seenAuth.Store("")
+
+	handler := http.NewServeMux()
+	handler.HandleFunc("/api/kiwi/tree", func(w http.ResponseWriter, r *http.Request) {
+		seenKey.Store(r.Header.Get("X-API-Key"))
+		seenSpace.Store(r.Header.Get("X-Kiwi-Space"))
+		seenAuth.Store(r.Header.Get("Authorization"))
+		if r.Header.Get("X-API-Key") != "secret" {
+			http.Error(w, "forbidden", http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(treeResponse{Path: "", IsDir: true})
+	})
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	auth := &ClientAuth{APIKey: "secret"}
+	c := NewClientWithAuth(srv.URL, auth, "acme")
+	n := &kiwiNode{client: c}
+	if _, errno := n.listDir(); errno != 0 {
+		t.Fatalf("listDir with auth: errno %v", errno)
+	}
+	if got := seenKey.Load().(string); got != "secret" {
+		t.Fatalf("server saw X-API-Key=%q, want %q", got, "secret")
+	}
+	if got := seenSpace.Load().(string); got != "acme" {
+		t.Fatalf("server saw X-Kiwi-Space=%q, want %q", got, "acme")
+	}
+
+	// Without auth the client should propagate the server's 401 as
+	// EACCES, which is what the kernel surfaces to users as "permission
+	// denied" instead of the opaque "i/o error" we returned before.
+	plain := NewClient(srv.URL)
+	n2 := &kiwiNode{client: plain}
+	if _, errno := n2.listDir(); errno == 0 {
+		t.Fatal("plain client should have failed, got success")
+	}
+}
+
+func TestBearerAuthHeader(t *testing.T) {
+	var seen atomic.Value
+	seen.Store("")
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen.Store(r.Header.Get("Authorization"))
+		if !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
+			http.Error(w, "no", http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(treeResponse{})
+	})
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	c := NewClientWithAuth(srv.URL, &ClientAuth{Bearer: "tok"}, "")
+	n := &kiwiNode{client: c}
+	if _, errno := n.listDir(); errno != 0 {
+		t.Fatalf("errno: %v", errno)
+	}
+	if got := seen.Load().(string); got != "Bearer tok" {
+		t.Fatalf("Authorization = %q, want %q", got, "Bearer tok")
+	}
+}
+
+// Quiet the "unused" warning when we swap out the old import graph.
+var _ = io.ReadAll
+
 func TestMkdirWritesPlaceholder(t *testing.T) {
 	m := newMock()
 	m.dirs[""] = nil

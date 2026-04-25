@@ -135,7 +135,42 @@ func (s *Syncer) push(branch string) error {
 		log.Printf("backup: push failed: %v", err)
 		return err
 	}
-	log.Printf("backup: pushed to %s/%s", remoteName, branch)
+	if verr := s.verifyPush(branch); verr != nil {
+		// A successful push that we can't verify is almost worse than
+		// a failed one — admins think they have a backup when they
+		// don't. Log loudly. We don't return the error because the
+		// push actually *did* succeed per git; we'd rather keep the
+		// sync loop alive and let the operator investigate via logs.
+		log.Printf("backup: push to %s/%s verification failed: %v", remoteName, branch, verr)
+		return nil
+	}
+	log.Printf("backup: pushed + verified %s/%s", remoteName, branch)
+	return nil
+}
+
+// verifyPush re-queries the remote for the branch's head and checks it
+// matches the local HEAD commit. A silent mismatch is the nightmare
+// case — someone's remote rejected the update with a non-fast-forward
+// warning git printed to stderr but our wrapper already consumed.
+func (s *Syncer) verifyPush(branch string) error {
+	local, err := s.output("git", "rev-parse", "HEAD")
+	if err != nil {
+		return fmt.Errorf("local rev-parse: %w", err)
+	}
+	local = strings.TrimSpace(local)
+
+	remote, err := s.output("git", "ls-remote", remoteName, branch)
+	if err != nil {
+		return fmt.Errorf("ls-remote: %w", err)
+	}
+	parts := strings.Fields(strings.TrimSpace(remote))
+	if len(parts) == 0 {
+		return fmt.Errorf("remote branch %q not found after push", branch)
+	}
+	remoteSHA := parts[0]
+	if remoteSHA != local {
+		return fmt.Errorf("remote HEAD %s != local HEAD %s", remoteSHA, local)
+	}
 	return nil
 }
 

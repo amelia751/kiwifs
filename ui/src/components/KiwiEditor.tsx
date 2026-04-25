@@ -14,6 +14,7 @@ import { Plugin, PluginKey } from "prosemirror-state";
 import { Decoration, DecorationSet } from "prosemirror-view";
 import matter from "gray-matter";
 import { api, type TreeEntry } from "@/lib/api";
+import { friendlyError } from "@/lib/friendlyError";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { dirOf, stem, titleize } from "@/lib/paths";
@@ -77,7 +78,10 @@ export function KiwiEditor({ path, tree, onClose, onSaved, onNavigate, saveRef }
   const [initialMd, setInitialMd] = useState<string | null>(null);
   const etagRef = useRef<string | null>(null);
   const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  // loadError is *only* set when the initial read fails — at that point there
+  // is nothing to edit so a fallback screen is safe. Save failures surface
+  // inline via saveError so we never unmount EditorInner and lose unsaved work.
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [isDark, setIsDark] = useState<boolean>(() =>
     typeof document !== "undefined" &&
     document.documentElement.classList.contains("dark")
@@ -96,6 +100,10 @@ export function KiwiEditor({ path, tree, onClose, onSaved, onNavigate, saveRef }
 
   useEffect(() => {
     let cancelled = false;
+    // Clear stale content from the previous page so EditorInner doesn't flash
+    // the old body under the new breadcrumb while the next read is in flight.
+    setInitialMd(null);
+    setLoadError(null);
     api
       .readFile(path)
       .then((r) => {
@@ -104,16 +112,30 @@ export function KiwiEditor({ path, tree, onClose, onSaved, onNavigate, saveRef }
         setInitialMd(r.content || "");
       })
       .catch((e) => {
-        if (!cancelled) setError(String(e));
+        if (!cancelled) setLoadError(String(e));
       });
     return () => {
       cancelled = true;
     };
   }, [path]);
 
-  if (error) {
+  if (loadError) {
+    const friendly = friendlyError(loadError);
     return (
-      <div className="p-8 text-sm text-destructive font-mono">{error}</div>
+      <div className="p-8 max-w-lg space-y-2">
+        <div className="text-lg font-semibold">{friendly.title}</div>
+        <div className="text-sm text-muted-foreground">{friendly.detail}</div>
+        {friendly.originalMessage && (
+          <details className="text-xs text-muted-foreground mt-3">
+            <summary className="cursor-pointer hover:text-foreground">
+              Technical details
+            </summary>
+            <pre className="mt-1 font-mono whitespace-pre-wrap">
+              {friendly.originalMessage}
+            </pre>
+          </details>
+        )}
+      </div>
     );
   }
   if (initialMd === null) {
@@ -131,7 +153,6 @@ export function KiwiEditor({ path, tree, onClose, onSaved, onNavigate, saveRef }
       isDark={isDark}
       saving={saving}
       setSaving={setSaving}
-      setError={setError}
       onClose={onClose}
       onSaved={onSaved}
       onNavigate={onNavigate}
@@ -148,7 +169,6 @@ function EditorInner({
   isDark,
   saving,
   setSaving,
-  setError,
   onClose,
   onSaved,
   onNavigate,
@@ -161,7 +181,6 @@ function EditorInner({
   isDark: boolean;
   saving: boolean;
   setSaving: (v: boolean) => void;
-  setError: (v: string | null) => void;
   onClose: () => void;
   onSaved: (p: string) => void;
   onNavigate?: (path: string) => void;
@@ -169,6 +188,9 @@ function EditorInner({
 }) {
   const [ready, setReady] = useState(false);
   const [saveStatus, setSaveStatus] = useState<SaveStatus>("clean");
+  // Save errors live here so the editor stays mounted after a failed write —
+  // the in-memory edits survive a network blip, a 409 conflict, or a 5xx.
+  const [saveError, setSaveError] = useState<string | null>(null);
   const autoSaveTimer = useRef<number | null>(null);
   const savedFlashTimer = useRef<number | null>(null);
   const [fmOpen, setFmOpen] = useState(false);
@@ -256,7 +278,7 @@ function EditorInner({
     if (!editor) return;
     setSaving(true);
     setSaveStatus("saving");
-    setError(null);
+    setSaveError(null);
     try {
       let md = await editor.blocksToMarkdownLossy(editor.document);
       if (fmText.trim()) {
@@ -270,12 +292,32 @@ function EditorInner({
       savedFlashTimer.current = window.setTimeout(() => setSaveStatus("clean"), 2000);
       if (opts?.close) onSaved(path);
     } catch (e) {
+      // Keep the editor mounted — the user's edits are still in `editor.document`.
+      // A 409 conflict becomes "someone else saved since you opened this page",
+      // anything else surfaces the raw error so the user can retry or copy it
+      // out before closing.
       setSaveStatus("error");
-      setError(String(e));
+      const msg = String(e);
+      if (msg.includes("409")) {
+        setSaveError(
+          "This page was changed by someone else since you opened it. " +
+            "Copy your edits, reload the page, and reapply — or force-save to overwrite.",
+        );
+      } else {
+        setSaveError(msg);
+      }
     } finally {
       setSaving(false);
     }
   };
+
+  // Force-save: drop the If-Match so the server accepts the write even if
+  // someone else saved in the meantime. Exposed as a button in the error
+  // banner so users can escape a conflict without losing their edits.
+  const forceSave = useCallback(async () => {
+    etagRef.current = null;
+    await onSaveRef.current({ close: false });
+  }, [etagRef]);
 
   const markDirty = useCallback(() => {
     if (!ready) return;
@@ -357,6 +399,44 @@ function EditorInner({
                 </span>
               </div>
             )}
+
+            {saveError && (() => {
+              const fe = friendlyError(saveError);
+              return (
+              <div className="mt-3 rounded-md border border-destructive/40 bg-destructive/10 text-destructive px-3 py-2 text-xs flex items-start gap-2">
+                <XCircle className="h-4 w-4 shrink-0 mt-0.5" />
+                <div className="flex-1 min-w-0">
+                  <div className="font-medium">{fe.title} — your edits are still in the editor.</div>
+                  <div className="mt-0.5 break-words">{fe.detail}</div>
+                  {fe.originalMessage && (
+                    <details className="mt-1 text-[10px] opacity-80">
+                      <summary className="cursor-pointer">Technical details</summary>
+                      <pre className="font-mono whitespace-pre-wrap mt-0.5">{fe.originalMessage}</pre>
+                    </details>
+                  )}
+                </div>
+                <div className="flex gap-1 shrink-0">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => onSaveRef.current()}
+                    disabled={saving}
+                  >
+                    Retry
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="destructive"
+                    onClick={forceSave}
+                    disabled={saving}
+                    title="Overwrite whatever is on the server with your current edits"
+                  >
+                    Force save
+                  </Button>
+                </div>
+              </div>
+              );
+            })()}
           </div>
 
           {/* ── Frontmatter section ── */}

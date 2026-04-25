@@ -249,36 +249,50 @@ func (a *adapter) HeadObject(bucket, key string) (*gofakes3.Object, error) {
 	}, nil
 }
 
+// s3StreamThreshold picks the point at which we route a PUT through the
+// streaming pipeline path rather than buffering the whole body in RAM.
+// It's set to match pipeline.streamInMemoryThreshold.
+const s3StreamThreshold = 16 * 1024 * 1024
+
 func (a *adapter) PutObject(bucket, key string, meta map[string]string, body io.Reader, size int64, conditions *gofakes3.PutConditions) (gofakes3.PutObjectResult, error) {
 	be, err := a.resolve(bucket)
 	if err != nil {
 		return gofakes3.PutObjectResult{}, err
 	}
-	data, err := gofakes3.ReadAll(body, size)
-	if err != nil {
-		return gofakes3.PutObjectResult{}, err
-	}
-	if conditions != nil {
-		// Fold S3's If-Match / If-None-Match into the same precondition
-		// path the REST API uses so the two sides agree on what
-		// "modified" means. Existence + ETag are derived from the
-		// stored content's MD5 — which matches what GetObject returns.
-		info := gofakes3.ConditionalObjectInfo{}
-		if existing, rerr := be.Store.Read(context.Background(), key); rerr == nil {
-			info.Exists = true
-			info.Hash = md5sum(existing)
-		}
-		if cerr := gofakes3.CheckPutConditions(conditions, &info); cerr != nil {
-			return gofakes3.PutObjectResult{}, cerr
-		}
-	}
 	actor := meta["X-Actor"]
 	if actor == "" {
 		actor = "s3"
 	}
-	if _, err := be.Pipe.Write(context.Background(), key, data, actor); err != nil {
-		log.Printf("s3: put %s/%s: %v", bucket, key, err)
-		return gofakes3.PutObjectResult{}, err
+	// Fast path for small / size-known uploads: buffer in RAM, run the
+	// full precondition check, and call pipeline.Write. This matches the
+	// REST handler byte-for-byte.
+	if conditions != nil || (size >= 0 && size <= s3StreamThreshold) {
+		data, rerr := gofakes3.ReadAll(body, size)
+		if rerr != nil {
+			return gofakes3.PutObjectResult{}, rerr
+		}
+		if conditions != nil {
+			info := gofakes3.ConditionalObjectInfo{}
+			if existing, err := be.Store.Read(context.Background(), key); err == nil {
+				info.Exists = true
+				info.Hash = md5sum(existing)
+			}
+			if cerr := gofakes3.CheckPutConditions(conditions, &info); cerr != nil {
+				return gofakes3.PutObjectResult{}, cerr
+			}
+		}
+		if _, werr := be.Pipe.Write(context.Background(), key, data, actor); werr != nil {
+			log.Printf("s3: put %s/%s: %v", bucket, key, werr)
+			return gofakes3.PutObjectResult{}, werr
+		}
+		return gofakes3.PutObjectResult{}, nil
+	}
+	// Large or unknown-size upload: stream straight through. The
+	// pipeline spools to a tempfile in the store's root, renames into
+	// place, and commits — all without loading the payload into memory.
+	if _, werr := be.Pipe.WriteStream(context.Background(), key, body, size, actor); werr != nil {
+		log.Printf("s3: stream put %s/%s: %v", bucket, key, werr)
+		return gofakes3.PutObjectResult{}, werr
 	}
 	return gofakes3.PutObjectResult{}, nil
 }

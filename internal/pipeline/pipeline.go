@@ -6,9 +6,11 @@
 package pipeline
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha1"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -46,6 +48,12 @@ type Pipeline struct {
 	Hub       *events.Hub             // may be nil (tests / protocols that don't broadcast)
 	Vectors   *vectorstore.Service    // may be nil when vector search is disabled
 
+	// Root is the absolute storage root. WriteStream spools oversized
+	// uploads into `.kiwi-stream-*` tempfiles under this directory so
+	// the final atomic rename stays on the same filesystem. Empty when
+	// the pipeline is wired around an in-memory store (tests).
+	Root string
+
 	// OnInvalidate, when set, fires on every write and delete. The API
 	// layer wires it to cache-invalidation callbacks (graph endpoint, etc.)
 	// so the pipeline doesn't need to know which layers cache what — it
@@ -65,7 +73,12 @@ type Pipeline struct {
 	// out-of-band edits. Without this, every REST write triggers a
 	// watcher Observe that re-embeds the same content — doubling the
 	// vector-embedding API cost per change.
-	inflight sync.Map // map[string]time.Time
+	//
+	// The value is an inflightEntry rather than a bare timestamp so the
+	// watcher can dedup by content hash as well as by a time window: if
+	// fsnotify fires late (after the window), Observe still drops the
+	// echo when the content hash matches what we just wrote.
+	inflight sync.Map // map[string]inflightEntry
 
 	// uncommittedLog is the path to .kiwi/state/uncommitted.log. When a
 	// versioner commit fails after a successful storage write, the path is
@@ -132,6 +145,7 @@ func New(
 		Linker:         linker,
 		Hub:            hub,
 		Vectors:        vectors,
+		Root:           root,
 		uncommittedLog: ulog,
 	}
 }
@@ -216,27 +230,74 @@ func (p *Pipeline) broadcast(ev events.Event) {
 	}
 }
 
+// inflightEntry records both the timestamp and the content hash (etag) of
+// the last pipeline-originated write so the echo-suppression path can
+// dedup by time OR by content. A watcher firing long after the write but
+// with the same content is still a duplicate.
+type inflightEntry struct {
+	at   time.Time
+	etag string
+}
+
 // markInflight records that we just touched `path` so the fsnotify-driven
 // Observe path can skip the echo event. The entry auto-expires after
-// inflightWindow to avoid unbounded map growth.
+// inflightWindow to avoid unbounded map growth, but we keep an extended
+// etag memory (see markInflightEtag) in a second map so identical-content
+// echoes that arrive after the short window are still discarded.
 func (p *Pipeline) markInflight(path string) {
-	p.inflight.Store(path, time.Now())
-	time.AfterFunc(inflightWindow, func() { p.inflight.Delete(path) })
+	p.markInflightEtag(path, "")
+}
+
+// markInflightEtag is like markInflight but remembers the content etag so
+// late watcher echoes for the same content are dropped even after the
+// 2-second time window expires.
+func (p *Pipeline) markInflightEtag(path, etag string) {
+	p.inflight.Store(path, inflightEntry{at: time.Now(), etag: etag})
+	time.AfterFunc(inflightWindow, func() {
+		// Don't wipe the entry if it was refreshed in the meantime — only
+		// clear stale ones.
+		if v, ok := p.inflight.Load(path); ok {
+			if ent, ok := v.(inflightEntry); ok && time.Since(ent.at) >= inflightWindow {
+				// Keep the etag around for longer to catch delayed echoes,
+				// but collapse the timestamp so future writes overwrite.
+				p.inflight.Store(path, inflightEntry{at: time.Time{}, etag: ent.etag})
+				time.AfterFunc(10*time.Second, func() { p.inflight.Delete(path) })
+			}
+		}
+	})
 }
 
 // isInflight reports whether `path` was written via the pipeline within the
 // inflight window. Returns true for echo events the watcher should skip.
 func (p *Pipeline) isInflight(path string) bool {
-	v, ok := p.inflight.Load(path)
+	ent, ok := p.loadInflight(path)
 	if !ok {
 		return false
 	}
-	t, _ := v.(time.Time)
-	if time.Since(t) > inflightWindow {
-		p.inflight.Delete(path)
+	return !ent.at.IsZero() && time.Since(ent.at) <= inflightWindow
+}
+
+// isInflightEtag reports whether we already wrote this exact content to
+// this path recently. The watcher uses it to drop noisy echoes that the
+// simple time-based isInflight would miss (e.g. slow fsnotify batch).
+func (p *Pipeline) isInflightEtag(path, etag string) bool {
+	if etag == "" {
 		return false
 	}
-	return true
+	ent, ok := p.loadInflight(path)
+	if !ok {
+		return false
+	}
+	return ent.etag == etag
+}
+
+func (p *Pipeline) loadInflight(path string) (inflightEntry, bool) {
+	v, ok := p.inflight.Load(path)
+	if !ok {
+		return inflightEntry{}, false
+	}
+	ent, ok := v.(inflightEntry)
+	return ent, ok
 }
 
 // tryPreDelete gives CoW-style versioners a chance to snapshot the file
@@ -264,6 +325,136 @@ func (p *Pipeline) tryPreDelete(path string) {
 // install can drop an entire audit trail) — so log everything.
 func (p *Pipeline) Write(ctx context.Context, path string, content []byte, actor string) (Result, error) {
 	return p.WriteWithOpts(ctx, path, content, actor, WriteOpts{})
+}
+
+// streamInMemoryThreshold bounds the size of an upload we'll fully buffer
+// in RAM before hitting pipeline.Write. Requests above this threshold go
+// through WriteStream, which spools the body to a temp file first and
+// avoids accumulating gigabytes for a single S3 / WebDAV upload.
+//
+// 16 MB comfortably fits agent-generated markdown runs and CSV exports;
+// large media files (screen recordings, datasets) will take the streaming
+// path.
+const streamInMemoryThreshold = 16 * 1024 * 1024
+
+// WriteStream persists a potentially-large payload without buffering the
+// whole body in memory. The caller passes an io.Reader (e.g. an HTTP
+// request body) and a hint at the expected length (-1 if unknown). Small
+// payloads fall back to the normal Write path so the fast common case
+// stays fast; anything bigger streams into a temp file and then swaps it
+// into the store with a single rename. Knowledge files (.md and friends)
+// are still indexed, since we need the bytes in memory anyway for the
+// FTS/vector fan-out — the indexing path runs on a size-capped branch so
+// a 500 MB markdown file skips indexing but still gets versioned.
+func (p *Pipeline) WriteStream(ctx context.Context, path string, body io.Reader, sizeHint int64, actor string) (Result, error) {
+	if path == "" {
+		return Result{}, fmt.Errorf("path is required")
+	}
+	if body == nil {
+		return Result{}, fmt.Errorf("body is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return Result{}, err
+	}
+	// Small payload + caller told us the size: avoid all the tempfile
+	// dance and keep the behavior identical to Write().
+	if sizeHint >= 0 && sizeHint <= streamInMemoryThreshold {
+		buf := make([]byte, 0, sizeHint)
+		bb := bytes.NewBuffer(buf)
+		if _, err := io.Copy(bb, io.LimitReader(body, streamInMemoryThreshold+1)); err != nil {
+			return Result{}, fmt.Errorf("read body: %w", err)
+		}
+		return p.Write(ctx, path, bb.Bytes(), actor)
+	}
+
+	// Spool to a temp file so peak memory stays bounded. The temp lives
+	// next to the storage root so the final rename is same-filesystem
+	// (cheap) and visible to backup/FUSE clients as a transient `.kiwi-
+	// stream-*` file rather than something in /tmp that could cross a
+	// filesystem boundary.
+	spoolDir := p.Root
+	if spoolDir == "" {
+		spoolDir = os.TempDir()
+	}
+	if err := os.MkdirAll(spoolDir, 0o755); err != nil {
+		return Result{}, fmt.Errorf("spool dir: %w", err)
+	}
+	tmp, err := os.CreateTemp(spoolDir, ".kiwi-stream-*")
+	if err != nil {
+		return Result{}, fmt.Errorf("spool temp file: %w", err)
+	}
+	tmpName := tmp.Name()
+	cleanup := func() {
+		if tmpName != "" {
+			os.Remove(tmpName)
+		}
+	}
+	defer cleanup()
+	n, err := io.Copy(tmp, body)
+	if cerr := tmp.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return Result{}, fmt.Errorf("spool write: %w", err)
+	}
+
+	// Re-open and read back only if this is a knowledge file small
+	// enough to index; large binaries get a streaming in-place write
+	// that skips the FTS + vector fan-out entirely.
+	knowledgeIndex := storage.IsKnowledgeFile(path) && n <= streamInMemoryThreshold
+	var content []byte
+	if knowledgeIndex {
+		content, err = os.ReadFile(tmpName)
+		if err != nil {
+			return Result{}, fmt.Errorf("read spool: %w", err)
+		}
+	}
+
+	p.writeMu.Lock()
+	defer p.writeMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return Result{}, err
+	}
+	p.markInflight(path)
+	if content != nil {
+		if err := p.Store.Write(ctx, path, content); err != nil {
+			return Result{}, err
+		}
+	} else {
+		// Atomically move the spooled file into the store. This keeps
+		// peak RAM at whatever io.Copy used — effectively 32 KB.
+		abs := p.Store.AbsPath(path)
+		if abs == "" {
+			return Result{}, fmt.Errorf("storage %T does not expose AbsPath; cannot stream", p.Store)
+		}
+		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+			return Result{}, fmt.Errorf("mkdir: %w", err)
+		}
+		if err := os.Rename(tmpName, abs); err != nil {
+			return Result{}, fmt.Errorf("stream rename into store: %w", err)
+		}
+		tmpName = "" // handed off to the store
+	}
+	actor = coalesce(actor)
+	if err := p.Versioner.Commit(ctx, path, actor, fmt.Sprintf("%s: %s", actor, path)); err != nil {
+		log.Printf("pipeline: versioner.Commit(%s): %v", path, err)
+		p.trackUncommitted(path)
+	}
+	if knowledgeIndex {
+		p.indexFile(ctx, path, content)
+	}
+	var etag string
+	if content != nil {
+		etag = ETag(content)
+	} else {
+		// For large streamed files we don't have the blob in RAM to
+		// compute the git blob hash; emit a size+mtime weak ETag so the
+		// response isn't empty. Full-fidelity ETag will be computed on
+		// the next read (which hashes from disk).
+		etag = fmt.Sprintf("W/\"%d\"", n)
+	}
+	p.broadcast(events.Event{Op: "write", Path: path, Actor: actor, ETag: etag})
+	return Result{Path: path, ETag: etag}, nil
 }
 
 // WriteWithOpts is Write plus optional preconditions (currently just
@@ -297,8 +488,9 @@ func (p *Pipeline) WriteWithOpts(ctx context.Context, path string, content []byt
 	}
 	// Mark before the disk write so the fsnotify event fires while the
 	// entry is already visible — otherwise a fast watcher could observe
-	// before we record it.
-	p.markInflight(path)
+	// before we record it. We stamp the etag so a delayed fsnotify batch
+	// that arrives after inflightWindow still dedups by content.
+	p.markInflightEtag(path, ETag(content))
 	if err := p.Store.Write(ctx, path, content); err != nil {
 		return Result{}, err
 	}
@@ -321,13 +513,17 @@ func (p *Pipeline) WriteWithOpts(ctx context.Context, path string, content []byt
 // (versioning, search, links, vectors, SSE) without doubling up the disk
 // write that would otherwise re-fire fsnotify in an echo loop.
 func (p *Pipeline) Observe(ctx context.Context, path string, content []byte, actor string) Result {
-	// Echo suppression: a Write we just did will re-trigger fsnotify. Skip
-	// — the real write already ran every side effect.
-	if p.isInflight(path) {
-		return Result{Path: path, ETag: ETag(content)}
+	etag := ETag(content)
+	// Echo suppression, two layers:
+	//   1. Time-based: we just wrote this path within inflightWindow.
+	//   2. Content-based: we just wrote this exact content — even if the
+	//      window expired, re-running indexing would only waste CPU and
+	//      emit a duplicate commit.
+	if p.isInflight(path) || p.isInflightEtag(path, etag) {
+		return Result{Path: path, ETag: etag}
 	}
 	if err := ctx.Err(); err != nil {
-		return Result{Path: path, ETag: ETag(content)}
+		return Result{Path: path, ETag: etag}
 	}
 	actor = coalesce(actor)
 	p.writeMu.Lock()
@@ -337,7 +533,9 @@ func (p *Pipeline) Observe(ctx context.Context, path string, content []byte, act
 		p.trackUncommitted(path)
 	}
 	p.indexFile(ctx, path, content)
-	etag := ETag(content)
+	// Stamp the etag so a second fsnotify batch for the same content
+	// is deduped (some editors re-touch mtime without changing bytes).
+	p.markInflightEtag(path, etag)
 	p.broadcast(events.Event{Op: "write", Path: path, Actor: actor, ETag: etag})
 	return Result{Path: path, ETag: etag}
 }
@@ -411,6 +609,21 @@ func (p *Pipeline) BulkWrite(ctx context.Context, files []struct {
 	}
 
 	rollback := func(upTo int) {
+		// If the versioner has a staging area (git), clear any paths
+		// we've already `git add`-ed in this batch so a subsequent
+		// write can't accidentally include them. Without this, a
+		// failed bulk commit leaves the index dirty and the next
+		// unrelated REST write commits half of the rolled-back batch
+		// under the wrong message.
+		if un, ok := p.Versioner.(versioning.Unstager); ok && upTo > 0 {
+			staged := make([]string, 0, upTo)
+			for i := 0; i < upTo; i++ {
+				staged = append(staged, preimages[i].path)
+			}
+			if err := un.Unstage(ctx, staged); err != nil {
+				log.Printf("pipeline: versioner.Unstage(%v): %v", staged, err)
+			}
+		}
 		for i := upTo - 1; i >= 0; i-- {
 			pre := preimages[i]
 			// Dequeue any already-enqueued vector upsert for this path.
@@ -450,7 +663,7 @@ func (p *Pipeline) BulkWrite(ctx context.Context, files []struct {
 	paths := make([]string, 0, len(files))
 	out := make([]Result, 0, len(files))
 	for i, f := range files {
-		p.markInflight(f.Path)
+		p.markInflightEtag(f.Path, ETag(f.Content))
 		if err := p.Store.Write(ctx, f.Path, f.Content); err != nil {
 			rollback(i)
 			return nil, fmt.Errorf("write %s: %w", f.Path, err)

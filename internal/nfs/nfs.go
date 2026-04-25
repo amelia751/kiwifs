@@ -292,25 +292,23 @@ func (fs *kiwiFS) Rename(oldpath, newpath string) error {
 		return err
 	}
 
-	// For markdown files, route through the pipeline so both sides of the
-	// rename hit search/links/vectors/SSE: the old path must be removed
-	// from every index and the new path indexed under its new name.
-	// A bare os.Rename leaves the search engine claiming the file still
-	// lives at its old name.
-	if strings.HasSuffix(oldpath, ".md") && strings.HasSuffix(newpath, ".md") {
-		content, readErr := os.ReadFile(fullOld)
-		if readErr != nil {
-			return readErr
-		}
-		if _, werr := fs.pipe.Write(context.Background(), newpath, content, "nfs"); werr != nil {
-			return fmt.Errorf("pipeline write %s: %w", newpath, werr)
-		}
-		if derr := fs.pipe.Delete(context.Background(), oldpath, "nfs"); derr != nil {
-			return fmt.Errorf("pipeline delete %s: %w", oldpath, derr)
-		}
-		return nil
+	// Every rename — markdown or not — goes through the pipeline so git
+	// sees a coherent "delete old + write new" pair and the search/link
+	// indices get updated. A bare os.Rename would leave the search
+	// engine claiming the file still lives at its old path and skip the
+	// git commit entirely.
+	content, readErr := os.ReadFile(fullOld)
+	if readErr != nil {
+		return readErr
 	}
-	return os.Rename(fullOld, fullNew)
+	if _, werr := fs.pipe.Write(context.Background(), newpath, content, "nfs"); werr != nil {
+		return fmt.Errorf("pipeline write %s: %w", newpath, werr)
+	}
+	if derr := fs.pipe.Delete(context.Background(), oldpath, "nfs"); derr != nil {
+		return fmt.Errorf("pipeline delete %s: %w", oldpath, derr)
+	}
+	_ = fullNew
+	return nil
 }
 
 // safePath joins filename onto fs.root and rejects any result that escapes
@@ -352,16 +350,14 @@ func (f *kiwiFile) Write(p []byte) (int, error) {
 }
 
 func (f *kiwiFile) Close() error {
-	// If we accumulated writes, flush them through the pipeline
-	if len(f.buffer) > 0 && strings.HasSuffix(f.path, ".md") {
-		_, err := f.fs.pipe.Write(context.Background(), f.path, f.buffer, "nfs")
-		if err != nil {
+	// Every write — markdown or not — goes through the pipeline so
+	// non-markdown uploads get a git commit, SSE broadcast, and trust-
+	// layer row like any other file. The search layer already skips
+	// indexing for non-knowledge paths, so a PDF write is correctly
+	// versioned but not full-text indexed.
+	if len(f.buffer) > 0 {
+		if _, err := f.fs.pipe.Write(context.Background(), f.path, f.buffer, "nfs"); err != nil {
 			return fmt.Errorf("pipeline write: %w", err)
-		}
-	} else if len(f.buffer) > 0 {
-		// Non-markdown files: write directly
-		if err := os.WriteFile(f.fullPath, f.buffer, 0644); err != nil {
-			return err
 		}
 	}
 

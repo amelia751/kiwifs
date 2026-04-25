@@ -251,26 +251,72 @@ type readFile struct{ *os.File }
 
 func (r *readFile) Write(_ []byte) (int, error) { return 0, os.ErrPermission }
 
-// writeFile buffers the full body in memory so Close can fan out to the
-// pipeline as a single Write call. Reads from the buffer mid-write work for
-// clients that Read-then-Write-back, which some editors do.
+// webdavSpillThreshold is the buffered-bytes point above which a webdav
+// write handle spills to a temp file on disk rather than growing its
+// in-memory buffer. Below this, we keep everything in RAM for speed; above
+// it, we swap to a tempfile + WriteStream on Close so a 2 GB upload
+// doesn't OOM the process.
+const webdavSpillThreshold = 16 * 1024 * 1024
+
+// writeFile accumulates the body of a PUT. Small bodies stay in the
+// bytes.Buffer for zero-copy fan-out through pipeline.Write; larger ones
+// transparently spill to a temp file so peak memory stays bounded. Either
+// way, Close commits the final payload atomically through the pipeline.
 type writeFile struct {
 	fs      *FS
 	ctx     context.Context // captured from OpenFile so Close can plumb it through to pipeline.Write
 	rel     string
 	abs     string
 	buf     *bytes.Buffer
+	spill   *os.File // non-nil once buf exceeds webdavSpillThreshold
+	written int64    // total bytes Write'n, whether in buf or spill
 	modTime time.Time
 	size    int64
 	closed  bool
 }
 
-func (w *writeFile) Write(p []byte) (int, error)  { return w.buf.Write(p) }
-func (w *writeFile) Read(p []byte) (int, error)   { return w.buf.Read(p) }
+func (w *writeFile) Write(p []byte) (int, error) {
+	if w.spill != nil {
+		n, err := w.spill.Write(p)
+		w.written += int64(n)
+		return n, err
+	}
+	// Spill once the in-memory buffer grows past the threshold. We flush
+	// whatever is already buffered into the temp file and then append
+	// the current chunk.
+	if w.buf.Len()+len(p) > webdavSpillThreshold {
+		tmp, err := os.CreateTemp("", ".kiwi-webdav-*")
+		if err != nil {
+			return 0, fmt.Errorf("spill tempfile: %w", err)
+		}
+		if _, err := tmp.Write(w.buf.Bytes()); err != nil {
+			tmp.Close()
+			os.Remove(tmp.Name())
+			return 0, fmt.Errorf("spill flush: %w", err)
+		}
+		w.buf.Reset()
+		w.spill = tmp
+		n, werr := tmp.Write(p)
+		w.written += int64(n)
+		return n, werr
+	}
+	n, err := w.buf.Write(p)
+	w.written += int64(n)
+	return n, err
+}
+func (w *writeFile) Read(p []byte) (int, error) {
+	if w.spill != nil {
+		return 0, fmt.Errorf("read after spill not supported")
+	}
+	return w.buf.Read(p)
+}
 func (w *writeFile) Readdir(_ int) ([]os.FileInfo, error) {
 	return nil, fmt.Errorf("not a directory")
 }
 func (w *writeFile) Seek(offset int64, whence int) (int64, error) {
+	if w.spill != nil {
+		return 0, fmt.Errorf("seek not supported after spill")
+	}
 	// The webdav package only seeks on read paths (to derive Content-Length);
 	// for in-memory buffers we only need to support Seek(0, SeekEnd) for size.
 	switch whence {
@@ -284,7 +330,11 @@ func (w *writeFile) Seek(offset int64, whence int) (int64, error) {
 	return 0, fmt.Errorf("seek not supported on write buffer")
 }
 func (w *writeFile) Stat() (os.FileInfo, error) {
-	return &bufInfo{name: filepath.Base(w.rel), size: int64(w.buf.Len()), mod: w.modTime}, nil
+	size := w.written
+	if w.spill == nil {
+		size = int64(w.buf.Len())
+	}
+	return &bufInfo{name: filepath.Base(w.rel), size: size, mod: w.modTime}, nil
 }
 func (w *writeFile) Close() error {
 	if w.closed {
@@ -295,7 +345,22 @@ func (w *writeFile) Close() error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	_, err := w.fs.pipe.Write(ctx, w.rel, w.buf.Bytes(), w.fs.actor)
+	if w.spill == nil {
+		_, err := w.fs.pipe.Write(ctx, w.rel, w.buf.Bytes(), w.fs.actor)
+		return err
+	}
+	// Spilled body — rewind the tempfile and hand it to the streaming
+	// path so the pipeline atomically renames it into place instead of
+	// reading the whole thing back into memory.
+	name := w.spill.Name()
+	defer func() {
+		w.spill.Close()
+		os.Remove(name)
+	}()
+	if _, err := w.spill.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("rewind spill: %w", err)
+	}
+	_, err := w.fs.pipe.WriteStream(ctx, w.rel, w.spill, w.written, w.fs.actor)
 	return err
 }
 

@@ -45,6 +45,16 @@ type Versioner interface {
 	Blame(ctx context.Context, path string) ([]BlameLine, error)
 }
 
+// Unstager is the optional interface versioners implement when they have
+// a staging area separate from the working tree — currently only Git.
+// Pipeline calls Unstage on bulk-write rollback so a failed `git commit`
+// doesn't leave partially-added files in the index, which would otherwise
+// leak into the next unrelated commit and make `git log --follow` lie
+// about which files belonged to which logical operation.
+type Unstager interface {
+	Unstage(ctx context.Context, paths []string) error
+}
+
 // Noop is a versioner that does nothing.
 type Noop struct{}
 

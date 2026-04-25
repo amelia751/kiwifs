@@ -38,8 +38,10 @@ export function SpaceSelector({
   const [newName, setNewName] = useState("");
   const [creating, setCreating] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const load = useCallback(() => {
+    setLoadError(null);
     api
       .listSpaces()
       .then((res) => {
@@ -49,7 +51,10 @@ export function SpaceSelector({
           setValue(res.spaces[0].name);
         }
       })
-      .catch(() => setLoaded(false));
+      .catch((e) => {
+        setLoaded(true);
+        setLoadError(e instanceof Error ? e.message : String(e));
+      });
   }, []);
 
   useEffect(load, [load]);
@@ -86,6 +91,22 @@ export function SpaceSelector({
   }, [newName, onSwitch, load]);
 
   if (!loaded) return null;
+
+  if (loadError) {
+    return (
+      <div className="px-3 py-2 border-b border-border text-[11px] text-amber-600 dark:text-amber-400 flex items-center gap-1.5">
+        <Layers className="h-3 w-3" />
+        <span className="truncate" title={loadError}>Spaces unavailable</span>
+        <button
+          type="button"
+          onClick={load}
+          className="ml-auto underline underline-offset-2 hover:text-foreground"
+        >
+          retry
+        </button>
+      </div>
+    );
+  }
 
   return (
     <>

@@ -42,7 +42,7 @@ func buildTestServer(t *testing.T) *Server {
 	}
 	cfg := &config.Config{}
 	cfg.Storage.Root = dir
-	return NewServer(cfg, pipe, nil, cstore)
+	return NewServer(cfg, pipe, nil, cstore, nil)
 }
 
 // buildSQLiteTestServer is the same wiring as buildTestServer but swaps in
@@ -69,7 +69,7 @@ func buildSQLiteTestServer(t *testing.T) (*Server, string) {
 	}
 	cfg := &config.Config{}
 	cfg.Storage.Root = dir
-	return NewServer(cfg, pipe, nil, cstore), dir
+	return NewServer(cfg, pipe, nil, cstore, nil), dir
 }
 
 // TestMetaEndpoint covers the happy path: write a markdown file with
@@ -298,7 +298,7 @@ func TestPerSpaceKeyMiddlewareValidates(t *testing.T) {
 		{Key: "secret-team-a", Space: "team-a", Actor: "alice"},
 		{Key: "secret-team-b", Space: "team-b", Actor: "bob"},
 	}
-	s := NewServer(cfg, pipe, nil, cstore)
+	s := NewServer(cfg, pipe, nil, cstore, nil)
 
 	cases := []struct {
 		name   string
@@ -721,7 +721,7 @@ func buildTestServerWithAssets(t *testing.T, assets config.AssetsConfig) *Server
 	}
 	cfg := &config.Config{Assets: assets}
 	cfg.Storage.Root = dir
-	return NewServer(cfg, pipe, nil, cstore)
+	return NewServer(cfg, pipe, nil, cstore, nil)
 }
 
 func TestReadFileLastModified(t *testing.T) {

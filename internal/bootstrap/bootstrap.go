@@ -14,27 +14,51 @@ import (
 	"github.com/kiwifs/kiwifs/internal/comments"
 	"github.com/kiwifs/kiwifs/internal/config"
 	"github.com/kiwifs/kiwifs/internal/events"
+	"github.com/kiwifs/kiwifs/internal/janitor"
 	"github.com/kiwifs/kiwifs/internal/links"
 	"github.com/kiwifs/kiwifs/internal/pipeline"
+	"github.com/kiwifs/kiwifs/internal/rbac"
 	"github.com/kiwifs/kiwifs/internal/search"
 	"github.com/kiwifs/kiwifs/internal/storage"
 	"github.com/kiwifs/kiwifs/internal/vectorstore"
 	"github.com/kiwifs/kiwifs/internal/versioning"
+	"github.com/kiwifs/kiwifs/internal/workflow"
 )
+
+// janitorInterval parses the configured interval or returns the default
+// 24 h. Returning 0 disables the scheduler; negative values are coerced
+// to 0 so a typo in TOML can't accidentally spin up a tight loop.
+func janitorInterval(cfg *config.Config) time.Duration {
+	raw := cfg.Janitor.Interval
+	if raw == "" {
+		return 24 * time.Hour
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		log.Printf("janitor: invalid interval %q, using 24h: %v", raw, err)
+		return 24 * time.Hour
+	}
+	if d < 0 {
+		return 0
+	}
+	return d
+}
 
 // Stack is the set of live components backing one knowledge space.
 type Stack struct {
-	Name      string
-	Root      string
-	Store     storage.Storage
-	Versioner versioning.Versioner
-	Searcher  search.Searcher
-	Linker    links.Linker
-	Hub       *events.Hub
-	Pipeline  *pipeline.Pipeline
-	Vectors   *vectorstore.Service // nil when disabled or build failed
-	Comments  *comments.Store
-	Server    *api.Server
+	Name          string
+	Root          string
+	Store         storage.Storage
+	Versioner     versioning.Versioner
+	Searcher      search.Searcher
+	Linker        links.Linker
+	Hub           *events.Hub
+	Pipeline      *pipeline.Pipeline
+	Vectors       *vectorstore.Service // nil when disabled or build failed
+	Comments      *comments.Store
+	Server        *api.Server
+	JanitorSched  *janitor.Scheduler          // nil when scheduled scans are disabled
+	Reminders     *workflow.ReminderScheduler // nil when disabled
 }
 
 // Build assembles every dependency for one space. name is used as a log
@@ -86,23 +110,88 @@ func Build(name, root string, cfg *config.Config) (*Stack, error) {
 		return nil, fmt.Errorf("%scomments store: %w", prefix, err)
 	}
 
-	server := api.NewServer(cfg, pipe, vectors, cstore)
+	shares, err := rbac.NewShareStore(root)
+	if err != nil {
+		log.Printf("%sshare links disabled (%v)", prefix, err)
+		shares = nil
+	}
+
+	server := api.NewServer(cfg, pipe, vectors, cstore, shares)
+
+	// Background Knowledge Janitor. Runs nightly by default so admins
+	// find a fresh report of stale/contradictory/unowned pages waiting
+	// when they open the panel. Interval=0 disables — useful on small
+	// personal wikis where the scan cost outweighs the signal.
+	var janitorSched *janitor.Scheduler
+	if iv := janitorInterval(cfg); iv > 0 {
+		staleDays := cfg.Janitor.StaleDays
+		if staleDays <= 0 {
+			staleDays = 90
+		}
+		scanner := janitor.New(root, store, searcher, staleDays)
+		opts := janitor.ScheduleOptions{
+			Interval:    iv,
+			Jitter:      60 * time.Second,
+			InitialScan: cfg.Janitor.StartupScan,
+		}
+		janitorSched = janitor.NewScheduler(scanner, hub, opts)
+		server.SetJanitorScheduler(janitorSched)
+	}
+
+	// Workflow reminder scheduler. Walks every *.md file on the same
+	// cadence as the janitor and turns overdue tasks/approvals/pages
+	// into SSE "workflow.reminder" events + a cached inbox that the
+	// /workflow/reminders endpoint can serve without a fresh scan.
+	var reminders *workflow.ReminderScheduler
+	if iv := janitorInterval(cfg); iv > 0 {
+		reminders = workflow.NewReminderScheduler(root, hub, workflow.ReminderSchedulerOptions{
+			Interval:       iv,
+			Jitter:         60 * time.Second,
+			WarnWithinDays: 3,
+		})
+		server.SetReminderScheduler(reminders)
+	}
 
 	stack := &Stack{
-		Name:      name,
-		Root:      root,
-		Store:     store,
-		Versioner: ver,
-		Searcher:  searcher,
-		Linker:    linker,
-		Hub:       hub,
-		Pipeline:  pipe,
-		Vectors:   vectors,
-		Comments:  cstore,
-		Server:    server,
+		Name:          name,
+		Root:          root,
+		Store:         store,
+		Versioner:     ver,
+		Searcher:      searcher,
+		Linker:        linker,
+		Hub:           hub,
+		Pipeline:      pipe,
+		Vectors:       vectors,
+		Comments:      cstore,
+		Server:        server,
+		JanitorSched:  janitorSched,
+		Reminders:     reminders,
 	}
 
 	pipe.DrainUncommitted(context.Background())
+
+	// Search index catch-up. If someone edited the git repo directly
+	// while the server was down — `git pull`, manual edits, a restore
+	// from backup — the SQLite index will be out of sync with disk.
+	// Resync does a cheap path-only reconciliation in the background so
+	// startup stays fast on large workspaces.
+	if rs, ok := searcher.(search.Resyncer); ok {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+			defer cancel()
+			start := time.Now()
+			added, removed, rerr := rs.Resync(ctx)
+			if rerr != nil {
+				log.Printf("%ssearch: resync failed: %v", prefix, rerr)
+				return
+			}
+			if added == 0 && removed == 0 {
+				return
+			}
+			log.Printf("%ssearch: resync reconciled %d added, %d removed in %s",
+				prefix, added, removed, time.Since(start).Round(time.Millisecond))
+		}()
+	}
 
 	if vectors != nil {
 		go stack.reindexIfEmpty()

@@ -295,6 +295,57 @@ func TestReindexBatched(t *testing.T) {
 	}
 }
 
+// TestResyncReconcilesOutOfBandChanges exercises the startup catch-up:
+// files written directly to storage (simulating a git pull or restore from
+// backup) must show up in the index; files removed behind the server's
+// back must disappear from the index.
+func TestResyncReconcilesOutOfBandChanges(t *testing.T) {
+	s := newTestSQLite(t)
+
+	ctx := context.Background()
+	// Stage stale.md in storage + index it, then drop only from storage
+	// to simulate the server having missed a delete while it was down.
+	if err := s.store.Write(ctx, "stale.md", []byte("# stale page")); err != nil {
+		t.Fatalf("store.Write stale: %v", err)
+	}
+	if err := s.Index(ctx, "stale.md", []byte("# stale page")); err != nil {
+		t.Fatalf("Index: %v", err)
+	}
+	if err := s.store.Delete(ctx, "stale.md"); err != nil {
+		t.Fatalf("store.Delete: %v", err)
+	}
+	// Write fresh.md directly to storage — bypassing Index — to simulate
+	// an out-of-band edit (e.g. git pull, backup restore).
+	if err := s.store.Write(ctx, "fresh.md", []byte("# fresh page")); err != nil {
+		t.Fatalf("store.Write fresh: %v", err)
+	}
+
+	added, removed, err := s.Resync(ctx)
+	if err != nil {
+		t.Fatalf("Resync: %v", err)
+	}
+	if added != 1 {
+		t.Fatalf("expected 1 added, got %d", added)
+	}
+	if removed != 1 {
+		t.Fatalf("expected 1 removed, got %d", removed)
+	}
+
+	var count int
+	if err := s.readDB.QueryRow(`SELECT COUNT(*) FROM docs WHERE path = 'fresh.md'`).Scan(&count); err != nil {
+		t.Fatalf("count fresh: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected fresh.md to be indexed, got %d rows", count)
+	}
+	if err := s.readDB.QueryRow(`SELECT COUNT(*) FROM docs WHERE path = 'stale.md'`).Scan(&count); err != nil {
+		t.Fatalf("count stale: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected stale.md to be removed, got %d rows", count)
+	}
+}
+
 // TestRemoveAllClearsEveryTable verifies docs/links/file_meta all drop in a
 // single tx so the three indices never diverge after a delete.
 func TestRemoveAllClearsEveryTable(t *testing.T) {

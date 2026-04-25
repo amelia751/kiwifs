@@ -187,18 +187,50 @@ func (g *Git) BulkCommit(ctx context.Context, paths []string, actor, message str
 
 	addArgs := append([]string{"add", "--"}, paths...)
 	if err := g.run(ctx, "git", addArgs...); err != nil {
+		// If the add itself fails partway, unstage whatever made it in
+		// so we don't contaminate the next commit with half of this
+		// bulk write.
+		_ = g.Unstage(ctx, paths)
 		return err
 	}
 
 	statusArgs := append([]string{"status", "--porcelain", "--"}, paths...)
 	status, err := g.output(ctx, "git", statusArgs...)
 	if err != nil {
+		_ = g.Unstage(ctx, paths)
 		return err
 	}
 	if strings.TrimSpace(status) == "" {
 		return nil
 	}
-	return g.commit(ctx, actor, message)
+	if err := g.commit(ctx, actor, message); err != nil {
+		// The commit failed — reset the index so the staged files don't
+		// linger. Without this, the next REST write picks them up.
+		_ = g.Unstage(ctx, paths)
+		return err
+	}
+	return nil
+}
+
+// Unstage removes paths from the git index without touching the working
+// tree. Called by Pipeline.BulkWrite on rollback to keep the staging area
+// consistent with the working-tree restore — otherwise a failed bulk
+// commit leaves the index claiming those files were modified, and the
+// next unrelated commit picks them up.
+func (g *Git) Unstage(ctx context.Context, paths []string) error {
+	if len(paths) == 0 {
+		return nil
+	}
+	// `git reset HEAD -- <paths>` is the classic "unstage" recipe. On a
+	// brand-new repo with no commits it fails; in that case we fall
+	// back to `git rm --cached -r --force` which works regardless of
+	// whether HEAD exists.
+	args := append([]string{"reset", "HEAD", "--"}, paths...)
+	if err := g.run(ctx, "git", args...); err != nil {
+		args = append([]string{"rm", "--cached", "-r", "--force", "--ignore-unmatch", "--"}, paths...)
+		return g.run(ctx, "git", args...)
+	}
+	return nil
 }
 
 // CommitDelete records a path's removal. Caller must serialise

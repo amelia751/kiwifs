@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { api, type TreeEntry } from "@/lib/api";
+import { notifyError } from "@/lib/notify";
 import { isMarkdown, stem, stripTrailingSlash } from "@/lib/paths";
 import {
   ContextMenu,
@@ -99,7 +100,7 @@ export function KiwiTree({ activePath, onSelect, refreshKey, onCreateChild, onDe
         setDupOpen(false);
         onDuplicated?.(target);
       })
-    ).catch(() => {}).finally(() => setDupBusy(false));
+    ).catch((e) => notifyError(`Failed to duplicate ${dupSource}`, e)).finally(() => setDupBusy(false));
   }
 
   useEffect(() => {
@@ -154,7 +155,7 @@ export function KiwiTree({ activePath, onSelect, refreshKey, onCreateChild, onDe
           api.writeFile(fileName, content).then(() =>
             api.deleteFile(src).then(() => onMoved?.(fileName))
           )
-        ).catch(() => {});
+        ).catch((err) => notifyError(`Failed to move ${src}`, err));
       }}
     >
       {(root.children || []).map((child) => (
@@ -346,7 +347,7 @@ function Node({
                   api.writeFile(dest, content).then(() =>
                     api.deleteFile(src).then(() => onMoved?.(dest))
                   )
-                ).catch(() => {});
+                ).catch((err) => notifyError(`Failed to move ${src}`, err));
               }}
             >
               <button
@@ -414,7 +415,7 @@ function Node({
                     if (newName === entry.name) return;
                     const parentDir = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
                     const newFolder = parentDir ? `${parentDir}/${newName}` : newName;
-                    moveFolder(path, newFolder, entry).then(() => onMoved?.(newFolder)).catch(() => {});
+                    moveFolder(path, newFolder, entry).then(() => onMoved?.(newFolder)).catch((err) => notifyError(`Failed to rename folder ${path}`, err));
                   },
                 });
               }}
@@ -430,7 +431,7 @@ function Node({
                   value: path,
                   onConfirm: (newPath) => {
                     if (newPath === path) return;
-                    moveFolder(path, newPath.replace(/\/+$/, ""), entry).then(() => onMoved?.(newPath)).catch(() => {});
+                    moveFolder(path, newPath.replace(/\/+$/, ""), entry).then(() => onMoved?.(newPath)).catch((err) => notifyError(`Failed to move folder ${path}`, err));
                   },
                 });
               }}
@@ -448,7 +449,9 @@ function Node({
                   description: `Delete folder "${entry.name}" and its ${files.length} file(s)?`,
                   destructive: true,
                   onConfirm: () => {
-                    Promise.all(files.map((f) => api.deleteFile(f))).then(() => onDeleted?.()).catch(() => {});
+                    Promise.all(files.map((f) => api.deleteFile(f)))
+                      .then(() => onDeleted?.())
+                      .catch((err) => notifyError(`Failed to delete one or more files in "${path}"`, err));
                   },
                 });
               }}
@@ -554,7 +557,7 @@ function Node({
                   api.writeFile(finalPath, content).then(() =>
                     api.deleteFile(path).then(() => onMoved?.(finalPath))
                   )
-                ).catch(() => {});
+                ).catch((err) => notifyError(`Failed to rename ${path}`, err));
               },
             });
           }}

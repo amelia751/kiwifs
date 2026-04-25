@@ -2,6 +2,8 @@ package pipeline
 
 import (
 	"context"
+	"io"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -309,6 +311,86 @@ func TestBulkWriteVectorsNil(t *testing.T) {
 	if len(results) != 2 {
 		t.Fatalf("expected 2 results, got %d", len(results))
 	}
+}
+
+func TestWriteStreamSmallPayloadMatchesWrite(t *testing.T) {
+	dir := t.TempDir()
+	store, err := storage.NewLocal(dir)
+	if err != nil {
+		t.Fatalf("storage: %v", err)
+	}
+	p := New(store, versioning.NewNoop(), search.NewGrep(dir), nil, nil, nil, dir)
+
+	body := strings.NewReader("# small file\n\ncontent.\n")
+	res, err := p.WriteStream(context.Background(), "notes/small.md", body, int64(body.Len()), "tester")
+	if err != nil {
+		t.Fatalf("WriteStream small: %v", err)
+	}
+	if res.Path != "notes/small.md" {
+		t.Fatalf("result path = %s", res.Path)
+	}
+	got, _ := store.Read(context.Background(), "notes/small.md")
+	if !strings.HasPrefix(string(got), "# small file") {
+		t.Fatalf("stored body = %q", got)
+	}
+}
+
+func TestWriteStreamLargeBinarySkipsInMemoryBuffer(t *testing.T) {
+	dir := t.TempDir()
+	store, err := storage.NewLocal(dir)
+	if err != nil {
+		t.Fatalf("storage: %v", err)
+	}
+	p := New(store, versioning.NewNoop(), search.NewGrep(dir), nil, nil, nil, dir)
+
+	// 20 MB of zeros via io.LimitReader + zero-byte source: we never
+	// allocate the full blob, just drain it through WriteStream.
+	const size = 20 * 1024 * 1024
+	body := &zeroReader{remaining: size}
+	res, err := p.WriteStream(context.Background(), "assets/big.bin", body, int64(size), "tester")
+	if err != nil {
+		t.Fatalf("WriteStream large: %v", err)
+	}
+	// ETag for the streaming path is weak — assert it's at least present.
+	if res.ETag == "" {
+		t.Fatal("expected a non-empty ETag for streamed write")
+	}
+	// File should be on disk at the requested size without ever living
+	// fully in RAM in the test harness.
+	abs := store.AbsPath("assets/big.bin")
+	info, err := osStat(abs)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if info != size {
+		t.Fatalf("on-disk size = %d, want %d", info, size)
+	}
+}
+
+// zeroReader emits `remaining` zero bytes and then io.EOF.
+type zeroReader struct{ remaining int }
+
+func (z *zeroReader) Read(p []byte) (int, error) {
+	if z.remaining == 0 {
+		return 0, io.EOF
+	}
+	n := len(p)
+	if n > z.remaining {
+		n = z.remaining
+	}
+	for i := 0; i < n; i++ {
+		p[i] = 0
+	}
+	z.remaining -= n
+	return n, nil
+}
+
+func osStat(path string) (int, error) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return 0, err
+	}
+	return int(fi.Size()), nil
 }
 
 func TestBulkWriteRollbackOnWriteFailure(t *testing.T) {
