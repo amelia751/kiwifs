@@ -228,5 +228,45 @@ func (w *Weaviate) Search(ctx context.Context, vector []float32, topK int) ([]Re
 	return out, nil
 }
 
+func (w *Weaviate) GetVectors(ctx context.Context, path string) ([]Chunk, error) {
+	query := fmt.Sprintf(`{
+	  Get {
+	    %s (where: {path: ["path"], operator: Equal, valueText: %q}, limit: 1000) {
+	      path chunk_idx text
+	      _additional { id vector }
+	    }
+	  }
+	}`, w.class, path)
+	body := map[string]any{"query": query}
+	var parsed struct {
+		Data struct {
+			Get map[string][]struct {
+				Path       string  `json:"path"`
+				ChunkIdx   float64 `json:"chunk_idx"`
+				Text       string  `json:"text"`
+				Additional struct {
+					ID     string    `json:"id"`
+					Vector []float32 `json:"vector"`
+				} `json:"_additional"`
+			} `json:"Get"`
+		} `json:"data"`
+	}
+	if err := w.do(ctx, http.MethodPost, "/v1/graphql", body, &parsed); err != nil {
+		return nil, fmt.Errorf("weaviate GetVectors: %w", err)
+	}
+	hits := parsed.Data.Get[w.class]
+	chunks := make([]Chunk, len(hits))
+	for i, h := range hits {
+		chunks[i] = Chunk{
+			ID:       h.Additional.ID,
+			Path:     h.Path,
+			ChunkIdx: int(h.ChunkIdx),
+			Text:     h.Text,
+			Vector:   h.Additional.Vector,
+		}
+	}
+	return chunks, nil
+}
+
 func (w *Weaviate) Close() error { return nil }
 

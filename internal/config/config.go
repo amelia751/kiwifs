@@ -35,10 +35,11 @@ type JanitorConfig struct {
 }
 
 type DataviewConfig struct {
-	MaxScanRows    int    `toml:"max_scan_rows"`
-	QueryTimeout   string `toml:"query_timeout"`
-	MaxAutoIndexes int    `toml:"max_auto_indexes"`
-	ComputedFields bool   `toml:"computed_fields"`
+	MaxScanRows    int               `toml:"max_scan_rows"`
+	QueryTimeout   string            `toml:"query_timeout"`
+	MaxAutoIndexes int               `toml:"max_auto_indexes"`
+	ComputedFields bool              `toml:"computed_fields"`
+	CustomFields   map[string]string `toml:"custom_fields"`
 }
 
 // BackupConfig controls automatic git push to a remote repository.

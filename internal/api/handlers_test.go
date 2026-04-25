@@ -871,8 +871,15 @@ func TestHandler_QueryAggregate(t *testing.T) {
 	}
 
 	total := 0
-	for _, g := range resp.Groups {
-		total += g.Count
+	for _, bucket := range resp.Groups {
+		if v, ok := bucket["count"]; ok {
+			switch n := v.(type) {
+			case float64:
+				total += int(n)
+			case int64:
+				total += int(n)
+			}
+		}
 	}
 	if total != 3 {
 		t.Fatalf("total count = %d, want 3", total)

@@ -207,5 +207,45 @@ func (q *Qdrant) Search(ctx context.Context, vector []float32, topK int) ([]Resu
 	return out, nil
 }
 
+func (q *Qdrant) GetVectors(ctx context.Context, path string) ([]Chunk, error) {
+	body := map[string]any{
+		"filter": map[string]any{
+			"must": []map[string]any{
+				{"key": "path", "match": map[string]any{"value": path}},
+			},
+		},
+		"with_payload": true,
+		"with_vector":  true,
+		"limit":        1000,
+	}
+	var parsed struct {
+		Result struct {
+			Points []struct {
+				Vector  []float32 `json:"vector"`
+				Payload struct {
+					ID       string `json:"id"`
+					Path     string `json:"path"`
+					ChunkIdx int    `json:"chunk_idx"`
+					Text     string `json:"text"`
+				} `json:"payload"`
+			} `json:"points"`
+		} `json:"result"`
+	}
+	if err := q.do(ctx, http.MethodPost, "/collections/"+q.collection+"/points/scroll", body, &parsed); err != nil {
+		return nil, fmt.Errorf("qdrant GetVectors: %w", err)
+	}
+	chunks := make([]Chunk, len(parsed.Result.Points))
+	for i, p := range parsed.Result.Points {
+		chunks[i] = Chunk{
+			ID:       p.Payload.ID,
+			Path:     p.Payload.Path,
+			ChunkIdx: p.Payload.ChunkIdx,
+			Text:     p.Payload.Text,
+			Vector:   p.Vector,
+		}
+	}
+	return chunks, nil
+}
+
 func (q *Qdrant) Close() error { return nil }
 

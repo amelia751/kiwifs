@@ -112,18 +112,21 @@ func pathRowID(path string) int64 {
 //             `query_only=1` so a bug in this layer can't silently mutate
 //             through the read pool.
 type SQLite struct {
-	root           string
-	store          storage.Storage // reindex source; keeps the search layer storage-agnostic
-	writeDB        *sql.DB         // MaxOpenConns=1 — every write/DDL
-	readDB         *sql.DB         // MaxOpenConns=N — read-only snapshot reads
-	computedFields bool            // when true, _word_count etc. are injected into frontmatter
+	root               string
+	store              storage.Storage   // reindex source; keeps the search layer storage-agnostic
+	writeDB            *sql.DB           // MaxOpenConns=1 — every write/DDL
+	readDB             *sql.DB           // MaxOpenConns=N — read-only snapshot reads
+	computedFields     bool              // when true, _word_count etc. are injected into frontmatter
+	customComputedFields map[string]string // user-defined computed fields: key → expression
 }
 
 // NewSQLite opens (or creates) the FTS5 index at <root>/.kiwi/state/search.db.
 // The Storage is used as the reindex source so non-local backends (future
 // S3-backed or network-FS storage) don't need to reimplement the walk.
 // If the index is empty on open, it reindexes everything the store yields.
-func NewSQLite(root string, store storage.Storage) (*SQLite, error) {
+// customComputed maps user-defined field names to expressions evaluated at
+// index time (e.g. "quality_score" → "(word_count > 100) * 0.3").
+func NewSQLite(root string, store storage.Storage, customComputed ...map[string]string) (*SQLite, error) {
 	abs, err := filepath.Abs(root)
 	if err != nil {
 		return nil, fmt.Errorf("resolve root: %w", err)
@@ -165,7 +168,11 @@ func NewSQLite(root string, store storage.Storage) (*SQLite, error) {
 	readDB.SetMaxOpenConns(readers)
 	readDB.SetMaxIdleConns(readers)
 
-	s := &SQLite{root: abs, store: store, writeDB: writeDB, readDB: readDB, computedFields: true}
+	var ccf map[string]string
+	if len(customComputed) > 0 && customComputed[0] != nil {
+		ccf = customComputed[0]
+	}
+	s := &SQLite{root: abs, store: store, writeDB: writeDB, readDB: readDB, computedFields: true, customComputedFields: ccf}
 
 	// Construction has no caller ctx — the schema bootstrap and initial
 	// reindex run with Background. Production calls pass a real ctx.
@@ -599,6 +606,11 @@ func (s *SQLite) IndexMeta(ctx context.Context, path string, content []byte) err
 				args...,
 			).Scan(&blCount)
 			fm["_backlink_count"] = blCount
+		}
+	}
+	for key, expr := range s.customComputedFields {
+		if v := EvalComputedField(expr, fm); v != nil {
+			fm[key] = v
 		}
 	}
 	encodable := toJSONSafe(fm)
@@ -1340,6 +1352,11 @@ func (s *SQLite) reindexLocked(ctx context.Context) (int, error) {
 				fm["_link_count"] = len(links.Extract(content))
 				fm["_heading_count"] = len(parsed.Headings)
 				fm["_has_frontmatter"] = len(parsed.Frontmatter) > 0
+			}
+			for key, expr := range s.customComputedFields {
+				if v := EvalComputedField(expr, fm); v != nil {
+					fm[key] = v
+				}
 			}
 			payload, jerr := json.Marshal(toJSONSafe(fm))
 			if jerr == nil {

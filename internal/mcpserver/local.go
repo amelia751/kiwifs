@@ -7,12 +7,16 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
+
+	"database/sql"
 
 	"github.com/kiwifs/kiwifs/internal/bootstrap"
 	"github.com/kiwifs/kiwifs/internal/config"
 	"github.com/kiwifs/kiwifs/internal/dataview"
+	"github.com/kiwifs/kiwifs/internal/janitor"
 	"github.com/kiwifs/kiwifs/internal/pipeline"
 	"github.com/kiwifs/kiwifs/internal/search"
 	"github.com/kiwifs/kiwifs/internal/storage"
@@ -305,6 +309,121 @@ func (b *LocalBackend) BulkWrite(ctx context.Context, files []BulkFile, actor, p
 	return etags, nil
 }
 
+func (b *LocalBackend) Aggregate(ctx context.Context, groupBy, calc, where, pathPrefix string) (map[string]map[string]any, error) {
+	if err := b.init(); err != nil {
+		return nil, err
+	}
+	sq, ok := b.stack.Searcher.(*search.SQLite)
+	if !ok {
+		return nil, fmt.Errorf("aggregate requires sqlite search backend")
+	}
+
+	calcs, err := parseCalcSpecsLocal(calc)
+	if err != nil {
+		return nil, err
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("SELECT json_extract(frontmatter, '$.%s') AS grp", groupBy))
+	for _, cs := range calcs {
+		switch cs.fn {
+		case "count":
+			sb.WriteString(", COUNT(*) AS agg_count")
+		case "avg":
+			sb.WriteString(fmt.Sprintf(", AVG(json_extract(frontmatter, '$.%s'))", cs.field))
+		case "sum":
+			sb.WriteString(fmt.Sprintf(", SUM(json_extract(frontmatter, '$.%s'))", cs.field))
+		case "min":
+			sb.WriteString(fmt.Sprintf(", MIN(json_extract(frontmatter, '$.%s'))", cs.field))
+		case "max":
+			sb.WriteString(fmt.Sprintf(", MAX(json_extract(frontmatter, '$.%s'))", cs.field))
+		}
+	}
+	sb.WriteString(" FROM file_meta")
+
+	var conditions []string
+	var args []any
+	if pathPrefix != "" {
+		conditions = append(conditions, "path LIKE ? || '%'")
+		args = append(args, pathPrefix)
+	}
+	if where != "" {
+		conditions = append(conditions, where)
+	}
+	if len(conditions) > 0 {
+		sb.WriteString(" WHERE " + strings.Join(conditions, " AND "))
+	}
+	sb.WriteString(fmt.Sprintf(" GROUP BY json_extract(frontmatter, '$.%s')", groupBy))
+
+	rows, err := sq.ReadDB().QueryContext(ctx, sb.String(), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	groups := make(map[string]map[string]any)
+	cols, _ := rows.Columns()
+	for rows.Next() {
+		vals := make([]any, len(cols))
+		ptrs := make([]any, len(cols))
+		for i := range vals {
+			ptrs[i] = &vals[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			return nil, err
+		}
+		key := fmt.Sprint(vals[0])
+		if key == "<nil>" {
+			key = "(none)"
+		}
+		bucket := make(map[string]any)
+		for i, cs := range calcs {
+			bucket[cs.label()] = vals[i+1]
+		}
+		groups[key] = bucket
+	}
+	return groups, rows.Err()
+}
+
+type localCalcSpec struct {
+	fn    string
+	field string
+}
+
+func (cs localCalcSpec) label() string {
+	if cs.field == "" {
+		return cs.fn
+	}
+	return cs.fn + ":" + cs.field
+}
+
+func parseCalcSpecsLocal(raw string) ([]localCalcSpec, error) {
+	if raw == "" {
+		return []localCalcSpec{{fn: "count"}}, nil
+	}
+	parts := strings.Split(raw, ",")
+	specs := make([]localCalcSpec, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if p == "count" {
+			specs = append(specs, localCalcSpec{fn: "count"})
+			continue
+		}
+		fn, field, ok := strings.Cut(p, ":")
+		if !ok || field == "" {
+			return nil, fmt.Errorf("invalid calc %q", p)
+		}
+		specs = append(specs, localCalcSpec{fn: fn, field: field})
+	}
+	if len(specs) == 0 {
+		return []localCalcSpec{{fn: "count"}}, nil
+	}
+	return specs, nil
+}
+
 func (b *LocalBackend) Backlinks(ctx context.Context, path string) ([]Backlink, error) {
 	if err := b.init(); err != nil {
 		return nil, err
@@ -338,6 +457,36 @@ func (b *LocalBackend) ResolveWikiLinks(ctx context.Context, content string) str
 	return b.stack.LinkResolver.Resolve(ctx, content, publicURL)
 }
 
+func (b *LocalBackend) Analytics(ctx context.Context, scope string, staleThreshold int) (json.RawMessage, error) {
+	if err := b.init(); err != nil {
+		return nil, err
+	}
+	sq, ok := b.stack.Searcher.(*search.SQLite)
+	if !ok {
+		return nil, fmt.Errorf("analytics requires sqlite search backend")
+	}
+	resp, err := buildLocalAnalytics(ctx, sq, b.stack.JanitorSched, scope, staleThreshold)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(resp)
+}
+
+func (b *LocalBackend) HealthCheckPage(ctx context.Context, path string) (json.RawMessage, error) {
+	if err := b.init(); err != nil {
+		return nil, err
+	}
+	sq, ok := b.stack.Searcher.(*search.SQLite)
+	if !ok {
+		return nil, fmt.Errorf("health check requires sqlite search backend")
+	}
+	resp, err := buildLocalHealthCheck(ctx, sq, b.stack.JanitorSched, path)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(resp)
+}
+
 func (b *LocalBackend) Health(_ context.Context) error {
 	return b.init()
 }
@@ -347,6 +496,236 @@ func (b *LocalBackend) Close() error {
 		return b.stack.Close()
 	}
 	return nil
+}
+
+type localAnalytics struct {
+	TotalPages int                `json:"total_pages"`
+	TotalWords int                `json:"total_words"`
+	Health     localHealthStats   `json:"health"`
+	Coverage   localCoverageStats `json:"coverage"`
+	TopUpdated []localPageStat    `json:"top_updated"`
+}
+
+type localIssueGroup struct {
+	Count int      `json:"count"`
+	Paths []string `json:"paths,omitempty"`
+}
+
+type localHealthStats struct {
+	Stale         localIssueGroup `json:"stale"`
+	Orphans       localIssueGroup `json:"orphans"`
+	BrokenLinks   localIssueGroup `json:"broken_links"`
+	Empty         localIssueGroup `json:"empty"`
+	NoFrontmatter localIssueGroup `json:"no_frontmatter"`
+}
+
+type localCoverageStats struct {
+	PagesWithLinks    int     `json:"pages_with_links"`
+	PagesWithoutLinks int     `json:"pages_without_links"`
+	AvgLinksPerPage   float64 `json:"avg_links_per_page"`
+}
+
+type localPageStat struct {
+	Path      string `json:"path"`
+	UpdatedAt string `json:"updated_at"`
+}
+
+func buildLocalAnalytics(ctx context.Context, sq *search.SQLite, sched *janitor.Scheduler, scope string, staleThreshold int) (*localAnalytics, error) {
+	db := sq.ReadDB()
+	resp := &localAnalytics{}
+
+	scopeSQL := ""
+	var scopeArgs []any
+	if scope != "" {
+		scopeSQL = " WHERE path LIKE ? || '%'"
+		scopeArgs = append(scopeArgs, scope)
+	}
+
+	var totalWordsNull *float64
+	err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*), SUM(json_extract(frontmatter, '$._word_count')) FROM file_meta`+scopeSQL,
+		scopeArgs...,
+	).Scan(&resp.TotalPages, &totalWordsNull)
+	if err != nil {
+		return nil, err
+	}
+	if totalWordsNull != nil {
+		resp.TotalWords = int(*totalWordsNull)
+	}
+
+	if sd, ok := interface{}(sq).(search.StaleDetector); ok {
+		stale, serr := sd.StalePages(ctx, staleThreshold)
+		if serr == nil {
+			for _, s := range stale {
+				if scope == "" || localHasPrefix(s.Path, scope) {
+					resp.Health.Stale.Count++
+					resp.Health.Stale.Paths = append(resp.Health.Stale.Paths, s.Path)
+				}
+			}
+		}
+	}
+
+	if sched != nil {
+		if scan := sched.LastResult(); scan != nil {
+			for _, issue := range scan.Issues {
+				if scope != "" && !localHasPrefix(issue.Path, scope) {
+					continue
+				}
+				switch issue.Kind {
+				case janitor.IssueOrphan:
+					resp.Health.Orphans.Count++
+					resp.Health.Orphans.Paths = append(resp.Health.Orphans.Paths, issue.Path)
+				case janitor.IssueBrokenLink:
+					resp.Health.BrokenLinks.Count++
+					resp.Health.BrokenLinks.Paths = append(resp.Health.BrokenLinks.Paths, issue.Path)
+				case janitor.IssueEmptyPage:
+					resp.Health.Empty.Count++
+					resp.Health.Empty.Paths = append(resp.Health.Empty.Paths, issue.Path)
+				}
+			}
+		}
+	}
+
+	nfSQL := `SELECT COUNT(*) FROM file_meta WHERE json_extract(frontmatter, '$._has_frontmatter') = 0 OR json_extract(frontmatter, '$._has_frontmatter') IS NULL`
+	if scope != "" {
+		nfSQL += ` AND path LIKE ? || '%'`
+	}
+	var nfCount int
+	if scope != "" {
+		_ = db.QueryRowContext(ctx, nfSQL, scope).Scan(&nfCount)
+	} else {
+		_ = db.QueryRowContext(ctx, nfSQL).Scan(&nfCount)
+	}
+	resp.Health.NoFrontmatter = localIssueGroup{Count: nfCount}
+
+	buildLocalCoverage(ctx, db, scopeSQL, scopeArgs, resp)
+
+	topSQL := `SELECT path, updated_at FROM file_meta` + scopeSQL + ` ORDER BY updated_at DESC LIMIT 10`
+	rows, err := db.QueryContext(ctx, topSQL, scopeArgs...)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var path, updatedAt string
+			if rows.Scan(&path, &updatedAt) == nil {
+				resp.TopUpdated = append(resp.TopUpdated, localPageStat{Path: path, UpdatedAt: updatedAt})
+			}
+		}
+	}
+
+	if resp.TopUpdated == nil {
+		resp.TopUpdated = []localPageStat{}
+	}
+	if resp.Health.Stale.Paths == nil {
+		resp.Health.Stale.Paths = []string{}
+	}
+	if resp.Health.Orphans.Paths == nil {
+		resp.Health.Orphans.Paths = []string{}
+	}
+	if resp.Health.BrokenLinks.Paths == nil {
+		resp.Health.BrokenLinks.Paths = []string{}
+	}
+	if resp.Health.Empty.Paths == nil {
+		resp.Health.Empty.Paths = []string{}
+	}
+	return resp, nil
+}
+
+func buildLocalCoverage(ctx context.Context, db *sql.DB, scopeSQL string, scopeArgs []any, resp *localAnalytics) {
+	row := db.QueryRowContext(ctx,
+		`SELECT
+			COUNT(CASE WHEN COALESCE(json_extract(frontmatter, '$._link_count'), 0) > 0 THEN 1 END),
+			COUNT(CASE WHEN COALESCE(json_extract(frontmatter, '$._link_count'), 0) = 0 THEN 1 END),
+			COALESCE(AVG(json_extract(frontmatter, '$._link_count')), 0)
+		FROM file_meta`+scopeSQL,
+		scopeArgs...,
+	)
+	_ = row.Scan(&resp.Coverage.PagesWithLinks, &resp.Coverage.PagesWithoutLinks, &resp.Coverage.AvgLinksPerPage)
+}
+
+func localHasPrefix(s, prefix string) bool {
+	return len(s) >= len(prefix) && s[:len(prefix)] == prefix
+}
+
+type localHealthCheck struct {
+	Path            string   `json:"path"`
+	WordCount       int      `json:"word_count"`
+	LinkCount       int      `json:"link_count"`
+	BacklinkCount   int      `json:"backlink_count"`
+	DaysSinceUpdate float64  `json:"days_since_update"`
+	QualityScore    *float64 `json:"quality_score,omitempty"`
+	Issues          []string `json:"issues"`
+}
+
+func buildLocalHealthCheck(ctx context.Context, sq *search.SQLite, sched *janitor.Scheduler, path string) (*localHealthCheck, error) {
+	db := sq.ReadDB()
+	resp := &localHealthCheck{Path: path, Issues: []string{}}
+
+	var fm string
+	var updatedAt string
+	err := db.QueryRowContext(ctx,
+		`SELECT frontmatter, updated_at FROM file_meta WHERE path = ?`, path,
+	).Scan(&fm, &updatedAt)
+	if err != nil {
+		return resp, nil
+	}
+
+	var parsed map[string]any
+	if json.Unmarshal([]byte(fm), &parsed) == nil {
+		if v, ok := parsed["_word_count"]; ok {
+			resp.WordCount = localToInt(v)
+		}
+		if v, ok := parsed["_link_count"]; ok {
+			resp.LinkCount = localToInt(v)
+		}
+		if v, ok := parsed["_backlink_count"]; ok {
+			resp.BacklinkCount = localToInt(v)
+		}
+		if v, ok := parsed["quality_score"]; ok {
+			f := localToFloat64(v)
+			resp.QualityScore = &f
+		}
+	}
+
+	if updatedAt != "" {
+		if t, err := time.Parse(time.RFC3339, updatedAt); err == nil {
+			resp.DaysSinceUpdate = time.Since(t).Hours() / 24
+		}
+	}
+
+	if sched != nil {
+		if scan := sched.LastResult(); scan != nil {
+			for _, issue := range scan.Issues {
+				if issue.Path == path {
+					resp.Issues = append(resp.Issues, issue.Kind+": "+issue.Message)
+				}
+			}
+		}
+	}
+	return resp, nil
+}
+
+func localToInt(v any) int {
+	switch n := v.(type) {
+	case float64:
+		return int(n)
+	case int:
+		return n
+	case int64:
+		return int(n)
+	}
+	return 0
+}
+
+func localToFloat64(v any) float64 {
+	switch n := v.(type) {
+	case float64:
+		return n
+	case int:
+		return float64(n)
+	case int64:
+		return float64(n)
+	}
+	return 0
 }
 
 func formatSize(bytes int64) string {

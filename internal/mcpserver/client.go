@@ -331,6 +331,50 @@ func (r *RemoteBackend) BulkWrite(ctx context.Context, files []BulkFile, actor, 
 	return map[string]string{}, nil
 }
 
+func (r *RemoteBackend) Aggregate(ctx context.Context, groupBy, calc, where, pathPrefix string) (map[string]map[string]any, error) {
+	params := url.Values{}
+	params.Set("group_by", groupBy)
+	if calc != "" {
+		params.Set("calc", calc)
+	}
+	if where != "" {
+		params.Add("where", where)
+	}
+	if pathPrefix != "" {
+		params.Set("path_prefix", pathPrefix)
+	}
+	var result struct {
+		Groups map[string]map[string]any `json:"groups"`
+	}
+	if err := r.getJSON(ctx, r.apiPrefix+"/query/aggregate?"+params.Encode(), &result); err != nil {
+		return nil, err
+	}
+	return result.Groups, nil
+}
+
+func (r *RemoteBackend) Analytics(ctx context.Context, scope string, staleThreshold int) (json.RawMessage, error) {
+	params := url.Values{}
+	if scope != "" {
+		params.Set("scope", scope)
+	}
+	if staleThreshold > 0 {
+		params.Set("stale_threshold", strconv.Itoa(staleThreshold))
+	}
+	var raw json.RawMessage
+	if err := r.getJSON(ctx, r.apiPrefix+"/analytics?"+params.Encode(), &raw); err != nil {
+		return nil, err
+	}
+	return raw, nil
+}
+
+func (r *RemoteBackend) HealthCheckPage(ctx context.Context, path string) (json.RawMessage, error) {
+	var raw json.RawMessage
+	if err := r.getJSON(ctx, r.apiPrefix+"/health-check?path="+url.QueryEscape(path), &raw); err != nil {
+		return nil, err
+	}
+	return raw, nil
+}
+
 func (r *RemoteBackend) Backlinks(ctx context.Context, path string) ([]Backlink, error) {
 	var result struct {
 		Backlinks []Backlink `json:"backlinks"`

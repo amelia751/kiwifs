@@ -14,8 +14,12 @@ import (
 	"sync"
 	"time"
 
+	"bytes"
+
 	"github.com/kiwifs/kiwifs/internal/config"
 	"github.com/kiwifs/kiwifs/internal/dataview"
+	"github.com/kiwifs/kiwifs/internal/exporter"
+	"github.com/kiwifs/kiwifs/internal/importer"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )
@@ -168,6 +172,76 @@ func registerTools(s *server.MCPServer, b Backend, opts Options) {
 				mcp.WithIdempotentHintAnnotation(true),
 			),
 			Handler: handleBulkWrite(b),
+		},
+		server.ServerTool{
+			Tool: mcp.NewTool("kiwi_aggregate",
+				mcp.WithDescription("Aggregate files by a frontmatter field with optional calculations. Use this for analytics like 'count by status', 'average mastery by grade', or 'sum scores by subject'. Supports count, avg, sum, min, max."),
+				mcp.WithString("group_by", mcp.Required(), mcp.Description("Field to group by, e.g. status, grade, subject")),
+				mcp.WithString("calculate", mcp.Description("Aggregations: count (default), avg:field, sum:field, min:field, max:field. Comma-separated for multiple.")),
+				mcp.WithString("where", mcp.Description("Optional DQL WHERE filter expression")),
+				mcp.WithString("path_prefix", mcp.Description("Optional path prefix to scope results, e.g. students/")),
+				mcp.WithReadOnlyHintAnnotation(true),
+				mcp.WithDestructiveHintAnnotation(false),
+			),
+			Handler: handleAggregate(b),
+		},
+		server.ServerTool{
+			Tool: mcp.NewTool("kiwi_import",
+				mcp.WithDescription("Import data from an external source (database, CSV, JSON) into the knowledge base. Each record becomes a markdown file with frontmatter. Supports: postgres, mysql, firestore, sqlite, mongodb, csv, json, jsonl, notion, airtable."),
+				mcp.WithString("from", mcp.Required(), mcp.Description(`Source type: "postgres" | "mysql" | "firestore" | "sqlite" | "mongodb" | "csv" | "json" | "jsonl" | "notion" | "airtable"`)),
+				mcp.WithString("dsn", mcp.Description("Connection string (postgres, mysql)")),
+				mcp.WithString("uri", mcp.Description("Connection URI (mongodb)")),
+				mcp.WithString("db", mcp.Description("Database file path (sqlite)")),
+				mcp.WithString("file", mcp.Description("File path (csv, json, jsonl)")),
+				mcp.WithString("table", mcp.Description("Table name (postgres, mysql, sqlite)")),
+				mcp.WithString("collection", mcp.Description("Collection name (firestore, mongodb)")),
+				mcp.WithString("database", mcp.Description("Database name (mongodb)")),
+				mcp.WithString("database_id", mcp.Description("Database ID (notion)")),
+				mcp.WithString("base_id", mcp.Description("Base ID (airtable)")),
+				mcp.WithString("table_id", mcp.Description("Table ID (airtable)")),
+				mcp.WithString("project", mcp.Description("GCP project ID (firestore)")),
+				mcp.WithString("query", mcp.Description("Custom SQL query (overrides table)")),
+				mcp.WithArray("columns", mcp.Description("Optional column filter"), mcp.WithStringItems()),
+				mcp.WithString("prefix", mcp.Description("Path prefix in kiwifs (default: table/collection name)")),
+				mcp.WithNumber("limit", mcp.Description("Max rows to import")),
+				mcp.WithBoolean("dry_run", mcp.Description("Preview mode — show what would be imported without writing")),
+				mcp.WithDestructiveHintAnnotation(true),
+				mcp.WithIdempotentHintAnnotation(true),
+			),
+			Handler: handleImport(b, opts),
+		},
+		server.ServerTool{
+			Tool: mcp.NewTool("kiwi_export",
+				mcp.WithDescription("Export knowledge base files to JSONL or CSV format. Streams all files (or a subset) with their frontmatter, content, and link data. Optionally include vector embeddings for ML pipelines."),
+				mcp.WithString("format", mcp.Required(), mcp.Description(`Output format: "jsonl" | "csv"`)),
+				mcp.WithString("path", mcp.Description("Scope to a subdirectory (e.g. students/)")),
+				mcp.WithArray("columns", mcp.Description("Frontmatter fields for CSV mode"), mcp.WithStringItems()),
+				mcp.WithBoolean("include_content", mcp.Description("Include full markdown content")),
+				mcp.WithBoolean("include_embeddings", mcp.Description("Include vector embeddings for each file's chunks")),
+				mcp.WithNumber("limit", mcp.Description("Max files to export")),
+				mcp.WithReadOnlyHintAnnotation(true),
+				mcp.WithDestructiveHintAnnotation(false),
+			),
+			Handler: handleExport(b, opts),
+		},
+		server.ServerTool{
+			Tool: mcp.NewTool("kiwi_analytics",
+				mcp.WithDescription("Get knowledge base analytics: total pages/words, health metrics (stale, orphans, broken links, empty, no frontmatter), link coverage stats, and recently updated pages."),
+				mcp.WithString("scope", mcp.Description("Optional path prefix to scope results, e.g. students/")),
+				mcp.WithNumber("stale_threshold", mcp.Description("Days to consider a page stale (default 30)")),
+				mcp.WithReadOnlyHintAnnotation(true),
+				mcp.WithDestructiveHintAnnotation(false),
+			),
+			Handler: handleAnalytics(b),
+		},
+		server.ServerTool{
+			Tool: mcp.NewTool("kiwi_health_check",
+				mcp.WithDescription("Get health information for a specific page: word count, link count, backlink count, days since update, quality score, and any issues (stale, orphan, broken links)."),
+				mcp.WithString("path", mcp.Required(), mcp.Description("Path to the page to check, e.g. students/priya-sharma.md")),
+				mcp.WithReadOnlyHintAnnotation(true),
+				mcp.WithDestructiveHintAnnotation(false),
+			),
+			Handler: handleHealthCheck(b),
 		},
 	)
 }
@@ -561,6 +635,158 @@ func handleQuery(b Backend) server.ToolHandlerFunc {
 	}
 }
 
+func handleAggregate(b Backend) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		args := req.GetArguments()
+		groupBy, _ := args["group_by"].(string)
+		if groupBy == "" {
+			return mcp.NewToolResultError("group_by is required"), nil
+		}
+		calc, _ := args["calculate"].(string)
+		where, _ := args["where"].(string)
+		pathPrefix, _ := args["path_prefix"].(string)
+
+		results, err := b.Aggregate(ctx, groupBy, calc, where, pathPrefix)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Aggregate failed: %v", err)), nil
+		}
+		if len(results) == 0 {
+			return mcp.NewToolResultText("No results."), nil
+		}
+
+		var sb strings.Builder
+		// Sort keys for deterministic output
+		keys := make([]string, 0, len(results))
+		for k := range results {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			vals := results[k]
+			fmt.Fprintf(&sb, "%s:", k)
+			vkeys := make([]string, 0, len(vals))
+			for vk := range vals {
+				vkeys = append(vkeys, vk)
+			}
+			sort.Strings(vkeys)
+			for _, vk := range vkeys {
+				fmt.Fprintf(&sb, " %s=%v", vk, vals[vk])
+			}
+			sb.WriteString("\n")
+		}
+		return mcp.NewToolResultText(sb.String()), nil
+	}
+}
+
+func handleAnalytics(b Backend) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		args := req.GetArguments()
+		scope, _ := args["scope"].(string)
+		staleThreshold := intArg(args, "stale_threshold", 30)
+
+		raw, err := b.Analytics(ctx, scope, staleThreshold)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Analytics failed: %v", err)), nil
+		}
+
+		var data struct {
+			TotalPages int `json:"total_pages"`
+			TotalWords int `json:"total_words"`
+			Health     struct {
+				Stale         struct{ Count int } `json:"stale"`
+				Orphans       struct{ Count int } `json:"orphans"`
+				BrokenLinks   struct{ Count int } `json:"broken_links"`
+				Empty         struct{ Count int } `json:"empty"`
+				NoFrontmatter struct{ Count int } `json:"no_frontmatter"`
+			} `json:"health"`
+			Coverage struct {
+				PagesWithLinks    int     `json:"pages_with_links"`
+				PagesWithoutLinks int     `json:"pages_without_links"`
+				AvgLinksPerPage   float64 `json:"avg_links_per_page"`
+			} `json:"coverage"`
+			TopUpdated []struct {
+				Path      string `json:"path"`
+				UpdatedAt string `json:"updated_at"`
+			} `json:"top_updated"`
+		}
+		if err := json.Unmarshal(raw, &data); err != nil {
+			return mcp.NewToolResultText(string(raw)), nil
+		}
+
+		var sb strings.Builder
+		fmt.Fprintf(&sb, "Knowledge Base Health\n")
+		fmt.Fprintf(&sb, "Total pages:     %d\n", data.TotalPages)
+		fmt.Fprintf(&sb, "Total words:     %d\n", data.TotalWords)
+		fmt.Fprintf(&sb, "Stale (>%dd):    %d pages\n", staleThreshold, data.Health.Stale.Count)
+		fmt.Fprintf(&sb, "Orphans:         %d pages\n", data.Health.Orphans.Count)
+		fmt.Fprintf(&sb, "Broken links:    %d\n", data.Health.BrokenLinks.Count)
+		fmt.Fprintf(&sb, "Empty pages:     %d\n", data.Health.Empty.Count)
+		fmt.Fprintf(&sb, "No frontmatter:  %d\n", data.Health.NoFrontmatter.Count)
+		sb.WriteString("\nCoverage\n")
+		total := data.Coverage.PagesWithLinks + data.Coverage.PagesWithoutLinks
+		pct := 0.0
+		if total > 0 {
+			pct = float64(data.Coverage.PagesWithLinks) / float64(total) * 100
+		}
+		fmt.Fprintf(&sb, "Pages with links:    %d (%.1f%%)\n", data.Coverage.PagesWithLinks, pct)
+		fmt.Fprintf(&sb, "Avg links/page:      %.1f\n", data.Coverage.AvgLinksPerPage)
+		if len(data.TopUpdated) > 0 {
+			sb.WriteString("\nRecently Updated\n")
+			for _, p := range data.TopUpdated {
+				fmt.Fprintf(&sb, "  %s  %s\n", p.Path, p.UpdatedAt)
+			}
+		}
+		return mcp.NewToolResultText(sb.String()), nil
+	}
+}
+
+func handleHealthCheck(b Backend) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		args := req.GetArguments()
+		path, _ := args["path"].(string)
+		if path == "" {
+			return mcp.NewToolResultError("path is required"), nil
+		}
+
+		raw, err := b.HealthCheckPage(ctx, path)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Health check failed: %v", err)), nil
+		}
+
+		var data struct {
+			Path            string   `json:"path"`
+			WordCount       int      `json:"word_count"`
+			LinkCount       int      `json:"link_count"`
+			BacklinkCount   int      `json:"backlink_count"`
+			DaysSinceUpdate float64  `json:"days_since_update"`
+			QualityScore    *float64 `json:"quality_score,omitempty"`
+			Issues          []string `json:"issues"`
+		}
+		if err := json.Unmarshal(raw, &data); err != nil {
+			return mcp.NewToolResultText(string(raw)), nil
+		}
+
+		var sb strings.Builder
+		fmt.Fprintf(&sb, "Health: %s\n", data.Path)
+		fmt.Fprintf(&sb, "  Word count:       %d\n", data.WordCount)
+		fmt.Fprintf(&sb, "  Link count:       %d\n", data.LinkCount)
+		fmt.Fprintf(&sb, "  Backlink count:   %d\n", data.BacklinkCount)
+		fmt.Fprintf(&sb, "  Days since update: %.1f\n", data.DaysSinceUpdate)
+		if data.QualityScore != nil {
+			fmt.Fprintf(&sb, "  Quality score:    %.2f\n", *data.QualityScore)
+		}
+		if len(data.Issues) > 0 {
+			sb.WriteString("  Issues:\n")
+			for _, issue := range data.Issues {
+				fmt.Fprintf(&sb, "    - %s\n", issue)
+			}
+		} else {
+			sb.WriteString("  Issues: none\n")
+		}
+		return mcp.NewToolResultText(sb.String()), nil
+	}
+}
+
 func handleDelete(b Backend) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		args := req.GetArguments()
@@ -631,6 +857,238 @@ func handleBulkWrite(b Backend) server.ToolHandlerFunc {
 				fmt.Fprintf(&sb, "  %s\n", f.Path)
 			}
 		}
+		return mcp.NewToolResultText(sb.String()), nil
+	}
+}
+
+func handleImport(b Backend, opts Options) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		args := req.GetArguments()
+		from, _ := args["from"].(string)
+		if from == "" {
+			return mcp.NewToolResultError("from is required"), nil
+		}
+
+		lb, ok := b.(*LocalBackend)
+		if !ok {
+			return mcp.NewToolResultError("import is only supported in local mode"), nil
+		}
+		if err := lb.init(); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("init: %v", err)), nil
+		}
+
+		src, err := buildMCPSource(args, from)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		defer src.Close()
+
+		var columns []string
+		if raw, ok := args["columns"]; ok {
+			switch v := raw.(type) {
+			case []any:
+				for _, item := range v {
+					if s, ok := item.(string); ok {
+						columns = append(columns, s)
+					}
+				}
+			case []string:
+				columns = v
+			}
+		}
+
+		prefix, _ := args["prefix"].(string)
+		dryRun, _ := args["dry_run"].(bool)
+		limit := intArg(args, "limit", 0)
+
+		importOpts := importer.Options{
+			Prefix:  prefix,
+			Columns: columns,
+			DryRun:  dryRun,
+			Limit:   limit,
+			Actor:   "mcp-import",
+		}
+
+		stats, err := importer.Run(ctx, src, lb.stack.Pipeline, importOpts)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Import failed: %v", err)), nil
+		}
+
+		var sb strings.Builder
+		if dryRun {
+			fmt.Fprintf(&sb, "Dry run: would import %d records\n", stats.Imported)
+		} else {
+			fmt.Fprintf(&sb, "Imported %d records, skipped %d\n", stats.Imported, stats.Skipped)
+		}
+		if len(stats.Errors) > 0 {
+			fmt.Fprintf(&sb, "Errors (%d):\n", len(stats.Errors))
+			for _, e := range stats.Errors {
+				fmt.Fprintf(&sb, "  - %s\n", e)
+			}
+		}
+		return mcp.NewToolResultText(sb.String()), nil
+	}
+}
+
+func buildMCPSource(args map[string]any, from string) (importer.Source, error) {
+	str := func(key string) string {
+		s, _ := args[key].(string)
+		return s
+	}
+
+	switch from {
+	case "postgres":
+		dsn := str("dsn")
+		table := str("table")
+		query := str("query")
+		if dsn == "" {
+			return nil, fmt.Errorf("dsn is required for postgres")
+		}
+		if table == "" && query == "" {
+			return nil, fmt.Errorf("table or query is required for postgres")
+		}
+		return importer.NewPostgres(dsn, table, query, nil)
+	case "mysql":
+		dsn := str("dsn")
+		table := str("table")
+		query := str("query")
+		if dsn == "" {
+			return nil, fmt.Errorf("dsn is required for mysql")
+		}
+		if table == "" && query == "" {
+			return nil, fmt.Errorf("table or query is required for mysql")
+		}
+		return importer.NewMySQL(dsn, table, query, nil)
+	case "firestore":
+		project := str("project")
+		collection := str("collection")
+		if project == "" {
+			return nil, fmt.Errorf("project is required for firestore")
+		}
+		if collection == "" {
+			return nil, fmt.Errorf("collection is required for firestore")
+		}
+		return importer.NewFirestore(project, collection)
+	case "sqlite":
+		dbPath := str("db")
+		table := str("table")
+		query := str("query")
+		if dbPath == "" {
+			return nil, fmt.Errorf("db is required for sqlite")
+		}
+		if table == "" && query == "" {
+			return nil, fmt.Errorf("table or query is required for sqlite")
+		}
+		return importer.NewSQLiteSource(dbPath, table, query)
+	case "mongodb":
+		uri := str("uri")
+		if uri == "" {
+			uri = str("dsn")
+		}
+		database := str("database")
+		collection := str("collection")
+		if uri == "" {
+			return nil, fmt.Errorf("uri is required for mongodb")
+		}
+		if database == "" {
+			return nil, fmt.Errorf("database is required for mongodb")
+		}
+		if collection == "" {
+			return nil, fmt.Errorf("collection is required for mongodb")
+		}
+		return importer.NewMongoDB(uri, database, collection)
+	case "csv":
+		filePath := str("file")
+		if filePath == "" {
+			return nil, fmt.Errorf("file is required for csv")
+		}
+		return importer.NewCSV(filePath, true)
+	case "json", "jsonl":
+		filePath := str("file")
+		if filePath == "" {
+			return nil, fmt.Errorf("file is required for json/jsonl")
+		}
+		return importer.NewJSON(filePath)
+	case "notion":
+		apiKey := os.Getenv("NOTION_API_KEY")
+		databaseID := str("database_id")
+		if databaseID == "" {
+			return nil, fmt.Errorf("database_id is required for notion")
+		}
+		return importer.NewNotion(apiKey, databaseID)
+	case "airtable":
+		apiKey := os.Getenv("AIRTABLE_API_KEY")
+		baseID := str("base_id")
+		tableID := str("table_id")
+		if baseID == "" {
+			return nil, fmt.Errorf("base_id is required for airtable")
+		}
+		if tableID == "" {
+			return nil, fmt.Errorf("table_id is required for airtable")
+		}
+		return importer.NewAirtable(apiKey, baseID, tableID)
+	default:
+		return nil, fmt.Errorf("unknown source type %q", from)
+	}
+}
+
+func handleExport(b Backend, _ Options) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		args := req.GetArguments()
+		format, _ := args["format"].(string)
+		if format == "" {
+			format = "jsonl"
+		}
+		if format != "jsonl" && format != "csv" {
+			return mcp.NewToolResultError("format must be jsonl or csv"), nil
+		}
+
+		lb, ok := b.(*LocalBackend)
+		if !ok {
+			return mcp.NewToolResultError("export is only supported in local mode"), nil
+		}
+		if err := lb.init(); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("init: %v", err)), nil
+		}
+
+		var columns []string
+		if raw, ok := args["columns"]; ok {
+			switch v := raw.(type) {
+			case []any:
+				for _, item := range v {
+					if s, ok := item.(string); ok {
+						columns = append(columns, s)
+					}
+				}
+			case []string:
+				columns = v
+			}
+		}
+
+		pathPrefix, _ := args["path"].(string)
+		includeContent, _ := args["include_content"].(bool)
+		includeEmb, _ := args["include_embeddings"].(bool)
+		limit := intArg(args, "limit", 0)
+
+		var buf bytes.Buffer
+		opts := exporter.Options{
+			Format:            format,
+			PathPrefix:        pathPrefix,
+			Columns:           columns,
+			IncludeContent:    includeContent,
+			IncludeEmbeddings: includeEmb,
+			Output:            &buf,
+			Limit:             limit,
+		}
+
+		count, err := exporter.Export(ctx, lb.stack.Store, lb.stack.Searcher, lb.stack.Vectors, opts)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Export failed: %v", err)), nil
+		}
+
+		var sb strings.Builder
+		fmt.Fprintf(&sb, "Exported %d files (%s format)\n\n", count, format)
+		sb.Write(buf.Bytes())
 		return mcp.NewToolResultText(sb.String()), nil
 	}
 }

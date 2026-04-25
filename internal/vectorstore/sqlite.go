@@ -134,6 +134,29 @@ func (s *SQLite) Count(ctx context.Context) (int, error) {
 	return n, err
 }
 
+func (s *SQLite) GetVectors(ctx context.Context, path string) ([]Chunk, error) {
+	rows, err := s.readDB.QueryContext(ctx,
+		`SELECT id, chunk_idx, text, dims, vec FROM vectors WHERE path = ? ORDER BY chunk_idx`, path)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var chunks []Chunk
+	for rows.Next() {
+		var c Chunk
+		var dims int
+		var blob []byte
+		if err := rows.Scan(&c.ID, &c.ChunkIdx, &c.Text, &dims, &blob); err != nil {
+			return nil, err
+		}
+		c.Path = path
+		c.Vector = bytesToFloats(blob, dims)
+		chunks = append(chunks, c)
+	}
+	return chunks, rows.Err()
+}
+
 func (s *SQLite) Close() error {
 	rerr := s.readDB.Close()
 	werr := s.writeDB.Close()

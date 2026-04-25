@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/kiwifs/kiwifs/internal/dataview"
+	"github.com/kiwifs/kiwifs/internal/search"
 	"github.com/labstack/echo/v4"
 )
 
@@ -51,13 +52,60 @@ func (h *Handlers) Query(c echo.Context) error {
 	})
 }
 
-type aggregateGroup struct {
-	Key   string `json:"key"`
-	Count int    `json:"count,omitempty"`
+// aggregateResponse is keyed by group value, each containing calculated aggregates.
+type aggregateResponse struct {
+	Groups map[string]map[string]any `json:"groups"`
 }
 
-type aggregateResponse struct {
-	Groups []aggregateGroup `json:"groups"`
+// parseCalcSpecs parses comma-separated calc values like "count,avg:mastery,max:score".
+// Returns a list of {func, field} pairs. "count" has no field.
+type calcSpec struct {
+	fn    string // count, avg, sum, min, max
+	field string // empty for count
+}
+
+var validAggFuncs = map[string]bool{
+	"count": true, "avg": true, "sum": true, "min": true, "max": true,
+}
+
+func parseCalcSpecs(raw string) ([]calcSpec, error) {
+	if raw == "" {
+		return []calcSpec{{fn: "count"}}, nil
+	}
+	parts := strings.Split(raw, ",")
+	specs := make([]calcSpec, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if p == "count" {
+			specs = append(specs, calcSpec{fn: "count"})
+			continue
+		}
+		fn, field, ok := strings.Cut(p, ":")
+		if !ok || field == "" {
+			return nil, fmt.Errorf("invalid calc %q: expected func:field (e.g. avg:mastery)", p)
+		}
+		if !validAggFuncs[fn] {
+			return nil, fmt.Errorf("unsupported aggregate function %q (supported: count, avg, sum, min, max)", fn)
+		}
+		if !dataview.ValidFieldName(field) {
+			return nil, fmt.Errorf("invalid field name in calc: %q", field)
+		}
+		specs = append(specs, calcSpec{fn: fn, field: field})
+	}
+	if len(specs) == 0 {
+		return []calcSpec{{fn: "count"}}, nil
+	}
+	return specs, nil
+}
+
+func (cs calcSpec) label() string {
+	if cs.field == "" {
+		return cs.fn
+	}
+	return cs.fn + ":" + cs.field
 }
 
 func (h *Handlers) QueryAggregate(c echo.Context) error {
@@ -68,13 +116,14 @@ func (h *Handlers) QueryAggregate(c echo.Context) error {
 	if groupBy == "" {
 		return echo.NewHTTPError(http.StatusBadRequest, "group_by is required")
 	}
-
 	if !dataview.ValidFieldName(groupBy) {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid group_by field")
 	}
 
-	var dql strings.Builder
-	dql.WriteString("TABLE " + groupBy)
+	calcs, err := parseCalcSpecs(c.QueryParam("calc"))
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+	}
 
 	wheres := c.QueryParams()["where"]
 	for _, w := range wheres {
@@ -83,24 +132,82 @@ func (h *Handlers) QueryAggregate(c echo.Context) error {
 				fmt.Sprintf("invalid where expression: %v", err))
 		}
 	}
-	if len(wheres) > 0 {
-		dql.WriteString(" WHERE ")
-		dql.WriteString(strings.Join(wheres, " AND "))
+
+	pathPrefix := c.QueryParam("path_prefix")
+
+	sq, ok := h.searcher.(*search.SQLite)
+	if !ok {
+		return echo.NewHTTPError(http.StatusNotImplemented, "aggregate requires sqlite search backend")
 	}
 
-	dql.WriteString(" GROUP BY " + groupBy)
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("SELECT json_extract(frontmatter, '$.%s') AS grp", groupBy))
+	for _, cs := range calcs {
+		switch cs.fn {
+		case "count":
+			sb.WriteString(", COUNT(*) AS agg_count")
+		case "avg":
+			sb.WriteString(fmt.Sprintf(", AVG(json_extract(frontmatter, '$.%s')) AS `agg_%s`", cs.field, cs.label()))
+		case "sum":
+			sb.WriteString(fmt.Sprintf(", SUM(json_extract(frontmatter, '$.%s')) AS `agg_%s`", cs.field, cs.label()))
+		case "min":
+			sb.WriteString(fmt.Sprintf(", MIN(json_extract(frontmatter, '$.%s')) AS `agg_%s`", cs.field, cs.label()))
+		case "max":
+			sb.WriteString(fmt.Sprintf(", MAX(json_extract(frontmatter, '$.%s')) AS `agg_%s`", cs.field, cs.label()))
+		}
+	}
+	sb.WriteString(" FROM file_meta")
 
-	result, err := h.dv.Query(c.Request().Context(), dql.String(), 0, 0)
+	var conditions []string
+	var args []any
+
+	if pathPrefix != "" {
+		conditions = append(conditions, "path LIKE ? || '%'")
+		args = append(args, pathPrefix)
+	}
+	for _, w := range wheres {
+		conditions = append(conditions, w)
+	}
+
+	if len(conditions) > 0 {
+		sb.WriteString(" WHERE " + strings.Join(conditions, " AND "))
+	}
+	sb.WriteString(fmt.Sprintf(" GROUP BY json_extract(frontmatter, '$.%s')", groupBy))
+
+	rows, err := sq.ReadDB().QueryContext(c.Request().Context(), sb.String(), args...)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 	}
+	defer rows.Close()
 
-	groups := make([]aggregateGroup, 0, len(result.Groups))
-	for _, g := range result.Groups {
-		groups = append(groups, aggregateGroup{
-			Key:   g.Key,
-			Count: g.Count,
-		})
+	groups := make(map[string]map[string]any)
+	cols, _ := rows.Columns()
+	for rows.Next() {
+		vals := make([]any, len(cols))
+		ptrs := make([]any, len(cols))
+		for i := range vals {
+			ptrs[i] = &vals[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+		}
+		key := fmt.Sprint(vals[0])
+		if key == "<nil>" {
+			key = "(none)"
+		}
+		bucket := make(map[string]any)
+		for i, cs := range calcs {
+			val := vals[i+1]
+			switch v := val.(type) {
+			case int64:
+				bucket[cs.label()] = v
+			case float64:
+				bucket[cs.label()] = v
+			default:
+				bucket[cs.label()] = v
+			}
+		}
+		groups[key] = bucket
 	}
 
 	return c.JSON(http.StatusOK, aggregateResponse{Groups: groups})

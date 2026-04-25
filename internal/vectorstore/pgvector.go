@@ -102,7 +102,7 @@ func (p *Pgvector) Count(ctx context.Context) (int, error) {
 	var n int
 	err := p.pool.QueryRow(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %s`, p.table)).Scan(&n)
 	if err != nil {
-		return 0, nil // table probably doesn't exist yet
+		return 0, fmt.Errorf("pgvector count: %w", err)
 	}
 	return n, nil
 }
@@ -135,6 +135,42 @@ LIMIT $2`, p.table)
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+func (p *Pgvector) GetVectors(ctx context.Context, path string) ([]Chunk, error) {
+	sql := fmt.Sprintf(`SELECT id, chunk_idx, text, embedding FROM %s WHERE path = $1 ORDER BY chunk_idx`, p.table)
+	rows, err := p.pool.Query(ctx, sql, path)
+	if err != nil {
+		return nil, fmt.Errorf("pgvector GetVectors: %w", err)
+	}
+	defer rows.Close()
+
+	var chunks []Chunk
+	for rows.Next() {
+		var c Chunk
+		var vecStr string
+		if err := rows.Scan(&c.ID, &c.ChunkIdx, &c.Text, &vecStr); err != nil {
+			return nil, fmt.Errorf("pgvector GetVectors scan: %w", err)
+		}
+		c.Path = path
+		c.Vector = parseVectorLiteral(vecStr)
+		chunks = append(chunks, c)
+	}
+	return chunks, rows.Err()
+}
+
+func parseVectorLiteral(s string) []float32 {
+	s = strings.Trim(s, "[]")
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	vec := make([]float32, len(parts))
+	for i, p := range parts {
+		f, _ := strconv.ParseFloat(strings.TrimSpace(p), 32)
+		vec[i] = float32(f)
+	}
+	return vec
 }
 
 func (p *Pgvector) Close() error {
