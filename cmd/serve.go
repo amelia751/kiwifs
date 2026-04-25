@@ -44,6 +44,9 @@ func init() {
 	serveCmd.Flags().String("api-key", "", "API key (required if auth=apikey)")
 	serveCmd.Flags().String("oidc-issuer", "", "OIDC provider issuer URL (required if auth=oidc)")
 	serveCmd.Flags().String("oidc-client-id", "", "OIDC client ID (required if auth=oidc)")
+	serveCmd.Flags().Bool("async-commit", true, "enable async batched git commits (default true)")
+	serveCmd.Flags().Int("batch-window", 200, "async commit batch window in milliseconds")
+	serveCmd.Flags().Int("batch-max-size", 50, "max paths per async commit batch")
 	serveCmd.Flags().Bool("no-watch", false, "disable the fsnotify watcher that catches direct writes to --root")
 	serveCmd.Flags().Bool("webdav", false, "enable the WebDAV server alongside the REST API")
 	serveCmd.Flags().Int("webdav-port", 3335, "WebDAV listen port (used when --webdav is set)")
@@ -85,6 +88,12 @@ func runServe(cmd *cobra.Command, args []string) error {
 	applyFlag("host", func() { cfg.Server.Host, _ = cmd.Flags().GetString("host") })
 	applyFlag("search", func() { cfg.Search.Engine, _ = cmd.Flags().GetString("search") })
 	applyFlag("versioning", func() { cfg.Versioning.Strategy, _ = cmd.Flags().GetString("versioning") })
+	applyFlag("async-commit", func() {
+		v, _ := cmd.Flags().GetBool("async-commit")
+		cfg.Versioning.AsyncCommit = &v
+	})
+	applyFlag("batch-window", func() { cfg.Versioning.BatchWindowMs, _ = cmd.Flags().GetInt("batch-window") })
+	applyFlag("batch-max-size", func() { cfg.Versioning.BatchMaxSize, _ = cmd.Flags().GetInt("batch-max-size") })
 	applyFlag("auth", func() { cfg.Auth.Type, _ = cmd.Flags().GetString("auth") })
 	applyFlag("api-key", func() { cfg.Auth.APIKey, _ = cmd.Flags().GetString("api-key") })
 	applyFlag("oidc-issuer", func() { cfg.Auth.OIDC.Issuer, _ = cmd.Flags().GetString("oidc-issuer") })

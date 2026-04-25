@@ -134,7 +134,10 @@ type VectorChunkConfig struct {
 }
 
 type VersioningConfig struct {
-	Strategy string `toml:"strategy"` // git | cow | none
+	Strategy      string `toml:"strategy"`        // git | cow | none
+	AsyncCommit   *bool  `toml:"async_commit"`    // default true for git
+	BatchWindowMs int    `toml:"batch_window_ms"` // default 200
+	BatchMaxSize  int    `toml:"batch_max_size"`  // default 50
 	// MaxVersions caps the number of snapshots kept per file when strategy =
 	// "cow". Zero means "unbounded" (not recommended — .versions/ grows
 	// forever). The spec default is 100; callers that want explicit opt-in

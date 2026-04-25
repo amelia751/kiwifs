@@ -300,6 +300,10 @@ func (g *Git) Diff(ctx context.Context, path, fromHash, toHash string) (string, 
 	return g.output(ctx, "git", "diff", fromHash, toHash, "--", path)
 }
 
+func (g *Git) GC(ctx context.Context) error {
+	return g.run(ctx, "git", "gc", "--auto")
+}
+
 func (g *Git) Blame(ctx context.Context, path string) ([]BlameLine, error) {
 	out, err := g.output(ctx, "git", "blame", "--porcelain", "--", path)
 	if err != nil {

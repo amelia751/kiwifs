@@ -111,6 +111,43 @@ func TestLocalAllowsInternalSymlink(t *testing.T) {
 	}
 }
 
+func TestLocalWriteAtomic(t *testing.T) {
+	dir := t.TempDir()
+	l, err := NewLocal(dir)
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	ctx := context.Background()
+	path := "atomic/test.md"
+
+	if err := l.Write(ctx, path, []byte("first")); err != nil {
+		t.Fatalf("write 1: %v", err)
+	}
+	got, err := l.Read(ctx, path)
+	if err != nil || string(got) != "first" {
+		t.Fatalf("read 1: %q %v", got, err)
+	}
+
+	if err := l.Write(ctx, path, []byte("second")); err != nil {
+		t.Fatalf("write 2: %v", err)
+	}
+	got, err = l.Read(ctx, path)
+	if err != nil || string(got) != "second" {
+		t.Fatalf("read 2: want %q got %q err %v", "second", got, err)
+	}
+
+	// Verify no temp files remain after a successful write.
+	entries, err := os.ReadDir(filepath.Join(dir, "atomic"))
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".kiwi-write-") {
+			t.Fatalf("leftover temp file: %s", e.Name())
+		}
+	}
+}
+
 func TestLocalConfinesTraversalToRoot(t *testing.T) {
 	// filepath.Clean("/" + "../escape") → "/escape", so traversal attempts
 	// collapse onto root rather than escaping it. Verify the path the
