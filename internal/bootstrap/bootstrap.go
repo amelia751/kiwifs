@@ -89,6 +89,28 @@ func Build(name, root string, cfg *config.Config) (*Stack, error) {
 	hub := events.NewHub()
 	pipe := pipeline.New(store, ver, searcher, linker, hub, vectors, root)
 
+	asyncIdxEnabled := cfg.Search.AsyncIndex == nil || *cfg.Search.AsyncIndex
+	if asyncIdxEnabled && cfg.Search.Engine != "grep" {
+		var idxOpts []pipeline.IndexerOption
+		if cfg.Search.IndexWindowMs > 0 {
+			idxOpts = append(idxOpts, pipeline.WithIndexBatchWindow(
+				time.Duration(cfg.Search.IndexWindowMs)*time.Millisecond))
+		}
+		if cfg.Search.IndexBatchMax > 0 {
+			idxOpts = append(idxOpts, pipeline.WithIndexBatchMax(cfg.Search.IndexBatchMax))
+		}
+		idxJournal := filepath.Join(root, ".kiwi", "state", "unindexed.log")
+		idxOpts = append(idxOpts, pipeline.WithIndexJournal(idxJournal))
+		pipe.AsyncIdx = pipeline.NewAsyncIndexer(searcher, linker, vectors, idxOpts...)
+		log.Printf("%sasync indexing enabled (window=%dms)",
+			prefix, func() int {
+				if cfg.Search.IndexWindowMs > 0 {
+					return cfg.Search.IndexWindowMs
+				}
+				return 200
+			}())
+	}
+
 	pipe.OnInvalidate = func() { linkResolver.MarkDirty() }
 
 	cstore, err := comments.New(root)
@@ -170,6 +192,12 @@ func Build(name, root string, cfg *config.Config) (*Stack, error) {
 
 func (s *Stack) Close() error {
 	var firstErr error
+	// Flush async indexer before closing the searcher it writes to.
+	if s.Pipeline != nil && s.Pipeline.AsyncIdx != nil {
+		if err := s.Pipeline.AsyncIdx.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
 	if c, ok := s.Versioner.(interface{ Close() error }); ok {
 		if err := c.Close(); err != nil && firstErr == nil {
 			firstErr = err

@@ -87,6 +87,12 @@ type Pipeline struct {
 	// appended here so it can be retried on the next successful commit or
 	// at process startup. Empty disables the feature (tests).
 	uncommittedLog string
+
+	// AsyncIdx, when non-nil, defers search/links/meta indexing to a
+	// background goroutine. Writes return immediately after Store.Write +
+	// Versioner.Commit; the index catches up within the batch window
+	// (~200ms). Set via pipeline.New options or injected by bootstrap.
+	AsyncIdx *AsyncIndexer
 }
 
 // Result is returned from Write so callers can set ETag headers, log, etc.
@@ -163,9 +169,19 @@ type allRemover interface {
 }
 
 // indexFile pushes content into every index (search, links, vectors, meta).
-// Errors are logged, not returned — side-effect failures must not block
-// the write that triggered them. Caller must hold writeMu.
+// When AsyncIdx is set, it enqueues and returns immediately. Otherwise it
+// runs synchronously. Errors are logged, not returned — side-effect
+// failures must not block the write that triggered them.
 func (p *Pipeline) indexFile(ctx context.Context, path string, content []byte) {
+	if p.AsyncIdx != nil {
+		p.AsyncIdx.Enqueue(path, content)
+		return
+	}
+	p.indexFileSync(ctx, path, content)
+}
+
+// indexFileSync is the synchronous implementation of indexFile.
+func (p *Pipeline) indexFileSync(ctx context.Context, path string, content []byte) {
 	if err := p.Searcher.Index(ctx, path, content); err != nil {
 		log.Printf("pipeline: searcher.Index(%s): %v", path, err)
 	}
@@ -202,8 +218,18 @@ func (p *Pipeline) indexFileNonSearch(ctx context.Context, path string, content 
 	}
 }
 
-// deindexFile removes a path from every index. Caller must hold writeMu.
+// deindexFile removes a path from every index. When AsyncIdx is set,
+// it enqueues a delete and returns immediately.
 func (p *Pipeline) deindexFile(ctx context.Context, path string) {
+	if p.AsyncIdx != nil {
+		p.AsyncIdx.EnqueueDelete(path)
+		return
+	}
+	p.deindexFileSync(ctx, path)
+}
+
+// deindexFileSync is the synchronous implementation of deindexFile.
+func (p *Pipeline) deindexFileSync(ctx context.Context, path string) {
 	if ra, ok := p.Searcher.(allRemover); ok {
 		if err := ra.RemoveAll(ctx, path); err != nil {
 			log.Printf("pipeline: searcher.RemoveAll(%s): %v", path, err)
@@ -646,7 +672,11 @@ func (p *Pipeline) BulkWrite(ctx context.Context, files []struct {
 		paths = append(paths, f.Path)
 		out = append(out, Result{Path: f.Path, ETag: ETag(f.Content)})
 	}
-	if bi, ok := p.Searcher.(search.BatchIndexer); ok {
+	if p.AsyncIdx != nil {
+		for _, f := range files {
+			p.AsyncIdx.Enqueue(f.Path, f.Content)
+		}
+	} else if bi, ok := p.Searcher.(search.BatchIndexer); ok {
 		entries := make([]search.IndexEntry, len(files))
 		for i, f := range files {
 			entries[i] = search.IndexEntry{Path: f.Path, Content: f.Content}
@@ -659,7 +689,7 @@ func (p *Pipeline) BulkWrite(ctx context.Context, files []struct {
 		}
 	} else {
 		for _, f := range files {
-			p.indexFile(ctx, f.Path, f.Content)
+			p.indexFileSync(ctx, f.Path, f.Content)
 		}
 	}
 	if message == "" {

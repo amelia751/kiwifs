@@ -82,8 +82,11 @@ type StorageConfig struct {
 }
 
 type SearchConfig struct {
-	Engine string       `toml:"engine"` // grep | sqlite
-	Vector VectorConfig `toml:"vector"`
+	Engine         string       `toml:"engine"` // grep | sqlite
+	AsyncIndex     *bool        `toml:"async_index"`      // default true for sqlite
+	IndexWindowMs  int          `toml:"index_window_ms"`  // default 200
+	IndexBatchMax  int          `toml:"index_batch_max"`  // default 100
+	Vector         VectorConfig `toml:"vector"`
 }
 
 // VectorConfig turns on semantic search and wires an embedder to a store.
