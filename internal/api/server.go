@@ -298,6 +298,10 @@ func (s *Server) setupRoutes() {
 	api.GET("/query", h.Query)
 	api.GET("/query/aggregate", h.QueryAggregate)
 	api.POST("/view/refresh", h.ViewRefresh)
+	api.POST("/import", h.Import)
+	api.GET("/export", h.Export)
+	api.GET("/analytics", h.Analytics)
+	api.GET("/health-check", h.HealthCheck)
 
 	api.POST("/share", h.CreateShareLink)
 	api.GET("/share", h.ListShareLinks)

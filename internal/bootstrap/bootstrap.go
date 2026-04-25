@@ -257,7 +257,7 @@ func buildVersioner(prefix, root string, cfg *config.Config) versioning.Versione
 func buildSearcher(prefix, root string, store storage.Storage, cfg *config.Config) search.Searcher {
 	switch cfg.Search.Engine {
 	case "sqlite", "fts5":
-		sq, err := search.NewSQLite(root, store)
+		sq, err := search.NewSQLite(root, store, cfg.Dataview.CustomFields)
 		if err != nil {
 			log.Printf("%ssqlite search unavailable (%v) — falling back to grep", prefix, err)
 			return search.NewGrep(root)

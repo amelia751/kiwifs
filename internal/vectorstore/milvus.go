@@ -204,6 +204,38 @@ func (m *Milvus) Search(ctx context.Context, vector []float32, topK int) ([]Resu
 	return out, nil
 }
 
+func (m *Milvus) GetVectors(ctx context.Context, path string) ([]Chunk, error) {
+	body := map[string]any{
+		"collectionName": m.collection,
+		"filter":         fmt.Sprintf(`path == "%s"`, escapeMilvusString(path)),
+		"outputFields":   []string{"id", "path", "chunk_idx", "text", "vector"},
+		"limit":          1000,
+	}
+	var parsed struct {
+		Data []struct {
+			ID       string    `json:"id"`
+			Path     string    `json:"path"`
+			ChunkIdx int       `json:"chunk_idx"`
+			Text     string    `json:"text"`
+			Vector   []float32 `json:"vector"`
+		} `json:"data"`
+	}
+	if err := m.do(ctx, http.MethodPost, "/v2/vectordb/entities/query", body, &parsed); err != nil {
+		return nil, fmt.Errorf("milvus GetVectors: %w", err)
+	}
+	chunks := make([]Chunk, len(parsed.Data))
+	for i, r := range parsed.Data {
+		chunks[i] = Chunk{
+			ID:       r.ID,
+			Path:     r.Path,
+			ChunkIdx: r.ChunkIdx,
+			Text:     r.Text,
+			Vector:   r.Vector,
+		}
+	}
+	return chunks, nil
+}
+
 func (m *Milvus) Close() error { return nil }
 
 func escapeMilvusString(s string) string {

@@ -38,6 +38,7 @@ type Store interface {
 	Upsert(ctx context.Context, chunks []Chunk) error
 	RemoveByPath(ctx context.Context, path string) error
 	Search(ctx context.Context, vector []float32, topK int) ([]Result, error)
+	GetVectors(ctx context.Context, path string) ([]Chunk, error)
 	Reset(ctx context.Context) error
 	Count(ctx context.Context) (int, error)
 	Close() error

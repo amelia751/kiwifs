@@ -169,4 +169,8 @@ func (p *Pinecone) Search(ctx context.Context, vector []float32, topK int) ([]Re
 	return out, nil
 }
 
+func (p *Pinecone) GetVectors(ctx context.Context, path string) ([]Chunk, error) {
+	return nil, nil
+}
+
 func (p *Pinecone) Close() error { return nil }

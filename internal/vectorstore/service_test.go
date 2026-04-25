@@ -55,7 +55,8 @@ func (s *fakeStore) RemoveByPath(ctx context.Context, path string) error {
 	s.removes = append(s.removes, path)
 	return nil
 }
-func (s *fakeStore) Search(context.Context, []float32, int) ([]Result, error) { return nil, nil }
+func (s *fakeStore) Search(context.Context, []float32, int) ([]Result, error)    { return nil, nil }
+func (s *fakeStore) GetVectors(context.Context, string) ([]Chunk, error)        { return nil, nil }
 func (s *fakeStore) Reset(context.Context) error                              { return nil }
 func (s *fakeStore) Count(context.Context) (int, error)                       { return 0, nil }
 func (s *fakeStore) Close() error                                             { return nil }

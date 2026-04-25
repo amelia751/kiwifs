@@ -299,6 +299,14 @@ func (s *Service) Reindex(ctx context.Context) (int, error) {
 	return count, nil
 }
 
+// GetVectors retrieves all stored chunks (with vectors) for a given file path.
+func (s *Service) GetVectors(ctx context.Context, path string) ([]Chunk, error) {
+	if s.store == nil {
+		return nil, nil
+	}
+	return s.store.GetVectors(ctx, path)
+}
+
 // Count reports the number of vectors currently in the store.
 func (s *Service) Count(ctx context.Context) (int, error) {
 	return s.store.Count(ctx)
