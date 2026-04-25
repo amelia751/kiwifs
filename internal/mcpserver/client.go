@@ -320,6 +320,32 @@ func (r *RemoteBackend) Backlinks(ctx context.Context, path string) ([]Backlink,
 	return result.Backlinks, nil
 }
 
+func (r *RemoteBackend) PublicURL() string { return "" }
+
+func (r *RemoteBackend) ResolveWikiLinks(ctx context.Context, content string) string {
+	body := fmt.Sprintf(`{"content":%s}`, mustMarshalString(content))
+	resp, err := r.do(ctx, http.MethodPost, r.apiPrefix+"/resolve-links", strings.NewReader(body), "Content-Type", "application/json")
+	if err != nil {
+		return content
+	}
+	data, err := r.readBody(resp)
+	if err != nil {
+		return content
+	}
+	var result struct {
+		Content string `json:"content"`
+	}
+	if json.Unmarshal(data, &result) == nil && result.Content != "" {
+		return result.Content
+	}
+	return content
+}
+
+func mustMarshalString(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
+}
+
 func (r *RemoteBackend) Health(ctx context.Context) error {
 	resp, err := r.do(ctx, http.MethodGet, "/health", nil)
 	if err != nil {

@@ -48,6 +48,8 @@ type Handlers struct {
 	assets    config.AssetsConfig
 	ui        config.UIConfig
 	root      string
+	publicURL    string
+	linkResolver *links.Resolver
 
 	// graphCache stores the last-computed /graph response; pipeline
 	// invalidation callbacks nil it out on every write. atomic.Pointer is
@@ -75,11 +77,12 @@ func (h *Handlers) Health(c echo.Context) error {
 // ─── Tree ────────────────────────────────────────────────────────────────────
 
 type treeEntry struct {
-	Path     string       `json:"path"`
-	Name     string       `json:"name"`
-	IsDir    bool         `json:"isDir"`
-	Size     int64        `json:"size,omitempty"`
-	Children []*treeEntry `json:"children,omitempty"`
+	Path      string       `json:"path"`
+	Name      string       `json:"name"`
+	IsDir     bool         `json:"isDir"`
+	Size      int64        `json:"size,omitempty"`
+	Permalink string       `json:"permalink,omitempty"`
+	Children  []*treeEntry `json:"children,omitempty"`
 }
 
 // maxTreeDepth caps buildTree recursion so a deeply nested folder — or
@@ -102,6 +105,7 @@ func (h *Handlers) Tree(c echo.Context) error {
 		}
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
+	h.addPermalinks(tree)
 	return c.JSON(http.StatusOK, tree)
 }
 
@@ -138,6 +142,18 @@ func (h *Handlers) buildTree(ctx context.Context, path string, depth int) (*tree
 		root.Children = append(root.Children, child)
 	}
 	return root, nil
+}
+
+func (h *Handlers) addPermalinks(entry *treeEntry) {
+	if entry == nil {
+		return
+	}
+	if !entry.IsDir && entry.Path != "" {
+		entry.Permalink = config.Permalink(h.publicURL, entry.Path)
+	}
+	for _, child := range entry.Children {
+		h.addPermalinks(child)
+	}
 }
 
 // ─── File Read ───────────────────────────────────────────────────────────────
@@ -193,6 +209,14 @@ func (h *Handlers) ReadFile(c echo.Context) error {
 		}
 	}
 
+	if pl := config.Permalink(h.publicURL, path); pl != "" {
+		c.Response().Header().Set("X-Permalink", pl)
+	}
+
+	if c.QueryParam("resolve_links") == "true" && h.publicURL != "" && h.linkResolver != nil {
+		content = []byte(h.linkResolver.Resolve(c.Request().Context(), string(content), h.publicURL))
+	}
+
 	return c.Blob(http.StatusOK, detectContentType(path, content), content)
 }
 
@@ -212,6 +236,30 @@ func detectContentType(path string, content []byte) string {
 		return ct
 	}
 	return "application/octet-stream"
+}
+
+// ─── Resolve Links ──────────────────────────────────────────────────────────
+
+type resolveLinksRequest struct {
+	Content string `json:"content"`
+}
+
+// ResolveLinks resolves [[wiki-links]] in the provided content to full
+// permalink URLs. Used by remote MCP backends that can't do local resolution.
+// POST /api/kiwi/resolve-links
+func (h *Handlers) ResolveLinks(c echo.Context) error {
+	var req resolveLinksRequest
+	if err := c.Bind(&req); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid JSON body")
+	}
+	if h.publicURL == "" {
+		return c.JSON(http.StatusOK, map[string]string{"content": req.Content})
+	}
+	resolved := req.Content
+	if h.linkResolver != nil {
+		resolved = h.linkResolver.Resolve(c.Request().Context(), req.Content, h.publicURL)
+	}
+	return c.JSON(http.StatusOK, map[string]string{"content": resolved})
 }
 
 // ─── File Write ──────────────────────────────────────────────────────────────
@@ -599,11 +647,19 @@ func (h *Handlers) DeleteFile(c echo.Context) error {
 
 // ─── Search ──────────────────────────────────────────────────────────────────
 
+type searchResultEntry struct {
+	Path      string         `json:"path"`
+	Matches   []search.Match `json:"matches"`
+	Score     float64        `json:"score,omitempty"`
+	Snippet   string         `json:"snippet,omitempty"`
+	Permalink string         `json:"permalink,omitempty"`
+}
+
 type searchResponse struct {
-	Query   string          `json:"query"`
-	Limit   int             `json:"limit"`
-	Offset  int             `json:"offset"`
-	Results []search.Result `json:"results"`
+	Query   string              `json:"query"`
+	Limit   int                 `json:"limit"`
+	Offset  int                 `json:"offset"`
+	Results []searchResultEntry `json:"results"`
 }
 
 // Search performs a full-text search across all .md files. Supports
@@ -669,11 +725,21 @@ func (h *Handlers) Search(c echo.Context) error {
 			}
 		}
 	}
+	entries := make([]searchResultEntry, len(results))
+	for i, r := range results {
+		entries[i] = searchResultEntry{
+			Path:      r.Path,
+			Matches:   r.Matches,
+			Score:     r.Score,
+			Snippet:   r.Snippet,
+			Permalink: config.Permalink(h.publicURL, r.Path),
+		}
+	}
 	return c.JSON(http.StatusOK, searchResponse{
 		Query:   q,
 		Limit:   limit,
 		Offset:  offset,
-		Results: results,
+		Results: entries,
 	})
 }
 
@@ -794,11 +860,17 @@ type metaQuerier interface {
 	QueryMeta(ctx context.Context, filters []search.MetaFilter, sort, order string, limit, offset int) ([]search.MetaResult, error)
 }
 
+type metaResultEntry struct {
+	Path        string         `json:"path"`
+	Frontmatter map[string]any `json:"frontmatter"`
+	Permalink   string         `json:"permalink,omitempty"`
+}
+
 type metaResponse struct {
-	Count   int                  `json:"count"`
-	Limit   int                  `json:"limit"`
-	Offset  int                  `json:"offset"`
-	Results []search.MetaResult  `json:"results"`
+	Count   int               `json:"count"`
+	Limit   int               `json:"limit"`
+	Offset  int               `json:"offset"`
+	Results []metaResultEntry `json:"results"`
 }
 
 // Meta runs a structured query against the file_meta index. Useful for
@@ -846,11 +918,19 @@ func (h *Handlers) Meta(c echo.Context) error {
 	if err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 	}
+	entries := make([]metaResultEntry, len(results))
+	for i, r := range results {
+		entries[i] = metaResultEntry{
+			Path:        r.Path,
+			Frontmatter: r.Frontmatter,
+			Permalink:   config.Permalink(h.publicURL, r.Path),
+		}
+	}
 	return c.JSON(http.StatusOK, metaResponse{
-		Count:   len(results),
+		Count:   len(entries),
 		Limit:   search.NormalizeLimit(limit),
 		Offset:  search.NormalizeOffset(offset),
-		Results: results,
+		Results: entries,
 	})
 }
 

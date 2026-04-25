@@ -16,6 +16,7 @@ import (
 	"github.com/kiwifs/kiwifs/internal/comments"
 	"github.com/kiwifs/kiwifs/internal/config"
 	"github.com/kiwifs/kiwifs/internal/events"
+	"github.com/kiwifs/kiwifs/internal/links"
 	"github.com/kiwifs/kiwifs/internal/pipeline"
 	"github.com/kiwifs/kiwifs/internal/vectorstore"
 	"github.com/kiwifs/kiwifs/internal/webui"
@@ -28,11 +29,12 @@ import (
 // Pipeline — storing them again here would be duplication that drifts when
 // the bootstrap wiring changes.
 type Server struct {
-	cfg      *config.Config
-	pipe     *pipeline.Pipeline
-	vectors  *vectorstore.Service // nil when vector search is disabled
-	comments *comments.Store
-	echo     *echo.Echo
+	cfg          *config.Config
+	pipe         *pipeline.Pipeline
+	vectors      *vectorstore.Service // nil when vector search is disabled
+	comments     *comments.Store
+	linkResolver *links.Resolver
+	echo         *echo.Echo
 }
 
 // NewServer creates and configures the server. The pipeline carries every
@@ -43,10 +45,12 @@ func NewServer(
 	pipe *pipeline.Pipeline,
 	vectors *vectorstore.Service,
 	cstore *comments.Store,
+	lr *links.Resolver,
 ) *Server {
 	s := &Server{
-		cfg:      cfg,
-		pipe:     pipe,
+		cfg:          cfg,
+		pipe:         pipe,
+		linkResolver: lr,
 		vectors:  vectors,
 		comments: cstore,
 		echo:     echo.New(),
@@ -116,7 +120,7 @@ func (s *Server) setupMiddleware() {
 		AllowOriginFunc: s.corsOriginAllowed,
 		AllowMethods:    []string{http.MethodGet, http.MethodPut, http.MethodPost, http.MethodDelete, http.MethodOptions},
 		AllowHeaders:    []string{"Content-Type", "Authorization", "If-Match", "X-Actor", "X-Provenance"},
-		ExposeHeaders:   []string{"ETag", "Last-Modified"},
+		ExposeHeaders:   []string{"ETag", "Last-Modified", "X-Permalink"},
 	}))
 	s.echo.Use(middleware.Recover())
 	// Cap request bodies so a single malicious PUT / bulk write can't OOM
@@ -189,7 +193,9 @@ func (s *Server) setupRoutes() {
 		comments:  s.comments,
 		assets:    s.cfg.Assets,
 		ui:        s.cfg.UI,
-		root:      s.pipe.Store.AbsPath(""),
+		root:         s.pipe.Store.AbsPath(""),
+		publicURL:    s.cfg.ResolvedPublicURL(),
+		linkResolver: s.linkResolver,
 	}
 	// Chain cache invalidation onto the pipeline's fan-out so any write —
 	// REST, WebDAV, NFS, S3, fsnotify — drops the /graph cache. Chained
@@ -216,6 +222,7 @@ func (s *Server) setupRoutes() {
 	api.DELETE("/file", h.DeleteFile)
 	api.POST("/bulk", h.BulkWrite)
 	api.POST("/assets", h.UploadAsset)
+	api.POST("/resolve-links", h.ResolveLinks)
 	api.GET("/search", h.Search)
 	api.POST("/search/semantic", h.SemanticSearch)
 	api.GET("/search/semantic", h.SemanticSearch)

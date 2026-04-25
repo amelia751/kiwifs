@@ -323,6 +323,21 @@ func (b *LocalBackend) Backlinks(ctx context.Context, path string) ([]Backlink, 
 	return out, nil
 }
 
+func (b *LocalBackend) PublicURL() string {
+	if b.stack == nil {
+		return ""
+	}
+	return b.stack.Config.ResolvedPublicURL()
+}
+
+func (b *LocalBackend) ResolveWikiLinks(ctx context.Context, content string) string {
+	if b.stack == nil || b.stack.LinkResolver == nil {
+		return content
+	}
+	publicURL := b.stack.Config.ResolvedPublicURL()
+	return b.stack.LinkResolver.Resolve(ctx, content, publicURL)
+}
+
 func (b *LocalBackend) Health(_ context.Context) error {
 	return b.init()
 }

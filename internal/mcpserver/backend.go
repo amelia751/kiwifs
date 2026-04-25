@@ -49,6 +49,8 @@ type Backend interface {
 	Versions(ctx context.Context, path string) ([]Version, error)
 	BulkWrite(ctx context.Context, files []BulkFile, actor, provenance string) (map[string]string, error)
 	Backlinks(ctx context.Context, path string) ([]Backlink, error)
+	ResolveWikiLinks(ctx context.Context, content string) string
+	PublicURL() string
 	Health(ctx context.Context) error
 	Close() error
 }

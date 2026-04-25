@@ -9,7 +9,7 @@ import rehypeAutolinkHeadings from "rehype-autolink-headings";
 import matter from "gray-matter";
 import Zoom from "react-medium-image-zoom";
 import "react-medium-image-zoom/dist/styles.css";
-import { AlertTriangle, Calendar, ChevronDown, ChevronRight, Edit, FileAxis3D, History as HistoryIcon, Link2, MessageSquareQuote, Pin, Star, Tag, User } from "lucide-react";
+import { AlertTriangle, Calendar, ChevronDown, ChevronRight, Edit, FileAxis3D, FileQuestion, History as HistoryIcon, Link2, MessageSquareQuote, Pin, Plus, Star, Tag, User } from "lucide-react";
 import { api, type TreeEntry } from "@/lib/api";
 import { titleize } from "@/lib/paths";
 import { KiwiBreadcrumb } from "./KiwiBreadcrumb";
@@ -130,10 +130,34 @@ export function KiwiPage({ path, tree, onNavigate, onEdit, onHistory, onToggleSt
   const otherBadges = badges.filter((b) => b.key !== "status" && b.key !== "tags");
 
   if (error) {
+    const is404 = error.startsWith("Error: 404") || error.includes("404");
     return (
       <div className="flex flex-col h-full">
         <StickyBreadcrumb path={path} onNavigate={onNavigate} />
-        <div className="p-8 text-sm text-destructive font-mono">{error}</div>
+        {is404 ? (
+          <div className="flex-1 grid place-items-center">
+            <div className="text-center max-w-md px-8">
+              <FileQuestion className="h-12 w-12 mx-auto mb-4 text-muted-foreground/50" />
+              <h2 className="text-lg font-semibold text-foreground mb-1">Page not found</h2>
+              <p className="text-sm text-muted-foreground mb-1">
+                <code className="font-mono text-xs bg-muted px-1.5 py-0.5 rounded">{path}</code>
+              </p>
+              <p className="text-sm text-muted-foreground mb-6">
+                This page may have been moved, renamed, or deleted.
+              </p>
+              <div className="flex flex-col gap-2 items-center">
+                <Button size="sm" onClick={() => onNavigate("")} className="gap-2">
+                  Go to index
+                </Button>
+                <Button variant="outline" size="sm" onClick={() => onNavigate(path)} className="gap-2">
+                  <Plus className="h-3.5 w-3.5" /> Create this page
+                </Button>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className="p-8 text-sm text-destructive font-mono">{error}</div>
+        )}
       </div>
     );
   }

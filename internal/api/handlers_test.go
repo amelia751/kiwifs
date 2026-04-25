@@ -15,6 +15,7 @@ import (
 	"github.com/kiwifs/kiwifs/internal/comments"
 	"github.com/kiwifs/kiwifs/internal/config"
 	"github.com/kiwifs/kiwifs/internal/events"
+	"github.com/kiwifs/kiwifs/internal/links"
 	"github.com/kiwifs/kiwifs/internal/markdown"
 	"github.com/kiwifs/kiwifs/internal/pipeline"
 	"github.com/kiwifs/kiwifs/internal/search"
@@ -42,7 +43,7 @@ func buildTestServer(t *testing.T) *Server {
 	}
 	cfg := &config.Config{}
 	cfg.Storage.Root = dir
-	return NewServer(cfg, pipe, nil, cstore)
+	return NewServer(cfg, pipe, nil, cstore, nil)
 }
 
 // buildSQLiteTestServer is the same wiring as buildTestServer but swaps in
@@ -69,7 +70,7 @@ func buildSQLiteTestServer(t *testing.T) (*Server, string) {
 	}
 	cfg := &config.Config{}
 	cfg.Storage.Root = dir
-	return NewServer(cfg, pipe, nil, cstore), dir
+	return NewServer(cfg, pipe, nil, cstore, nil), dir
 }
 
 // TestMetaEndpoint covers the happy path: write a markdown file with
@@ -298,7 +299,7 @@ func TestPerSpaceKeyMiddlewareValidates(t *testing.T) {
 		{Key: "secret-team-a", Space: "team-a", Actor: "alice"},
 		{Key: "secret-team-b", Space: "team-b", Actor: "bob"},
 	}
-	s := NewServer(cfg, pipe, nil, cstore)
+	s := NewServer(cfg, pipe, nil, cstore, nil)
 
 	cases := []struct {
 		name   string
@@ -721,7 +722,7 @@ func buildTestServerWithAssets(t *testing.T, assets config.AssetsConfig) *Server
 	}
 	cfg := &config.Config{Assets: assets}
 	cfg.Storage.Root = dir
-	return NewServer(cfg, pipe, nil, cstore)
+	return NewServer(cfg, pipe, nil, cstore, nil)
 }
 
 func TestReadFileLastModified(t *testing.T) {
@@ -850,4 +851,130 @@ func TestGraphCachingAndInvalidation(t *testing.T) {
 	if third.Body.String() == second.Body.String() {
 		t.Fatalf("invalidation didn't refresh response")
 	}
+}
+
+func buildTestServerWithPublicURL(t *testing.T, publicURL string) *Server {
+	t.Helper()
+	dir := t.TempDir()
+	store, err := storage.NewLocal(dir)
+	if err != nil {
+		t.Fatalf("storage: %v", err)
+	}
+	searcher := search.NewGrep(dir)
+	ver := versioning.NewNoop()
+	hub := events.NewHub()
+	pipe := pipeline.New(store, ver, searcher, nil, hub, nil, "")
+	cstore, err := comments.New(dir)
+	if err != nil {
+		t.Fatalf("comments: %v", err)
+	}
+	lr := links.NewResolver(func(ctx context.Context, fn func(path string)) error {
+		return storage.Walk(ctx, store, "/", func(e storage.Entry) error {
+			fn(e.Path)
+			return nil
+		})
+	})
+	pipe.OnInvalidate = func() { lr.MarkDirty() }
+	cfg := &config.Config{}
+	cfg.Storage.Root = dir
+	cfg.Server.PublicURL = publicURL
+	return NewServer(cfg, pipe, nil, cstore, lr)
+}
+
+func TestResolveLinksEndpoint(t *testing.T) {
+	s := buildTestServerWithPublicURL(t, "https://wiki.co")
+
+	req := httptest.NewRequest(http.MethodPut, "/api/kiwi/file?path=concepts/auth.md", strings.NewReader("# Auth\n"))
+	rec := httptest.NewRecorder()
+	s.echo.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("seed: %d %s", rec.Code, rec.Body.String())
+	}
+
+	t.Run("resolves wiki links", func(t *testing.T) {
+		body := `{"content":"See [[auth]] for details."}`
+		req := httptest.NewRequest(http.MethodPost, "/api/kiwi/resolve-links", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		s.echo.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("POST resolve-links: %d %s", rec.Code, rec.Body.String())
+		}
+		var out struct {
+			Content string `json:"content"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if !strings.Contains(out.Content, "https://wiki.co/page/concepts/auth.md") {
+			t.Fatalf("expected resolved link, got: %s", out.Content)
+		}
+	})
+
+	t.Run("returns unchanged when public_url empty", func(t *testing.T) {
+		s2 := buildTestServerWithPublicURL(t, "")
+		body := `{"content":"See [[auth]] for details."}`
+		req := httptest.NewRequest(http.MethodPost, "/api/kiwi/resolve-links", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		s2.echo.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("POST: %d", rec.Code)
+		}
+		var out struct {
+			Content string `json:"content"`
+		}
+		json.Unmarshal(rec.Body.Bytes(), &out)
+		if out.Content != "See [[auth]] for details." {
+			t.Fatalf("expected unchanged content, got: %s", out.Content)
+		}
+	})
+}
+
+func TestReadFileResolveLinks(t *testing.T) {
+	s := buildTestServerWithPublicURL(t, "https://wiki.co")
+
+	req := httptest.NewRequest(http.MethodPut, "/api/kiwi/file?path=concepts/auth.md", strings.NewReader("# Auth\n"))
+	rec := httptest.NewRecorder()
+	s.echo.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("seed auth.md: %d", rec.Code)
+	}
+
+	content := "See [[auth]] for details.\n"
+	req = httptest.NewRequest(http.MethodPut, "/api/kiwi/file?path=readme.md", strings.NewReader(content))
+	rec = httptest.NewRecorder()
+	s.echo.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("seed readme.md: %d", rec.Code)
+	}
+
+	t.Run("resolve_links=true rewrites links", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/kiwi/file?path=readme.md&resolve_links=true", nil)
+		rec := httptest.NewRecorder()
+		s.echo.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET: %d", rec.Code)
+		}
+		body := rec.Body.String()
+		if !strings.Contains(body, "https://wiki.co/page/concepts/auth.md") {
+			t.Fatalf("expected resolved link in body, got: %s", body)
+		}
+		if strings.Contains(body, "[[auth]]") {
+			t.Fatalf("wiki link not replaced: %s", body)
+		}
+	})
+
+	t.Run("without resolve_links keeps wiki links", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/kiwi/file?path=readme.md", nil)
+		rec := httptest.NewRecorder()
+		s.echo.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET: %d", rec.Code)
+		}
+		body := rec.Body.String()
+		if !strings.Contains(body, "[[auth]]") {
+			t.Fatalf("expected raw wiki link, got: %s", body)
+		}
+	})
 }

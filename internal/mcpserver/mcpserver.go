@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/kiwifs/kiwifs/internal/config"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )
@@ -71,6 +72,7 @@ func registerTools(s *server.MCPServer, b Backend, opts Options) {
 			Tool: mcp.NewTool("kiwi_read",
 				mcp.WithDescription("Read a markdown file from the knowledge base. Use this to check existing knowledge before writing — e.g. read the coverage strategy before deciding what to test, or read failure patterns to check if a similar failure has been seen before."),
 				mcp.WithString("path", pathOpts...),
+				mcp.WithBoolean("resolve_links", mcp.Description("When true, resolve [[wiki-links]] to full permalink URLs in the returned content. Default false (raw markdown).")),
 				mcp.WithReadOnlyHintAnnotation(true),
 				mcp.WithDestructiveHintAnnotation(false),
 			),
@@ -105,6 +107,7 @@ func registerTools(s *server.MCPServer, b Backend, opts Options) {
 				mcp.WithDescription("List files and folders in the knowledge base. Use this to understand what knowledge exists before reading or writing. Returns an indented tree with file sizes."),
 				mcp.WithString("path", mcp.Description("Subtree root, defaults to root"), mcp.MaxLength(500), mcp.Pattern(`^[^.][a-zA-Z0-9/_\-. ]*$`)),
 				mcp.WithNumber("depth", mcp.Description("Tree depth (default 3)")),
+				mcp.WithBoolean("include_permalinks", mcp.Description("When true, include permalink URLs next to each file. Default false.")),
 				mcp.WithReadOnlyHintAnnotation(true),
 				mcp.WithDestructiveHintAnnotation(false),
 			),
@@ -217,7 +220,7 @@ func registerResources(s *server.MCPServer, b Backend, opts Options) {
 			if decoded, err := url.PathUnescape(path); err == nil {
 				path = decoded
 			}
-			text, err := treeText(ctx, b, path, 3)
+			text, err := treeText(ctx, b, path, 3, "")
 			if err != nil {
 				return nil, err
 			}
@@ -262,6 +265,9 @@ func handleRead(b Backend) server.ToolHandlerFunc {
 				return mcp.NewToolResultError(fmt.Sprintf("File not found at %s. Use kiwi_tree to see available files.", path)), nil
 			}
 			return mcp.NewToolResultError(fmt.Sprintf("Failed to read %s: %v", path, err)), nil
+		}
+		if resolveLinks, _ := args["resolve_links"].(bool); resolveLinks {
+			content = b.ResolveWikiLinks(ctx, content)
 		}
 		result := content
 		if etag != "" {
@@ -349,7 +355,12 @@ func handleTree(b Backend, opts Options) server.ToolHandlerFunc {
 		}
 		depth := intArg(args, "depth", 3)
 
-		text, err := treeText(ctx, b, path, depth)
+		var publicURL string
+		if incl, _ := args["include_permalinks"].(bool); incl {
+			publicURL = b.PublicURL()
+		}
+
+		text, err := treeText(ctx, b, path, depth, publicURL)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("Failed to list tree: %v", err)), nil
 		}
@@ -360,12 +371,12 @@ func handleTree(b Backend, opts Options) server.ToolHandlerFunc {
 	}
 }
 
-func treeText(ctx context.Context, b Backend, path string, depth int) (string, error) {
+func treeText(ctx context.Context, b Backend, path string, depth int, publicURL string) (string, error) {
 	tree, err := b.Tree(ctx, path)
 	if err != nil {
 		return "", err
 	}
-	return formatTreeJSON(tree, depth), nil
+	return formatTreeJSON(tree, depth, publicURL), nil
 }
 
 type treeNode struct {
@@ -376,7 +387,7 @@ type treeNode struct {
 	Children []treeNode `json:"children"`
 }
 
-func formatTreeJSON(data json.RawMessage, depth int) string {
+func formatTreeJSON(data json.RawMessage, depth int, publicURL string) string {
 	var root struct {
 		Children []treeNode `json:"children"`
 	}
@@ -384,19 +395,23 @@ func formatTreeJSON(data json.RawMessage, depth int) string {
 		return fmt.Sprintf("(error parsing tree: %v)", err)
 	}
 	var sb strings.Builder
-	writeTreeNodes(&sb, root.Children, "", depth)
+	writeTreeNodes(&sb, root.Children, "", depth, publicURL)
 	return sb.String()
 }
 
-func writeTreeNodes(sb *strings.Builder, nodes []treeNode, prefix string, depth int) {
+func writeTreeNodes(sb *strings.Builder, nodes []treeNode, prefix string, depth int, publicURL string) {
 	for _, n := range nodes {
 		if n.IsDir {
 			sb.WriteString(prefix + n.Name + "/\n")
 			if depth > 0 {
-				writeTreeNodes(sb, n.Children, prefix+"  ", depth-1)
+				writeTreeNodes(sb, n.Children, prefix+"  ", depth-1, publicURL)
 			}
 		} else {
-			sb.WriteString(fmt.Sprintf("%s%s (%s)\n", prefix, n.Name, formatSize(n.Size)))
+			line := fmt.Sprintf("%s%s (%s)", prefix, n.Name, formatSize(n.Size))
+			if publicURL != "" && n.Path != "" {
+				line += "  " + config.Permalink(publicURL, n.Path)
+			}
+			sb.WriteString(line + "\n")
 		}
 	}
 }

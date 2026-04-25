@@ -153,9 +153,14 @@ export default function App() {
   }, [spaceKey]);
 
   useEffect(() => {
+    // Support both /page/{path} (new) and #/{path} (legacy) on initial load.
+    const pathname = window.location.pathname;
     const hash = window.location.hash.replace(/^#\/?/, "");
-    if (!hash) return;
-    const parts = hash.split("/");
+    const raw = pathname.startsWith("/page/")
+      ? decodeURIComponent(pathname.slice("/page/".length))
+      : hash;
+    if (!raw) return;
+    const parts = raw.split("/");
     api.listSpaces().then((res) => {
       const names = new Set(res.spaces.map((s) => s.name));
       if (parts.length > 1 && names.has(parts[0])) {
@@ -166,24 +171,53 @@ export default function App() {
         setSpaceKey((k) => k + 1);
         setRefreshKey((k) => k + 1);
       } else {
-        setActivePath(hash);
+        setActivePath(raw);
       }
     }).catch(() => {
-      setActivePath(hash);
+      setActivePath(raw);
     });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const fromPopState = useRef(false);
   useEffect(() => {
-    if (!activePath) return;
+    if (!activePath) {
+      if (window.location.pathname !== "/") {
+        window.history.pushState(null, "", "/");
+      }
+      return;
+    }
     const space = getCurrentSpace();
-    const frag = space && space !== "default"
-      ? `#/${space}/${activePath}`
-      : `#/${activePath}`;
-    if (window.location.hash !== frag) {
-      window.history.replaceState(null, "", frag);
+    const target = space && space !== "default"
+      ? `/page/${space}/${activePath}`
+      : `/page/${activePath}`;
+    if (window.location.pathname !== target) {
+      if (fromPopState.current) {
+        fromPopState.current = false;
+      } else {
+        window.history.pushState(null, "", target);
+      }
     }
   }, [activePath, spaceKey]);
+
+  useEffect(() => {
+    const onPopState = () => {
+      const pathname = window.location.pathname;
+      if (pathname.startsWith("/page/")) {
+        fromPopState.current = true;
+        const raw = decodeURIComponent(pathname.slice("/page/".length));
+        setActivePath(raw || null);
+        setEditing(false);
+        setGraphOpen(false);
+        setHistoryOpen(false);
+      } else if (pathname === "/") {
+        fromPopState.current = true;
+        setActivePath(null);
+      }
+    };
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, []);
 
   function navigate(path: string) {
     if (!path) {

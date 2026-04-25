@@ -126,7 +126,7 @@ func TestTree(t *testing.T) {
 	b, _ := setupTestBackend(t)
 	defer b.Close()
 
-	text, err := treeText(context.Background(), b, "/", 3)
+	text, err := treeText(context.Background(), b, "/", 3, "")
 	if err != nil {
 		t.Fatalf("treeText: %v", err)
 	}
@@ -494,7 +494,7 @@ func TestFormatTreeJSONRecursive(t *testing.T) {
 			{"name": "readme.md", "path": "readme.md", "isDir": false, "size": 256, "children": null}
 		]
 	}`
-	result := formatTreeJSON(json.RawMessage(tree), 5)
+	result := formatTreeJSON(json.RawMessage(tree), 5, "")
 	if !contains(result, "docs/") {
 		t.Errorf("missing docs/ in result: %s", result)
 	}
@@ -615,7 +615,7 @@ func TestNegativeLimitQueryMetaHandler(t *testing.T) {
 }
 
 func TestFormatTreeJSONParseFailure(t *testing.T) {
-	result := formatTreeJSON(json.RawMessage(`{invalid json`), 3)
+	result := formatTreeJSON(json.RawMessage(`{invalid json`), 3, "")
 	if strings.Contains(result, "{invalid") {
 		t.Fatalf("formatTreeJSON returned raw JSON on failure: %s", result)
 	}
@@ -736,6 +736,56 @@ func TestRemoteBackendErrorPaths(t *testing.T) {
 		_, _, err := rb.ReadFile(context.Background(), "test.md")
 		if err == nil {
 			t.Fatal("expected error for refused connection")
+		}
+	})
+}
+
+func TestRemoteResolveWikiLinks(t *testing.T) {
+	t.Run("returns resolved content", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				t.Errorf("expected POST, got %s", r.Method)
+			}
+			if !strings.HasSuffix(r.URL.Path, "/resolve-links") {
+				t.Errorf("unexpected path: %s", r.URL.Path)
+			}
+			body, _ := io.ReadAll(r.Body)
+			var req struct{ Content string }
+			json.Unmarshal(body, &req)
+			resolved := strings.ReplaceAll(req.Content, "[[auth]]", "[auth](https://wiki.co/page/concepts/auth.md)")
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{"content": resolved})
+		}))
+		defer srv.Close()
+
+		rb := NewRemoteBackend(srv.URL, "", "default")
+		got := rb.ResolveWikiLinks(context.Background(), "See [[auth]] for details.")
+		if !strings.Contains(got, "https://wiki.co/page/concepts/auth.md") {
+			t.Fatalf("expected resolved link, got: %s", got)
+		}
+	})
+
+	t.Run("returns original on server error", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(500)
+			w.Write([]byte(`{"message":"internal error"}`))
+		}))
+		defer srv.Close()
+
+		rb := NewRemoteBackend(srv.URL, "", "default")
+		original := "See [[auth]] for details."
+		got := rb.ResolveWikiLinks(context.Background(), original)
+		if got != original {
+			t.Fatalf("expected original content on error, got: %s", got)
+		}
+	})
+
+	t.Run("returns original on connection failure", func(t *testing.T) {
+		rb := NewRemoteBackend("http://127.0.0.1:1", "", "default")
+		original := "See [[auth]] for details."
+		got := rb.ResolveWikiLinks(context.Background(), original)
+		if got != original {
+			t.Fatalf("expected original content on connection failure, got: %s", got)
 		}
 	})
 }

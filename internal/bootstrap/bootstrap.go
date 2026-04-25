@@ -24,17 +24,19 @@ import (
 
 // Stack is the set of live components backing one knowledge space.
 type Stack struct {
-	Name      string
-	Root      string
-	Store     storage.Storage
-	Versioner versioning.Versioner
-	Searcher  search.Searcher
-	Linker    links.Linker
-	Hub       *events.Hub
-	Pipeline  *pipeline.Pipeline
-	Vectors   *vectorstore.Service // nil when disabled or build failed
-	Comments  *comments.Store
-	Server    *api.Server
+	Name         string
+	Root         string
+	Config       *config.Config
+	Store        storage.Storage
+	Versioner    versioning.Versioner
+	Searcher     search.Searcher
+	Linker       links.Linker
+	LinkResolver *links.Resolver
+	Hub          *events.Hub
+	Pipeline     *pipeline.Pipeline
+	Vectors      *vectorstore.Service // nil when disabled or build failed
+	Comments     *comments.Store
+	Server       *api.Server
 }
 
 // Build assembles every dependency for one space. name is used as a log
@@ -72,8 +74,17 @@ func Build(name, root string, cfg *config.Config) (*Stack, error) {
 		linker = l
 	}
 
+	linkResolver := links.NewResolver(func(ctx context.Context, fn func(path string)) error {
+		return storage.Walk(ctx, store, "/", func(e storage.Entry) error {
+			fn(e.Path)
+			return nil
+		})
+	})
+
 	hub := events.NewHub()
 	pipe := pipeline.New(store, ver, searcher, linker, hub, vectors, root)
+
+	pipe.OnInvalidate = func() { linkResolver.MarkDirty() }
 
 	cstore, err := comments.New(root)
 	if err != nil {
@@ -86,20 +97,22 @@ func Build(name, root string, cfg *config.Config) (*Stack, error) {
 		return nil, fmt.Errorf("%scomments store: %w", prefix, err)
 	}
 
-	server := api.NewServer(cfg, pipe, vectors, cstore)
+	server := api.NewServer(cfg, pipe, vectors, cstore, linkResolver)
 
 	stack := &Stack{
-		Name:      name,
-		Root:      root,
-		Store:     store,
-		Versioner: ver,
-		Searcher:  searcher,
-		Linker:    linker,
-		Hub:       hub,
-		Pipeline:  pipe,
-		Vectors:   vectors,
-		Comments:  cstore,
-		Server:    server,
+		Name:         name,
+		Root:         root,
+		Config:       cfg,
+		Store:        store,
+		Versioner:    ver,
+		Searcher:     searcher,
+		Linker:       linker,
+		LinkResolver: linkResolver,
+		Hub:          hub,
+		Pipeline:     pipe,
+		Vectors:      vectors,
+		Comments:     cstore,
+		Server:       server,
 	}
 
 	pipe.DrainUncommitted(context.Background())

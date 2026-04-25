@@ -13,6 +13,7 @@ package links
 
 import (
 	"context"
+	"net/url"
 	"regexp"
 	"strings"
 )
@@ -92,6 +93,40 @@ func Unique(targets []string) []string {
 		out = append(out, t)
 	}
 	return out
+}
+
+// wikiLinkFullRe captures the full match including optional label for replacement.
+var wikiLinkFullRe = regexp.MustCompile(`\[\[([^\]|]+)(?:\|([^\]]+))?\]\]`)
+
+// ResolveWikiLinksToMarkdown rewrites [[target|label]] wiki links in content
+// to standard markdown links using permalinks: [label](publicURL/page/path).
+// The resolver function maps a raw wiki-link target to its resolved file path,
+// returning "" if no match is found. Unresolved links are left as-is.
+func ResolveWikiLinksToMarkdown(content, publicURL string, resolver func(target string) string) string {
+	if publicURL == "" {
+		return content
+	}
+	return wikiLinkFullRe.ReplaceAllStringFunc(content, func(match string) string {
+		sub := wikiLinkFullRe.FindStringSubmatch(match)
+		if len(sub) < 2 {
+			return match
+		}
+		target := strings.TrimSpace(sub[1])
+		label := target
+		if len(sub) >= 3 && sub[2] != "" {
+			label = strings.TrimSpace(sub[2])
+		}
+		resolved := resolver(target)
+		if resolved == "" {
+			return match
+		}
+		segments := strings.Split(resolved, "/")
+		for i, s := range segments {
+			segments[i] = url.PathEscape(s)
+		}
+		encodedPath := strings.Join(segments, "/")
+		return "[" + label + "](" + publicURL + "/page/" + encodedPath + ")"
+	})
 }
 
 // TargetForms expands a file path into every syntactic form that could

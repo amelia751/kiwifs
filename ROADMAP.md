@@ -27,6 +27,7 @@ The foundation. A single Go binary that serves markdown files with a web UI, git
 
 Make KiwiFS easy to plug into other apps. This is what turns it from a tool into a platform.
 
+- [ ] **Permalinks** — `public_url` config, HTML5 history routing (`/page/{path}`), permalink field in API responses, wiki link → real URL resolution for external contexts (PR comments, Slack, exports)
 - [ ] **React component library** (`kiwifs-ui` on npm) — `<KiwiProvider>`, `<KiwiTree>`, `<KiwiPage>`, `<KiwiEditor>`, `<KiwiSearch>`, `<KiwiGraph>` as standalone components
 - [x] **MCP server** (`kiwifs mcp`) — Model Context Protocol for AI agents (Claude, Cursor, etc.)
 - [ ] **Pipeline hooks** (Go) — `OnBeforeWrite`, `OnAfterWrite` callbacks for custom validation/notifications
