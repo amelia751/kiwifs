@@ -267,6 +267,29 @@ data: {"path":"reports/finding-042.md","actor":"agent:exec_abc"}
 
 UI updates live when knowledge changes. No polling.
 
+### Permalinks
+
+Set `public_url` in config and every API response includes stable, shareable URLs:
+
+```
+https://wiki.mycompany.com/page/concepts/authentication.md
+```
+
+- **SPA deep linking** — `/page/{path}` routes via HTML5 history (no `#` fragments)
+- **Wiki link resolution** — `[[auth]]` resolves to the full permalink URL for external contexts (Slack, PR comments, exports)
+- **X-Permalink header** — every file read returns the permalink in the response header
+- **`KIWI_PUBLIC_URL` env var** — override config for Docker/CI without editing TOML
+
+### Knowledge health
+
+Built-in janitor scans your knowledge base for quality issues:
+
+- **Stale page detection** — pages not reviewed within a configurable window (default 90 days)
+- **Contradiction finder** — pages with conflicting claims on the same topic
+- **Trust-ranked search** — pages marked `status: verified` or `source-of-truth: true` rank higher
+- **Scheduled scans** — background janitor runs on a configurable interval (default 24h)
+- **Share links** — password-protected public access to specific pages (bcrypt-hashed)
+
 ### CLI
 
 Every feature is accessible via `kiwifs <command>`:
@@ -281,6 +304,7 @@ Every feature is accessible via `kiwifs <command>`:
 | `kiwifs lint` | Validate knowledge base (orphan pages, broken links, missing frontmatter) |
 | `kiwifs backup` | Push to a git remote for off-site backup |
 | `kiwifs restore` | Clone from a git remote and rebuild indexes |
+| `kiwifs janitor` | Run a knowledge health scan (stale pages, contradictions, orphans) |
 
 All commands support `--help` for full flag reference.
 
@@ -343,6 +367,7 @@ Open `http://localhost:3333`. See `concepts/auth.md` rendered as a styled page w
 [server]
 port = 3333
 host = "0.0.0.0"
+public_url = "https://wiki.mycompany.com"  # enables permalinks
 
 [storage]
 root = "/data/knowledge"
@@ -443,6 +468,16 @@ GET    /api/kiwi/meta?where=$.field=val     → structured query over frontmatte
 GET    /api/kiwi/backlinks?path=            → pages that link to this page
 GET    /api/kiwi/toc?path=                  → heading outline
 GET    /api/kiwi/events                     → SSE stream
+POST   /api/kiwi/resolve-links             → resolve [[wiki-links]] to permalinks
+
+GET    /api/kiwi/stale                      → pages past their review date
+GET    /api/kiwi/contradictions             → pages with conflicting claims
+GET    /api/kiwi/search/verified            → trust-ranked search (verified pages boosted)
+GET    /api/kiwi/janitor                    → knowledge health scan
+
+POST   /api/kiwi/share                     → create a share link (password-protected)
+GET    /api/kiwi/share                     → list active share links
+DELETE /api/kiwi/share/:id                 → revoke a share link
 
 POST   /api/kiwi/assets                     → upload binary asset (images, PDFs)
 ```
