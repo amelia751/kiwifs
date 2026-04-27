@@ -22,6 +22,7 @@ type Config struct {
 	Backup     BackupConfig     `toml:"backup"`
 	Janitor    JanitorConfig    `toml:"janitor"`
 	Dataview   DataviewConfig   `toml:"dataview"`
+	Memory     MemoryConfig     `toml:"memory"`
 	// Spaces enables multi-tenant mode: each entry becomes an
 	// independent knowledge base mapped under /api/kiwi/{name}/...
 	// When empty, the server runs single-space against Storage.Root.
@@ -40,6 +41,13 @@ type DataviewConfig struct {
 	MaxAutoIndexes int               `toml:"max_auto_indexes"`
 	ComputedFields bool              `toml:"computed_fields"`
 	CustomFields   map[string]string `toml:"custom_fields"`
+}
+
+// MemoryConfig controls episodic/semantic heuristics and consolidation tooling.
+// Files under episodes_path_prefix are treated as episodic when frontmatter
+// is ambiguous. Empty prefix defaults to the path used by `kiwifs init --template knowledge`.
+type MemoryConfig struct {
+	EpisodesPathPrefix string `toml:"episodes_path_prefix"`
 }
 
 // BackupConfig controls automatic git push to a remote repository.
