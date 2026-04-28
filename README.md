@@ -245,6 +245,10 @@ curl -X PUT localhost:3333/api/kiwi/file?path=report.md \
 
 KiwiFS injects `derived-from` into the frontmatter automatically. Query later: "show me every page produced by run-249."
 
+### Episodic and central memory
+
+Model **per-run / episodic** notes separately from **semantic** concept pages, and use frontmatter `merged-from` to record which episodes were consolidated into a page. Run `kiwifs memory report` to list episodic files that are not yet referenced from any `merged-from` (for CI, dashboards, and merge jobs). Conventions, `[memory]` config, and a Go API live in [docs/MEMORY.md](docs/MEMORY.md).
+
 ### Multi-space
 
 One server, multiple independent knowledge bases:
@@ -305,6 +309,7 @@ Every feature is accessible via `kiwifs <command>`:
 | `kiwifs backup` | Push to a git remote for off-site backup |
 | `kiwifs restore` | Clone from a git remote and rebuild indexes |
 | `kiwifs janitor` | Run a knowledge health scan (stale pages, contradictions, orphans) |
+| `kiwifs memory` | Report episodic vs `merged-from` coverage (see [docs/MEMORY.md](docs/MEMORY.md)) |
 
 All commands support `--help` for full flag reference.
 
