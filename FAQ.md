@@ -20,7 +20,7 @@ No. Git runs under the hood — every write is an atomic commit — but users ne
 
 ### Is KiwiFS production-ready?
 
-KiwiFS is in active development (v0.1). The core is stable — file CRUD, search, versioning, web UI, MCP, and all access protocols work. We use it in production internally. That said, APIs may evolve before v1.0.
+KiwiFS is in active development (v0.3). The core is stable — file CRUD, search, versioning, web UI, MCP, data import/export, DQL queries, and all access protocols work. We use it in production internally. That said, APIs may evolve before v1.0.
 
 ---
 
@@ -170,7 +170,102 @@ Your knowledge base is a folder of markdown files with a `.git` directory. You c
 
 ### Can I migrate from Obsidian / Notion / Confluence?
 
-Import tooling (`kiwifs import --from obsidian|notion|confluence`) is on the [roadmap](ROADMAP.md). In the meantime, Obsidian vaults work almost directly — copy the `.md` files and run `kiwifs reindex`. Notion and Confluence exports need manual link fixup.
+Yes — `kiwifs import` supports all three:
+
+```bash
+kiwifs import --from obsidian --path ~/my-vault --root ./knowledge
+kiwifs import --from notion --api-key $NOTION_KEY --database-id $DB_ID --root ./knowledge
+kiwifs import --from confluence --url https://yoursite.atlassian.net --root ./knowledge
+```
+
+Obsidian vaults also work by simply copying the `.md` files into your knowledge root and running `kiwifs reindex`.
+
+---
+
+## Data Import & Export
+
+### What data sources can I import from?
+
+KiwiFS supports 18 import sources across four categories:
+
+| Category | Sources |
+|---|---|
+| **Databases** | PostgreSQL, MySQL, SQLite, MongoDB, DynamoDB, Redis, Elasticsearch |
+| **Files** | CSV, JSON, JSONL, YAML, Excel |
+| **SaaS** | Notion, Airtable, Google Sheets, Confluence |
+| **Knowledge** | Obsidian vaults, Firebase/Firestore |
+
+Each row becomes a markdown file with structured frontmatter. Use `--dry-run` to preview before importing.
+
+### Is import idempotent?
+
+Yes. Re-importing the same data skips unchanged rows. KiwiFS tracks `_source` and `_source_id` in frontmatter to identify previously imported records. Only fields that actually changed trigger an update.
+
+### What export formats are available?
+
+JSONL and CSV. Both support optional flags:
+
+- `--include-content` — full markdown body
+- `--include-links` — wiki link graph for each page
+- `--include-embeddings` — vector embeddings (writes a `.schema.json` sidecar)
+- `--columns` — export only specific frontmatter fields
+
+### Can I use exported data for ML training?
+
+Yes. The JSONL export with `--include-embeddings` produces ML-ready datasets. The `.schema.json` sidecar documents the embedding dimensions and model used. Combined with DQL for feature selection, you can build training pipelines directly from your knowledge base.
+
+---
+
+## Queries & Aggregation
+
+### What is DQL?
+
+DataView Query Language — a query language for frontmatter. If you've used the Obsidian Dataview plugin, it's the same idea but runs server-side:
+
+```
+TABLE title, status, priority FROM "concepts" WHERE status = "draft" SORT priority DESC
+```
+
+Supports `TABLE`, `LIST`, `COUNT`, `DISTINCT` modes, `WHERE` filters with boolean logic, `SORT`, `GROUP BY`, `FLATTEN`, and implicit fields like `_path`, `_updated`, `_size`.
+
+### What aggregation functions are available?
+
+`count`, `avg`, `sum`, `min`, `max` — applied over any numeric frontmatter field, grouped by another field:
+
+```bash
+kiwifs aggregate --group status --calc count,avg:priority
+```
+
+### What are computed views?
+
+Markdown files whose body is auto-generated from a DQL query. Set `kiwi-view: true` and `kiwi-query: "..."` in frontmatter, and KiwiFS will regenerate the body on refresh or when the file is read.
+
+```bash
+kiwifs view create --query 'TABLE title, status FROM "concepts"' --output views/overview.md
+kiwifs view refresh   # re-run all view queries
+```
+
+### What are computed frontmatter fields?
+
+Virtual fields defined as expressions in `.kiwi/config.toml`. They're evaluated at index time and appear alongside real frontmatter in queries:
+
+```toml
+[dataview]
+computed_fields.age_days = "days_since(updated)"
+computed_fields.is_long = "len(body) > 5000"
+```
+
+---
+
+## Analytics & Health
+
+### What does `kiwifs analytics` report?
+
+A health dashboard for your knowledge base: total pages, stale pages (past review date), orphan pages (no incoming links), broken wiki links, empty pages, pages without frontmatter, link coverage percentage, and recently updated pages.
+
+### What is a health check?
+
+Per-page diagnostics via `GET /api/kiwi/health-check?path=...`. Returns word count, link count, backlink count, days since last update, optional quality score, and any issues from the last janitor scan.
 
 ---
 
