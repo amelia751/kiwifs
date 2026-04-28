@@ -32,6 +32,7 @@ Make KiwiFS easy to plug into other apps. This is what turns it from a tool into
 - [x] **MCP server** (`kiwifs mcp`) — Model Context Protocol for AI agents (Claude, Cursor, etc.)
 - [x] **Permalinks** — shareable page URLs with SPA deep linking, `X-Permalink` header, wiki-link resolution
 - [ ] **Dataview** — computed views over frontmatter (Obsidian Dataview as a server). Hand-written Pratt parser for DQL, `json_extract`-based SQLite queries, TABLE/LIST/COUNT output, aggregation, GROUP BY. REST `GET /api/kiwi/query`, MCP `kiwi_query`, CLI `kiwifs query`. Computed view files with `kiwi-view: true` frontmatter.
+- [x] **Episodic vs semantic memory** — `merged-from` frontmatter, `memory_kind`, `[memory]` config, `kiwifs memory report`, REST `GET /api/kiwi/memory/report`, MCP `kiwi_memory_report`, `internal/memory` helpers (`docs/MEMORY.md`), default `knowledge` init template includes `episodes/`
 - [ ] **Pipeline hooks** (Go) — `OnBeforeWrite`, `OnAfterWrite` callbacks for custom validation/notifications
 - [ ] **JS hooks** — `.kiwi/hooks/*.js` scripts via embedded runtime, no recompile needed
 

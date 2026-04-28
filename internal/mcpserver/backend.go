@@ -68,6 +68,7 @@ type Backend interface {
 	BulkWrite(ctx context.Context, files []BulkFile, actor, provenance string) (map[string]string, error)
 	Aggregate(ctx context.Context, groupBy, calc, where, pathPrefix string) (map[string]map[string]any, error)
 	Analytics(ctx context.Context, scope string, staleThreshold int) (json.RawMessage, error)
+	MemoryReport(ctx context.Context, episodesPrefix string) (json.RawMessage, error)
 	HealthCheckPage(ctx context.Context, path string) (json.RawMessage, error)
 	Backlinks(ctx context.Context, path string) ([]Backlink, error)
 	ResolveWikiLinks(ctx context.Context, content string) string

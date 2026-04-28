@@ -20,6 +20,7 @@ import (
 	"github.com/kiwifs/kiwifs/internal/dataview"
 	"github.com/kiwifs/kiwifs/internal/exporter"
 	"github.com/kiwifs/kiwifs/internal/importer"
+	"github.com/kiwifs/kiwifs/internal/memory"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )
@@ -233,6 +234,15 @@ func registerTools(s *server.MCPServer, b Backend, opts Options) {
 				mcp.WithDestructiveHintAnnotation(false),
 			),
 			Handler: handleAnalytics(b),
+		},
+		server.ServerTool{
+			Tool: mcp.NewTool("kiwi_memory_report",
+				mcp.WithDescription("Report episodic memory coverage: lists markdown files classified as episodic and whether any page cites them under merged-from (central/semantic consolidation). Use before or after merge jobs to find episodes not yet folded into concept pages."),
+				mcp.WithString("episodes_prefix", mcp.Description("Override path prefix for episodic files (default from [memory] episodes_path_prefix or episodes/)")),
+				mcp.WithReadOnlyHintAnnotation(true),
+				mcp.WithDestructiveHintAnnotation(false),
+			),
+			Handler: handleMemoryReport(b),
 		},
 		server.ServerTool{
 			Tool: mcp.NewTool("kiwi_health_check",
@@ -673,6 +683,42 @@ func handleAggregate(b Backend) server.ToolHandlerFunc {
 				fmt.Fprintf(&sb, " %s=%v", vk, vals[vk])
 			}
 			sb.WriteString("\n")
+		}
+		return mcp.NewToolResultText(sb.String()), nil
+	}
+}
+
+func handleMemoryReport(b Backend) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		args := req.GetArguments()
+		prefix, _ := args["episodes_prefix"].(string)
+
+		raw, err := b.MemoryReport(ctx, prefix)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Memory report failed: %v", err)), nil
+		}
+
+		var rep memory.Report
+		if err := json.Unmarshal(raw, &rep); err != nil {
+			return mcp.NewToolResultText(string(raw)), nil
+		}
+
+		var sb strings.Builder
+		fmt.Fprintf(&sb, "Episodic files:           %d\n", rep.EpisodicCount)
+		fmt.Fprintf(&sb, "merged-from references:   %d\n", rep.MergedFromRefs)
+		fmt.Fprintf(&sb, "Unmerged (no merged-from): %d\n", len(rep.Unmerged))
+		for _, u := range rep.Unmerged {
+			fmt.Fprintf(&sb, "  - %s", u.Path)
+			if u.EpisodeID != "" {
+				fmt.Fprintf(&sb, "  episode_id=%s", u.EpisodeID)
+			}
+			sb.WriteString("\n")
+		}
+		for _, w := range rep.Warnings {
+			fmt.Fprintf(&sb, "warning: %s\n", w)
+		}
+		if len(rep.Unmerged) == 0 {
+			sb.WriteString("All episodic files are referenced by at least one merged-from list.\n")
 		}
 		return mcp.NewToolResultText(sb.String()), nil
 	}

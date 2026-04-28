@@ -235,10 +235,11 @@ func (s *Server) setupRoutes() {
 		assets:           s.cfg.Assets,
 		ui:               s.cfg.UI,
 		root:             s.pipe.Store.AbsPath(""),
-		janitorSched:     s.janitorSched,
-		janitorStaleDays: s.cfg.Janitor.StaleDays,
-		publicURL:        s.cfg.ResolvedPublicURL(),
-		linkResolver:     s.linkResolver,
+		janitorSched:         s.janitorSched,
+		janitorStaleDays:     s.cfg.Janitor.StaleDays,
+		memoryEpisodesPrefix: s.cfg.Memory.EpisodesPathPrefix,
+		publicURL:            s.cfg.ResolvedPublicURL(),
+		linkResolver:         s.linkResolver,
 	}
 	prev := s.pipe.OnInvalidate
 	s.pipe.OnInvalidate = func() {
@@ -295,6 +296,7 @@ func (s *Server) setupRoutes() {
 	api.PUT("/theme", h.PutTheme)
 	api.GET("/ui-config", h.UIConfig)
 	api.GET("/janitor", h.Janitor)
+	api.GET("/memory/report", h.MemoryReport)
 	api.GET("/query", h.Query)
 	api.GET("/query/aggregate", h.QueryAggregate)
 	api.POST("/view/refresh", h.ViewRefresh)

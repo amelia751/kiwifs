@@ -17,6 +17,7 @@ import (
 	"github.com/kiwifs/kiwifs/internal/config"
 	"github.com/kiwifs/kiwifs/internal/dataview"
 	"github.com/kiwifs/kiwifs/internal/janitor"
+	"github.com/kiwifs/kiwifs/internal/memory"
 	"github.com/kiwifs/kiwifs/internal/pipeline"
 	"github.com/kiwifs/kiwifs/internal/search"
 	"github.com/kiwifs/kiwifs/internal/storage"
@@ -470,6 +471,23 @@ func (b *LocalBackend) Analytics(ctx context.Context, scope string, staleThresho
 		return nil, err
 	}
 	return json.Marshal(resp)
+}
+
+func (b *LocalBackend) MemoryReport(ctx context.Context, episodesPrefix string) (json.RawMessage, error) {
+	if err := b.init(); err != nil {
+		return nil, err
+	}
+	opt := memory.Options{}
+	if episodesPrefix != "" {
+		opt.EpisodesPathPrefix = episodesPrefix
+	} else if b.stack.Config != nil && b.stack.Config.Memory.EpisodesPathPrefix != "" {
+		opt.EpisodesPathPrefix = b.stack.Config.Memory.EpisodesPathPrefix
+	}
+	rep, err := memory.Scan(ctx, b.stack.Store, opt)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(rep)
 }
 
 func (b *LocalBackend) HealthCheckPage(ctx context.Context, path string) (json.RawMessage, error) {

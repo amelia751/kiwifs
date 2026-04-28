@@ -691,3 +691,43 @@ func TestMCP_KiwiViewRefresh(t *testing.T) {
 		"path": "views/test.md",
 	})
 }
+
+func TestMCP_KiwiMemoryReport(t *testing.T) {
+	b, tmp := setupTestBackend(t)
+	defer b.Close()
+
+	epDir := filepath.Join(tmp, "episodes")
+	if err := os.MkdirAll(epDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(epDir, "run.md"), []byte(`---
+memory_kind: episodic
+episode_id: mcp-ep-1
+---
+# run
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	h := handleMemoryReport(b)
+	out := mustCallTool(t, h, "kiwi_memory_report", map[string]any{})
+	if want := "Unmerged (no merged-from): 1"; !strings.Contains(out, want) {
+		t.Fatalf("want %q in:\n%s", want, out)
+	}
+
+	if err := os.WriteFile(filepath.Join(tmp, "concepts", "sum.md"), []byte(`---
+memory_kind: semantic
+merged-from:
+  - type: episode
+    id: mcp-ep-1
+---
+# Summary
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out2 := mustCallTool(t, h, "kiwi_memory_report", map[string]any{})
+	if want := "Unmerged (no merged-from): 0"; !strings.Contains(out2, want) {
+		t.Fatalf("want %q in:\n%s", want, out2)
+	}
+}

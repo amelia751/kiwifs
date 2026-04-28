@@ -48,6 +48,8 @@ type Handlers struct {
 	janitorSched     *janitor.Scheduler
 	janitorStaleDays int
 
+	memoryEpisodesPrefix string
+
 	graphCache atomic.Pointer[graphResponse]
 	graphGroup singleflight.Group
 }

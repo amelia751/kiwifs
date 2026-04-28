@@ -367,6 +367,22 @@ func (r *RemoteBackend) Analytics(ctx context.Context, scope string, staleThresh
 	return raw, nil
 }
 
+func (r *RemoteBackend) MemoryReport(ctx context.Context, episodesPrefix string) (json.RawMessage, error) {
+	params := url.Values{}
+	if episodesPrefix != "" {
+		params.Set("episodes_prefix", episodesPrefix)
+	}
+	path := r.apiPrefix + "/memory/report"
+	if enc := params.Encode(); enc != "" {
+		path += "?" + enc
+	}
+	var raw json.RawMessage
+	if err := r.getJSON(ctx, path, &raw); err != nil {
+		return nil, err
+	}
+	return raw, nil
+}
+
 func (r *RemoteBackend) HealthCheckPage(ctx context.Context, path string) (json.RawMessage, error) {
 	var raw json.RawMessage
 	if err := r.getJSON(ctx, r.apiPrefix+"/health-check?path="+url.QueryEscape(path), &raw); err != nil {

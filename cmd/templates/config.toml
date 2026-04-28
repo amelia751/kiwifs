@@ -11,6 +11,10 @@ engine = "sqlite"
 [versioning]
 strategy = "git"
 
+[memory]
+# Episodic files live here when memory_kind is unset (see docs/MEMORY.md).
+# episodes_path_prefix = "episodes/"
+
 [auth]
 type = "none"
 # type = "apikey"  → single global key via api_key below

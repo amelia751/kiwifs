@@ -88,6 +88,25 @@ Options:
 
 ---
 
+## REST API (`GET /api/kiwi/memory/report`)
+
+When KiwiFS is running (`kiwifs serve`), remote clients and consolidation workers can fetch the same JSON as `kiwifs memory report --json`:
+
+```bash
+curl -s "http://localhost:3333/api/kiwi/memory/report"
+curl -s "http://localhost:3333/api/kiwi/memory/report?episodes_prefix=raw/"
+```
+
+Optional query parameter **`episodes_prefix`** overrides `[memory] episodes_path_prefix` from `.kiwi/config.toml`. Response shape matches **`memory.Report`** (counts, `episodic_files`, `unmerged`, `warnings`).
+
+---
+
+## MCP (`kiwi_memory_report`)
+
+The MCP server exposes **`kiwi_memory_report`** with optional **`episodes_prefix`**, returning a short human-readable summary (same inputs as the REST endpoint).
+
+---
+
 ## Programmatic: `internal/memory` (Go)
 
 - **`memory.InjectMergedFrom([]byte, []memory.MergedFromEntry)`** — idempotently appends to `merged-from` while preserving the markdown body, similar to how provenance injects `derived-from`.

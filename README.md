@@ -100,6 +100,7 @@ knowledge/
 ├── log.md             # Append-only chronological record
 ├── concepts/          # One page per concept (agent-created)
 ├── entities/          # One page per named entity
+├── episodes/          # Per-run episodic notes (memory_kind, episode_id)
 └── reports/           # Chronological reports
 ```
 
@@ -151,7 +152,7 @@ kiwifs mcp --root ~/knowledge          # in-process, no server needed
 kiwifs mcp --remote http://host:3333   # proxy to a running KiwiFS server
 ```
 
-7 tools: `kiwi_read`, `kiwi_write`, `kiwi_search`, `kiwi_tree`, `kiwi_query_meta`, `kiwi_delete`, `kiwi_bulk_write`. Plus resources (`kiwi://schema`, `kiwi://file/{path}`, `kiwi://tree/{path}`).
+Tools include `kiwi_read`, `kiwi_write`, `kiwi_search`, `kiwi_tree`, `kiwi_memory_report`, `kiwi_query_meta`, `kiwi_delete`, `kiwi_bulk_write`, and more — plus resources (`kiwi://schema`, `kiwi://file/{path}`, `kiwi://tree/{path}`).
 
 **Claude Desktop / Cursor:**
 ```json
@@ -336,7 +337,7 @@ go build -o kiwifs .
 
 ```bash
 kiwifs init --template knowledge --root ./knowledge
-# Creates SCHEMA.md, index.md, log.md, concepts/, entities/, reports/
+# Creates SCHEMA.md, index.md, log.md, concepts/, entities/, reports/, episodes/
 ```
 
 ### 3. Serve
@@ -393,6 +394,9 @@ provider = "sqlite-vec"          # sqlite-vec | qdrant | pgvector | pinecone | w
 
 [versioning]
 strategy = "git"                 # git | cow | none
+
+[memory]
+# episodes_path_prefix = "episodes/"   # optional; default episodes/
 
 [auth]
 type = "none"                    # none | apikey | perspace | oidc
@@ -479,6 +483,7 @@ GET    /api/kiwi/stale                      → pages past their review date
 GET    /api/kiwi/contradictions             → pages with conflicting claims
 GET    /api/kiwi/search/verified            → trust-ranked search (verified pages boosted)
 GET    /api/kiwi/janitor                    → knowledge health scan
+GET    /api/kiwi/memory/report              → episodic vs merged-from coverage (JSON)
 
 POST   /api/kiwi/share                     → create a share link (password-protected)
 GET    /api/kiwi/share                     → list active share links
