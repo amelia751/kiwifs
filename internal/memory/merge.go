@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/kiwifs/kiwifs/internal/markdown"
+	"github.com/kiwifs/kiwifs/internal/yamlutil"
 	"gopkg.in/yaml.v3"
 )
 
@@ -71,14 +72,14 @@ func InjectMergedFrom(content []byte, newEntries []MergedFromEntry) ([]byte, err
 			return nil, fmt.Errorf("parse frontmatter: %w", err)
 		}
 	}
-	mapping := ensureMappingDocument(&root)
+	mapping := yamlutil.EnsureMappingDocument(&root)
 
 	for _, e := range toAdd {
 		var node yaml.Node
 		if err := node.Encode(&e); err != nil {
 			return nil, fmt.Errorf("encode merged-from entry: %w", err)
 		}
-		appendToListKey(mapping, "merged-from", &node)
+		yamlutil.AppendToListKey(mapping, "merged-from", &node)
 	}
 
 	var buf bytes.Buffer
@@ -144,43 +145,4 @@ func mergedKeysFromFM(m map[string]any) (map[string]struct{}, error) {
 		out[mergeKey(&ee)] = struct{}{}
 	}
 	return out, nil
-}
-
-// ensureMappingDocument mirrors internal/pipeline/provenance.
-func ensureMappingDocument(root *yaml.Node) *yaml.Node {
-	if root.Kind == 0 {
-		root.Kind = yaml.DocumentNode
-	}
-	if root.Kind != yaml.DocumentNode {
-		wrapped := *root
-		root.Kind = yaml.DocumentNode
-		root.Content = []*yaml.Node{&wrapped}
-	}
-	if len(root.Content) == 0 {
-		mapping := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
-		root.Content = append(root.Content, mapping)
-		return mapping
-	}
-	return root.Content[0]
-}
-
-func appendToListKey(mapping *yaml.Node, keyName string, entry *yaml.Node) {
-	for i := 0; i+1 < len(mapping.Content); i += 2 {
-		k := mapping.Content[i]
-		if k.Value == keyName {
-			v := mapping.Content[i+1]
-			if v.Kind == yaml.SequenceNode {
-				v.Content = append(v.Content, entry)
-				return
-			}
-			seq := &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"}
-			clone := *v
-			seq.Content = []*yaml.Node{&clone, entry}
-			mapping.Content[i+1] = seq
-			return
-		}
-	}
-	key := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: keyName}
-	seq := &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq", Content: []*yaml.Node{entry}}
-	mapping.Content = append(mapping.Content, key, seq)
 }
