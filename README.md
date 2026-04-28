@@ -5,11 +5,11 @@
 <h1 align="center">KiwiFS</h1>
 
 <p align="center">
-  <strong>A virtual filesystem agents can write, search, query, and trust.</strong>
+  <strong>The knowledge server.</strong>
 </p>
 
 <p align="center">
-  One Go binary, zero config. Agents write with <code>cat</code>. Humans read in a wiki. Git versions everything. Full-text + vector search. DQL queries over structured metadata.
+  PocketBase for Knowledge — one Go binary, zero config. Obsidian's file-first philosophy. Agents write with <code>cat</code>. Humans read in a wiki. Git versions everything.
 </p>
 
 <p align="center">
@@ -18,10 +18,6 @@
   <a href="https://github.com/kiwifs/kiwifs"><img src="https://img.shields.io/badge/go-1.25-00ADD8?logo=go&logoColor=white" alt="Go 1.25"></a>
   <a href="https://github.com/kiwifs/kiwifs"><img src="https://img.shields.io/badge/single_binary-yes-green" alt="Single Binary"></a>
   <a href="https://github.com/kiwifs/kiwifs"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen" alt="PRs Welcome"></a>
-</p>
-
-<p align="center">
-  <a href="https://kiwifs.mintlify.app">Docs</a> · <a href="FAQ.md">FAQ</a> · <a href="ROADMAP.md">Roadmap</a> · <a href="CONTRIBUTING.md">Contributing</a>
 </p>
 
 ```bash
@@ -34,25 +30,18 @@ kiwifs init ./knowledge && kiwifs serve --root ./knowledge
 
 ## The problem
 
-Virtual filesystems for agents are an emerging primitive — but files are just files. Or are they?
+Every agent memory project gives you **storage**. A database table. A vector index. A key-value store.
 
-Current VFS solutions fall into one of these camps:
+But storage is only one layer. In practice you need:
 
-- **Database tables pretending to be files** — no search, no versioning, no human interface. You get `read()` and `write()`, nothing else.
-- **Read-only retrieval layers** — agents can search but can't write. The filesystem is a one-way mirror.
-- **Flat markdown logs** — no structure, no queries, no importance scoring. The naive approach everyone outgrows.
-- **Ephemeral sandboxes** — agent dies, files die. No persistence across sessions.
-- **Proprietary SaaS** — locked to a vendor's ecosystem. Can't self-host, can't extend.
+- **An agent interface** — agents already know `cat`, `grep`, `ls`. They don't need a custom SDK.
+- **A human interface** — someone has to review what the agent wrote. An Obsidian-like UI, not pgAdmin.
+- **An audit trail** — who changed what, when, and why. Cryptographic, not "trust the vendor."
+- **Search** — full-text (BM25) and semantic (vector), over the same files.
 
-A real VFS needs to be all of these at once:
+No existing tool does all four. Obsidian has files but no web UI and no agent interface. Confluence has a web UI but your content is trapped in a database. Outline has a web UI but content lives in Postgres. agent-vfs gives you a virtual FS but no UI, no versioning, no search.
 
-- **Writable** — agents write with `cat`, `echo`, `curl`, or MCP tools. Not read-only, not API-only.
-- **Searchable** — full-text (BM25) and semantic (vector) over the same files.
-- **Queryable** — structured queries over typed metadata, not just keyword matching.
-- **Trustworthy** — every write is a Git commit. Immutable audit trail. Crash recovery. Blame.
-- **Human-readable** — a web UI with wiki links, backlinks, and graph view. Not pgAdmin.
-
-KiwiFS is all five.
+KiwiFS is the full stack.
 
 ```
 AGENT                              HUMAN
@@ -162,7 +151,7 @@ kiwifs mcp --root ~/knowledge          # in-process, no server needed
 kiwifs mcp --remote http://host:3333   # proxy to a running KiwiFS server
 ```
 
-12 tools: `kiwi_read`, `kiwi_write`, `kiwi_search`, `kiwi_tree`, `kiwi_query_meta`, `kiwi_delete`, `kiwi_bulk_write`, `kiwi_query`, `kiwi_aggregate`, `kiwi_import`, `kiwi_export`, `kiwi_analytics`. Plus resources (`kiwi://schema`, `kiwi://file/{path}`, `kiwi://tree/{path}`).
+7 tools: `kiwi_read`, `kiwi_write`, `kiwi_search`, `kiwi_tree`, `kiwi_query_meta`, `kiwi_delete`, `kiwi_bulk_write`. Plus resources (`kiwi://schema`, `kiwi://file/{path}`, `kiwi://tree/{path}`).
 
 **Claude Desktop / Cursor:**
 ```json
@@ -243,105 +232,6 @@ Frontmatter from every markdown file is mirrored into a SQLite table. Query it:
 GET /api/kiwi/meta?where=$.status=published&where=$.priority=high&sort=$.updated&order=desc
 ```
 
-### DataView Query Language (DQL)
-
-A query language for your knowledge base — think Obsidian Dataview, but server-side:
-
-```bash
-kiwifs query 'TABLE title, status, priority FROM "concepts" WHERE status = "draft" SORT priority DESC'
-```
-
-```
-GET /api/kiwi/query?q=TABLE title, status FROM "reports" WHERE priority = "high"
-```
-
-Supports `TABLE`, `LIST`, `COUNT`, `DISTINCT` queries with `WHERE`, `SORT`, `GROUP BY`, `FLATTEN`, and implicit fields (`_path`, `_updated`, `_size`). Expressions, functions, and boolean logic all work.
-
-**Computed views** — markdown files with `kiwi-view: true` in frontmatter auto-refresh their body from a DQL query:
-
-```bash
-kiwifs view create --query 'TABLE title, status FROM "concepts"' --output views/concepts.md
-kiwifs view refresh   # re-run all view queries
-```
-
-### Aggregation
-
-SQL-style aggregates over frontmatter fields:
-
-```bash
-kiwifs aggregate --group status --calc count,avg:priority
-```
-
-```
-GET /api/kiwi/query/aggregate?group_by=status&calc=count,avg:priority
-```
-
-Functions: `count`, `avg`, `sum`, `min`, `max`. Optional `--where` filters and `--path-prefix` scoping.
-
-### Computed frontmatter
-
-Define expressions in config that are evaluated at index time and stored as virtual frontmatter fields:
-
-```toml
-# .kiwi/config.toml
-[dataview]
-computed_fields.age_days = "days_since(updated)"
-computed_fields.is_long = "len(body) > 5000"
-computed_fields.priority_score = "priority * 10 + len(tags)"
-```
-
-These fields appear in DQL queries and meta API responses alongside real frontmatter.
-
-### Data import
-
-Bulk-import data from 18 sources into your knowledge base. Each row becomes a markdown file with structured frontmatter:
-
-```bash
-kiwifs import --from postgres --dsn "postgres://..." --table users --root ./knowledge
-kiwifs import --from csv --path data.csv --root ./knowledge
-kiwifs import --from json --url https://api.example.com/data --root ./knowledge
-```
-
-| Category | Sources |
-|---|---|
-| **Databases** | PostgreSQL, MySQL, SQLite, MongoDB, DynamoDB, Redis, Elasticsearch |
-| **Files** | CSV, JSON, JSONL, YAML, Excel |
-| **SaaS** | Notion, Airtable, Google Sheets, Confluence |
-| **Knowledge** | Obsidian vaults, Firebase/Firestore |
-
-Features: idempotent upserts (re-importing skips unchanged rows), `--dry-run`, `--columns` filtering, `--primary-key` control, `_source` / `_source_id` tracking in frontmatter.
-
-### Data export
-
-Export your knowledge base to machine-readable formats for ML pipelines, backups, or analysis:
-
-```bash
-kiwifs export --format jsonl --output knowledge.jsonl
-kiwifs export --format csv --include-embeddings --output dataset.csv
-```
-
-```
-GET /api/kiwi/export?format=jsonl&include_content=true&include_embeddings=true
-```
-
-Formats: JSONL, CSV. Optional: `--include-content` (full markdown body), `--include-links` (wiki link graph), `--include-embeddings` (vector embeddings), `--columns` filtering. Writes a `.schema.json` sidecar when exporting embeddings.
-
-### Analytics dashboard
-
-Knowledge health metrics at a glance:
-
-```bash
-kiwifs analytics                     # text summary
-kiwifs analytics --format json       # structured output
-```
-
-```
-GET /api/kiwi/analytics → { total_pages, stale_pages, orphans, broken_links, ... }
-GET /api/kiwi/health-check?path=concepts/auth.md → per-page health
-```
-
-Reports: total pages, stale page count + paths, orphan pages, broken links, empty pages, pages without frontmatter, link coverage percentage, recently updated pages.
-
 ### Provenance tracking
 
 Know which agent run produced which knowledge:
@@ -409,12 +299,6 @@ Every feature is accessible via `kiwifs <command>`:
 | `kiwifs serve` | Start the server (REST API + web UI + optional NFS/S3/WebDAV) |
 | `kiwifs init` | Scaffold a knowledge base from a template (`knowledge`, `wiki`, `runbook`, `research`, or blank) |
 | `kiwifs mcp` | Start a Model Context Protocol server (for Claude, Cursor, etc.) |
-| `kiwifs query` | Run a DQL query against the local index |
-| `kiwifs import` | Bulk-import from 18 data sources (Postgres, CSV, Notion, etc.) |
-| `kiwifs export` | Export knowledge base to JSONL or CSV |
-| `kiwifs aggregate` | Run SQL aggregates (count, avg, sum, min, max) over frontmatter |
-| `kiwifs analytics` | Knowledge health dashboard (stale, orphans, broken links) |
-| `kiwifs view` | Manage computed views (create, refresh, list) |
 | `kiwifs mount` | FUSE-mount a remote KiwiFS server as a local folder |
 | `kiwifs reindex` | Rebuild search indexes from files (FTS5 + vector + metadata) |
 | `kiwifs lint` | Validate knowledge base (orphan pages, broken links, missing frontmatter) |
@@ -591,14 +475,6 @@ GET    /api/kiwi/contradictions             → pages with conflicting claims
 GET    /api/kiwi/search/verified            → trust-ranked search (verified pages boosted)
 GET    /api/kiwi/janitor                    → knowledge health scan
 
-GET    /api/kiwi/query?q=                   → DQL query (TABLE, LIST, COUNT, DISTINCT)
-GET    /api/kiwi/query/aggregate            → aggregation (count, avg, sum, min, max)
-POST   /api/kiwi/view/refresh              → refresh computed views
-POST   /api/kiwi/import                    → bulk import from data source
-GET    /api/kiwi/export                    → export to JSONL/CSV stream
-GET    /api/kiwi/analytics                 → knowledge health dashboard
-GET    /api/kiwi/health-check?path=        → per-page health metrics
-
 POST   /api/kiwi/share                     → create a share link (password-protected)
 GET    /api/kiwi/share                     → list active share links
 DELETE /api/kiwi/share/:id                 → revoke a share link
@@ -630,14 +506,10 @@ Writes accept `X-Actor` (git attribution), `X-Provenance` (lineage tracking), an
 
 | | KiwiFS | agent-vfs | ChromaFS | Obsidian | Outline | Confluence |
 |---|---|---|---|---|---|---|
-| **Writable** (agents can create/update) | Yes | Yes | No (read-only) | Local only | API only | No |
 | **Agent-native** (`cat`/`grep`/NFS) | Yes | Virtual only | Read-only | Local only | API only | No |
 | **Web UI** (Notion-like) | Yes | No | No | Desktop | Yes | Yes |
 | **Versioned** (git audit trail) | Yes | No | No | No | Limited | Plugin ($$$) |
 | **Searchable** (FTS + vector) | Yes | No | Chroma | Plugins | Yes | Yes |
-| **Query language** (DQL) | Yes | No | No | Plugin | No | No |
-| **Data import** (18 sources) | Yes | No | No | No | API | No |
-| **Export** (JSONL/CSV + embeddings) | Yes | No | No | No | Markdown | PDF only |
 | **Single binary** | Yes | No | No | No | No | No (SaaS) |
 | **Embeddable** (Go library) | Yes | No | No | No | No | No |
 | **Self-hosted** | Yes | Yes | Yes | N/A | Yes | No |
