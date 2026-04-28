@@ -719,3 +719,4 @@ If you want to offer KiwiFS as a managed service or need a commercial license, [
 ## Contributors
 
 <a href="https://github.com/PranavChahal"><img src="https://avatars.githubusercontent.com/u/76513953?v=4" width="50" height="50" alt="Pranav" style="border-radius:50%"></a>
+<a href="https://github.com/KavishShah15"><img src="https://avatars.githubusercontent.com/u/51149220?v=4" width="50" height="50" alt="Kavish" style="border-radius:50%"></a>
