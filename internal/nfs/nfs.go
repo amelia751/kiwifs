@@ -3,18 +3,58 @@ package nfs
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/go-git/go-billy/v5"
 	"github.com/kiwifs/kiwifs/internal/pipeline"
 	"github.com/kiwifs/kiwifs/internal/storage"
 	"github.com/willscott/go-nfs"
-	nfshelper "github.com/willscott/go-nfs/helpers"
 )
+
+// stableAuthHandler combines NullAuth semantics (accept all mounts) with
+// deterministic handle generation that survives restarts.
+type stableAuthHandler struct {
+	fs      *kiwiFS
+	handles *stableHandles
+}
+
+func (h *stableAuthHandler) Mount(ctx context.Context, conn net.Conn, req nfs.MountRequest) (nfs.MountStatus, billy.Filesystem, []nfs.AuthFlavor) {
+	return nfs.MountStatusOk, h.fs, []nfs.AuthFlavor{nfs.AuthFlavorNull}
+}
+
+func (h *stableAuthHandler) Change(f billy.Filesystem) billy.Change {
+	if c, ok := f.(billy.Change); ok {
+		return c
+	}
+	return nil
+}
+
+func (h *stableAuthHandler) FSStat(ctx context.Context, f billy.Filesystem, s *nfs.FSStat) error {
+	return nil
+}
+
+func (h *stableAuthHandler) ToHandle(f billy.Filesystem, path []string) []byte {
+	return h.handles.ToHandle(f, path)
+}
+
+func (h *stableAuthHandler) FromHandle(b []byte) (billy.Filesystem, []string, error) {
+	return h.handles.FromHandle(b)
+}
+
+func (h *stableAuthHandler) InvalidateHandle(f billy.Filesystem, b []byte) error {
+	return h.handles.InvalidateHandle(f, b)
+}
+
+func (h *stableAuthHandler) HandleLimit() int {
+	return h.handles.HandleLimit()
+}
 
 // Server wraps a userspace NFS server that exposes the knowledge folder
 // via NFSv3. All writes flow through the KiwiFS pipeline, ensuring they
@@ -42,11 +82,13 @@ func New(root string, pipe *pipeline.Pipeline, allow []*net.IPNet) (*Server, err
 	// Reads go directly to disk. Writes go through the pipeline.
 	fs := &kiwiFS{root: absRoot, pipe: pipe}
 
-	// Create NFS handler using go-nfs helpers, then wrap it with the
-	// IP-allowlist check. go-nfs is NFSv3-only — its native auth story
-	// is weak (NullAuthHandler accepts everyone), so reachability is the
-	// control surface that actually matters.
-	handler := nfshelper.NewNullAuthHandler(fs)
+	// Create NFS handler with stable handles. Unlike go-nfs's default
+	// CachingHandler (random UUIDs, lost on restart), stableHandles
+	// derives handles from SHA-256(namespaceUUID + path), so they
+	// survive server restarts and eliminate ESTALE for cached clients.
+	// This is the NFS-Ganesha HandleMap pattern.
+	handles := newStableHandles(absRoot)
+	handler := nfs.Handler(&stableAuthHandler{fs: fs, handles: handles})
 	if len(allow) == 0 {
 		allow = DefaultAllow()
 	}
@@ -174,6 +216,22 @@ func (s *Server) Handler() nfs.Handler {
 	return s.handler
 }
 
+// Process-local advisory locking. NOT distributed — multiple KiwiFS
+// processes cannot coordinate locks.
+var (
+	fileLocks   = make(map[string]string) // path → holder ID
+	fileLocksMu sync.Mutex
+)
+
+var (
+	openFiles      = make(map[string]int)
+	openFilesMu    sync.Mutex
+	pendingUnlinks   = make(map[string]bool)
+	pendingUnlinksMu sync.Mutex
+	hiddenPaths      = make(map[string]string)
+	hiddenPathsMu    sync.Mutex
+)
+
 // kiwiFS implements the billy.Filesystem interface, routing writes
 // through the KiwiFS pipeline.
 type kiwiFS struct {
@@ -200,6 +258,9 @@ func (fs *kiwiFS) OpenFile(filename string, flag int, perm os.FileMode) (billy.F
 
 	// For writes, we intercept and route through the pipeline
 	if flag&(os.O_WRONLY|os.O_RDWR) != 0 {
+		openFilesMu.Lock()
+		openFiles[filename]++
+		openFilesMu.Unlock()
 		return &kiwiFile{
 			path:     filename,
 			fullPath: fullPath,
@@ -208,11 +269,23 @@ func (fs *kiwiFS) OpenFile(filename string, flag int, perm os.FileMode) (billy.F
 		}, nil
 	}
 
-	// For reads, just open the file directly
-	f, err := os.OpenFile(fullPath, flag, perm)
+	// For reads, check if file was unlinked and hidden
+	actualPath := fullPath
+	hiddenPathsMu.Lock()
+	if hp, ok := hiddenPaths[filename]; ok {
+		actualPath = hp
+	}
+	hiddenPathsMu.Unlock()
+
+	f, err := os.OpenFile(actualPath, flag, perm)
 	if err != nil {
 		return nil, err
 	}
+
+	openFilesMu.Lock()
+	openFiles[filename]++
+	openFilesMu.Unlock()
+
 	return &kiwiFile{
 		path:     filename,
 		fullPath: fullPath,
@@ -265,47 +338,98 @@ func (fs *kiwiFS) MkdirAll(filename string, perm os.FileMode) error {
 }
 
 func (fs *kiwiFS) Remove(filename string) error {
-	if _, err := fs.safePath(filename); err != nil {
-		return err
-	}
-	// Route deletes through pipeline for versioning + indexing.
-	// NFS callbacks don't carry a request context (the willscott/go-nfs
-	// Handler interface predates context propagation), so the pipeline gets
-	// context.Background() until/unless we ship our own forked Handler.
-	if strings.HasSuffix(filename, ".md") {
-		return fs.pipe.Delete(context.Background(), filename, "nfs")
-	}
-	// Non-markdown files: direct delete
 	fullPath, err := fs.safePath(filename)
 	if err != nil {
 		return err
 	}
-	return os.Remove(fullPath)
+	info, serr := os.Stat(fullPath)
+	if serr != nil {
+		return serr
+	}
+	if info.IsDir() {
+		return os.Remove(fullPath)
+	}
+
+	openFilesMu.Lock()
+	count := openFiles[filename]
+	openFilesMu.Unlock()
+
+	if count > 0 {
+		pendingUnlinksMu.Lock()
+		pendingUnlinks[filename] = true
+		pendingUnlinksMu.Unlock()
+
+		hidden := filepath.Join(filepath.Dir(fullPath), ".kiwi-unlinked-"+filepath.Base(fullPath))
+		if err := os.Rename(fullPath, hidden); err == nil {
+			hiddenPathsMu.Lock()
+			hiddenPaths[filename] = hidden
+			hiddenPathsMu.Unlock()
+		}
+		fs.pipe.DeindexFile(context.Background(), filename)
+		return nil
+	}
+
+	return fs.pipe.Delete(context.Background(), filename, "nfs")
 }
 
 func (fs *kiwiFS) Rename(oldpath, newpath string) error {
-	fullOld, err := fs.safePath(oldpath)
+	absOld, err := fs.safePath(oldpath)
 	if err != nil {
 		return err
 	}
-	if _, err := fs.safePath(newpath); err != nil {
+	absNew, err := fs.safePath(newpath)
+	if err != nil {
 		return err
 	}
 
-	// Every rename — markdown or not — goes through the pipeline so git
-	// sees a coherent "delete old + write new" pair and the search/link
-	// indices get updated. A bare os.Rename would leave the search
-	// engine claiming the file still lives at its old path and skip the
-	// git commit entirely.
-	content, readErr := os.ReadFile(fullOld)
-	if readErr != nil {
-		return readErr
+	info, err := os.Stat(absOld)
+	if err != nil {
+		return err
 	}
-	if _, werr := fs.pipe.Write(context.Background(), newpath, content, "nfs"); werr != nil {
-		return fmt.Errorf("pipeline write %s: %w", newpath, werr)
+
+	if !info.IsDir() {
+		_, rerr := fs.pipe.Rename(context.Background(), oldpath, newpath, "nfs")
+		return rerr
 	}
-	if derr := fs.pipe.Delete(context.Background(), oldpath, "nfs"); derr != nil {
-		return fmt.Errorf("pipeline delete %s: %w", oldpath, derr)
+
+	// os.Rename follows POSIX rename(2): if absNew is an empty dir it is
+	// replaced; if non-empty, ENOTEMPTY. Files under a replaced destination
+	// are not de-indexed — accepted gap for rename-onto-existing-dir.
+	if err := os.Rename(absOld, absNew); err != nil {
+		return err
+	}
+
+	ctx := context.Background()
+	var allPaths []string
+	filepath.WalkDir(absNew, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			log.Printf("nfs: dir rename walk error: %v", err)
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+		relToNew, relErr := filepath.Rel(absNew, path)
+		if relErr != nil {
+			log.Printf("nfs: dir rename rel(%s, %s): %v", absNew, path, relErr)
+			return nil
+		}
+		newRel := filepath.ToSlash(filepath.Join(newpath, relToNew))
+		oldRel := filepath.ToSlash(filepath.Join(oldpath, relToNew))
+		content, rerr := os.ReadFile(path)
+		if rerr != nil {
+			log.Printf("nfs: dir rename read(%s): %v", path, rerr)
+			return nil
+		}
+		fs.pipe.IndexFile(ctx, newRel, content)
+		fs.pipe.DeindexFile(ctx, oldRel)
+		allPaths = append(allPaths, newRel, oldRel)
+		return nil
+	})
+
+	if len(allPaths) > 0 {
+		msg := fmt.Sprintf("nfs: rename dir %s → %s", oldpath, newpath)
+		fs.pipe.BulkCommitOnly(ctx, allPaths, "nfs", msg)
 	}
 	return nil
 }
@@ -316,12 +440,14 @@ func (fs *kiwiFS) safePath(filename string) (string, error) {
 
 // kiwiFile wraps file operations, routing writes through the pipeline.
 type kiwiFile struct {
-	path     string       // relative path (e.g., "runs/run-249.md")
-	fullPath string       // absolute path on disk
-	fs       *kiwiFS      // parent filesystem
-	osFile   *os.File     // underlying OS file (for reads)
-	flag     int          // open flags
-	buffer   []byte       // write buffer (accumulated until Close)
+	path         string  // relative path (e.g., "runs/run-249.md")
+	fullPath     string  // absolute path on disk
+	fs           *kiwiFS // parent filesystem
+	osFile       *os.File
+	flag         int
+	buffer       []byte // write buffer (accumulated until Close)
+	lockID       string // unique ID for advisory locking
+	lastSyncETag string // ETag at last Sync, to skip redundant Close flush
 }
 
 func (f *kiwiFile) Read(p []byte) (int, error) {
@@ -333,27 +459,56 @@ func (f *kiwiFile) Read(p []byte) (int, error) {
 }
 
 func (f *kiwiFile) Write(p []byte) (int, error) {
-	// Accumulate writes in memory
 	f.buffer = append(f.buffer, p...)
+	f.lastSyncETag = ""
 	return len(p), nil
 }
 
 func (f *kiwiFile) Close() error {
-	// Every write — markdown or not — goes through the pipeline so
-	// non-markdown uploads get a git commit, SSE broadcast, and trust-
-	// layer row like any other file. The search layer already skips
-	// indexing for non-knowledge paths, so a PDF write is correctly
-	// versioned but not full-text indexed.
-	if len(f.buffer) > 0 {
+	var writeErr error
+	if len(f.buffer) > 0 && pipeline.ETag(f.buffer) != f.lastSyncETag {
 		if _, err := f.fs.pipe.Write(context.Background(), f.path, f.buffer, "nfs"); err != nil {
-			return fmt.Errorf("pipeline write: %w", err)
+			writeErr = fmt.Errorf("pipeline write: %w", err)
 		}
 	}
 
+	f.Unlock()
+
 	if f.osFile != nil {
-		return f.osFile.Close()
+		if err := f.osFile.Close(); err != nil && writeErr == nil {
+			writeErr = err
+		}
 	}
-	return nil
+
+	openFilesMu.Lock()
+	openFiles[f.path]--
+	lastClose := openFiles[f.path] <= 0
+	if lastClose {
+		delete(openFiles, f.path)
+	}
+	openFilesMu.Unlock()
+
+	if lastClose {
+		pendingUnlinksMu.Lock()
+		shouldDelete := pendingUnlinks[f.path]
+		if shouldDelete {
+			delete(pendingUnlinks, f.path)
+		}
+		pendingUnlinksMu.Unlock()
+
+		if shouldDelete {
+			hiddenPathsMu.Lock()
+			hp := hiddenPaths[f.path]
+			delete(hiddenPaths, f.path)
+			hiddenPathsMu.Unlock()
+			if hp != "" {
+				os.Remove(hp)
+			}
+			f.fs.pipe.DeferredDelete(context.Background(), f.path, "nfs")
+		}
+	}
+
+	return writeErr
 }
 
 func (f *kiwiFile) Seek(offset int64, whence int) (int64, error) {
@@ -370,10 +525,40 @@ func (f *kiwiFile) ReadAt(p []byte, off int64) (int, error) {
 	return 0, fmt.Errorf("file not opened for reading")
 }
 
+// maxFileSize is the hard limit for in-memory file buffers. Prevents OOM
+// from writes at absurdly large offsets (e.g. offset near INT64_MAX).
+const maxFileSize = 64 * 1024 * 1024 // 64 MB
+
 func (f *kiwiFile) WriteAt(p []byte, off int64) (int, error) {
-	// For simplicity, we don't support random writes via NFS yet.
-	// Most agent use cases are append-only or full overwrites.
-	return 0, fmt.Errorf("random writes not supported; use sequential writes")
+	if off < 0 {
+		return 0, fmt.Errorf("negative offset")
+	}
+	need := off + int64(len(p))
+	if need > maxFileSize {
+		return 0, fmt.Errorf("write would exceed %d byte limit (offset=%d, len=%d)", maxFileSize, off, len(p))
+	}
+
+	if f.buffer == nil && f.osFile != nil {
+		existing, err := io.ReadAll(f.osFile)
+		if err != nil {
+			return 0, fmt.Errorf("read existing content: %w", err)
+		}
+		f.buffer = existing
+		f.osFile.Close()
+		f.osFile = nil
+	}
+	if f.buffer == nil {
+		f.buffer = []byte{}
+	}
+
+	if int64(len(f.buffer)) < need {
+		grown := make([]byte, need)
+		copy(grown, f.buffer)
+		f.buffer = grown
+	}
+	copy(f.buffer[off:], p)
+	f.lastSyncETag = ""
+	return len(p), nil
 }
 
 func (f *kiwiFile) Name() string {
@@ -381,25 +566,72 @@ func (f *kiwiFile) Name() string {
 }
 
 func (f *kiwiFile) Truncate(size int64) error {
-	// Reset buffer for truncate to 0
 	if size == 0 {
 		f.buffer = nil
+		f.lastSyncETag = ""
 		return nil
 	}
-	return fmt.Errorf("truncate to non-zero size not supported")
-}
+	if size < 0 {
+		return fmt.Errorf("negative truncate size")
+	}
+	if size > maxFileSize {
+		return fmt.Errorf("truncate size %d exceeds %d byte limit", size, maxFileSize)
+	}
 
-func (f *kiwiFile) Sync() error {
-	// Writes are already flushed on Close through the pipeline
+	if f.buffer == nil && f.osFile != nil {
+		existing, err := io.ReadAll(f.osFile)
+		if err != nil {
+			return fmt.Errorf("read for truncate: %w", err)
+		}
+		f.buffer = existing
+		f.osFile.Close()
+		f.osFile = nil
+	}
+	if f.buffer == nil {
+		f.buffer = []byte{}
+	}
+
+	if int64(len(f.buffer)) > size {
+		f.buffer = f.buffer[:size]
+	} else if int64(len(f.buffer)) < size {
+		f.buffer = append(f.buffer, make([]byte, size-int64(len(f.buffer)))...)
+	}
+	f.lastSyncETag = ""
 	return nil
 }
 
+func (f *kiwiFile) Sync() error {
+	if len(f.buffer) == 0 {
+		return nil
+	}
+	_, err := f.fs.pipe.Write(context.Background(), f.path, f.buffer, "nfs")
+	if err == nil {
+		f.lastSyncETag = pipeline.ETag(f.buffer)
+	}
+	return err
+}
+
 func (f *kiwiFile) Lock() error {
-	// File locking not implemented (optimistic locking via ETags in REST API)
+	fileLocksMu.Lock()
+	defer fileLocksMu.Unlock()
+
+	if holder, held := fileLocks[f.path]; held && holder != f.lockID {
+		return fmt.Errorf("file is locked by another handle")
+	}
+	if f.lockID == "" {
+		f.lockID = fmt.Sprintf("%p-%d", f, time.Now().UnixNano())
+	}
+	fileLocks[f.path] = f.lockID
 	return nil
 }
 
 func (f *kiwiFile) Unlock() error {
+	fileLocksMu.Lock()
+	defer fileLocksMu.Unlock()
+
+	if holder, held := fileLocks[f.path]; held && holder == f.lockID {
+		delete(fileLocks, f.path)
+	}
 	return nil
 }
 
@@ -439,11 +671,7 @@ func (fs *kiwiFS) Readlink(link string) (string, error) {
 }
 
 func (fs *kiwiFS) Symlink(target, link string) error {
-	fullLink, err := fs.safePath(link)
-	if err != nil {
-		return err
-	}
-	return os.Symlink(target, fullLink)
+	return fs.pipe.CreateSymlink(context.Background(), link, target, "nfs")
 }
 
 func (fs *kiwiFS) Lstat(filename string) (os.FileInfo, error) {

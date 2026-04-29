@@ -1443,6 +1443,12 @@ func buildFTS5Query(q string) string {
 	if q == "" {
 		return ""
 	}
+	// Reject bare wildcard — it matches every document and is effectively
+	// a full table scan. Also reject queries that are only operators/wildcards.
+	stripped := strings.TrimLeft(q, "*? \t")
+	if stripped == "" {
+		return ""
+	}
 	if looksLikeFTS5(q) {
 		return q
 	}

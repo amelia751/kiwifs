@@ -153,30 +153,24 @@ func (f *FS) Rename(ctx context.Context, oldName, newName string) error {
 	if err != nil {
 		return err
 	}
-	absOld := filepath.Join(f.root, oldRel)
 	_, newRel, err := f.abs(newName)
 	if err != nil {
 		return err
 	}
+	absOld := filepath.Join(f.root, oldRel)
+
 	info, err := os.Stat(absOld)
 	if err != nil {
 		return err
 	}
+
 	if info.IsDir() {
-		// Directory renames are best-effort: we do the filesystem rename, then
-		// re-walk the destination to re-index new paths. Dropping stale entries
-		// on the old prefix happens via the watcher + reindex safety net.
 		absNew := filepath.Join(f.root, newRel)
 		return os.Rename(absOld, absNew)
 	}
-	content, err := os.ReadFile(absOld)
-	if err != nil {
-		return err
-	}
-	if _, err := f.pipe.Write(ctx, newRel, content, f.actor); err != nil {
-		return err
-	}
-	return f.pipe.Delete(ctx, oldRel, f.actor)
+
+	_, rerr := f.pipe.Rename(ctx, oldRel, newRel, f.actor)
+	return rerr
 }
 
 // OpenFile returns a File. Write-intent opens get a buffered file that

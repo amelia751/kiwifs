@@ -16,6 +16,7 @@ import (
 	"github.com/kiwifs/kiwifs/internal/backup"
 	"github.com/kiwifs/kiwifs/internal/bootstrap"
 	"github.com/kiwifs/kiwifs/internal/config"
+	"github.com/kiwifs/kiwifs/internal/lockdir"
 	kiwinfs "github.com/kiwifs/kiwifs/internal/nfs"
 	kiwis3 "github.com/kiwifs/kiwifs/internal/s3"
 	"github.com/kiwifs/kiwifs/internal/spaces"
@@ -60,6 +61,15 @@ func init() {
 
 func runServe(cmd *cobra.Command, args []string) error {
 	root, _ := cmd.Flags().GetString("root")
+
+	// Exclusive flock: prevent two servers from sharing the same data dir.
+	// Uses flock(2) on POSIX — the kernel releases it on any form of exit
+	// (including SIGKILL), so there's no stale-lock problem.
+	dirLock, err := lockdir.Acquire(root)
+	if err != nil {
+		return err
+	}
+	defer dirLock.Release()
 
 	// Auto-init: if root has no .kiwi/config.toml, initialize it.
 	kiwiConfig := fmt.Sprintf("%s/.kiwi/config.toml", root)

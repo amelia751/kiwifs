@@ -117,6 +117,17 @@ func (b *LocalBackend) DeleteFile(ctx context.Context, path, actor string) error
 	return b.stack.Pipeline.Delete(ctx, path, actor)
 }
 
+func (b *LocalBackend) Rename(ctx context.Context, from, to, actor string) (string, error) {
+	if err := b.init(); err != nil {
+		return "", err
+	}
+	res, err := b.stack.Pipeline.Rename(ctx, from, to, actor)
+	if err != nil {
+		return "", err
+	}
+	return res.ETag, nil
+}
+
 func (b *LocalBackend) Tree(ctx context.Context, path string) (json.RawMessage, error) {
 	if err := b.init(); err != nil {
 		return nil, err

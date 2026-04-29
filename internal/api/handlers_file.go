@@ -80,6 +80,11 @@ func (h *Handlers) ReadFile(c echo.Context) error {
 		return err
 	}
 
+	abs := h.store.AbsPath(path)
+	if linfo, lerr := os.Lstat(abs); lerr == nil && linfo.Mode()&os.ModeSymlink != 0 {
+		c.Response().Header().Set("X-File-Type", "symlink")
+	}
+
 	etag := fmt.Sprintf(`"%s"`, pipeline.ETag(content))
 	c.Response().Header().Set("ETag", etag)
 	ext := strings.ToLower(filepath.Ext(path))
@@ -120,6 +125,26 @@ func (h *Handlers) ReadFile(c echo.Context) error {
 	return c.Blob(http.StatusOK, detectContentType(path, content), content)
 }
 
+func (h *Handlers) Readlink(c echo.Context) error {
+	path, err := requirePath(c)
+	if err != nil {
+		return err
+	}
+	root := h.store.AbsPath("")
+	abs, err := storage.GuardPath(root, path)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+	}
+	target, err := os.Readlink(abs)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return echo.NewHTTPError(http.StatusNotFound, "not found")
+		}
+		return echo.NewHTTPError(http.StatusBadRequest, "not a symlink")
+	}
+	return c.String(http.StatusOK, target)
+}
+
 type resolveLinksRequest struct {
 	Content string `json:"content"`
 }
@@ -157,6 +182,17 @@ func (h *Handlers) WriteFile(c echo.Context) error {
 	}
 
 	actor := sanitizeActor(c.Request().Header.Get("X-Actor"))
+
+	if c.Request().Header.Get("Content-Type") == "application/x-symlink" {
+		if err := h.pipe.CreateSymlink(c.Request().Context(), path, string(body), actor); err != nil {
+			if errors.Is(err, storage.ErrPathDenied) {
+				return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+			}
+			return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+		}
+		return c.JSON(http.StatusOK, map[string]string{"path": path, "type": "symlink"})
+	}
+
 	if provType, provID, ok := pipeline.ParseProvenanceHeader(c.Request().Header.Get("X-Provenance")); ok {
 		injected, perr := pipeline.InjectProvenance(body, provType, provID, actor)
 		if perr != nil {
@@ -415,6 +451,67 @@ func parseSize(s string) (int64, error) {
 		return 0, fmt.Errorf("unknown unit %q", unit)
 	}
 	return int64(n * mul), nil
+}
+
+type renameRequest struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+}
+
+func (h *Handlers) RenameFile(c echo.Context) error {
+	var req renameRequest
+	if err := bindJSON(c, &req); err != nil {
+		return err
+	}
+	if req.From == "" || req.To == "" {
+		return echo.NewHTTPError(http.StatusBadRequest, "from and to are required")
+	}
+
+	actor := sanitizeActor(c.Request().Header.Get("X-Actor"))
+	res, err := h.pipe.Rename(c.Request().Context(), req.From, req.To, actor)
+	if err != nil {
+		if errors.Is(err, storage.ErrPathDenied) {
+			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+		}
+		if errors.Is(err, os.ErrNotExist) {
+			return echo.NewHTTPError(http.StatusNotFound, "source file not found")
+		}
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+
+	return c.JSON(http.StatusOK, map[string]string{
+		"from": req.From,
+		"to":   res.Path,
+		"etag": res.ETag,
+	})
+}
+
+func (h *Handlers) RenameDir(c echo.Context) error {
+	var req renameRequest
+	if err := bindJSON(c, &req); err != nil {
+		return err
+	}
+	if req.From == "" || req.To == "" {
+		return echo.NewHTTPError(http.StatusBadRequest, "from and to are required")
+	}
+
+	actor := sanitizeActor(c.Request().Header.Get("X-Actor"))
+	count, err := h.pipe.RenameDir(c.Request().Context(), req.From, req.To, actor)
+	if err != nil {
+		if errors.Is(err, storage.ErrPathDenied) {
+			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+		}
+		if errors.Is(err, os.ErrNotExist) {
+			return echo.NewHTTPError(http.StatusNotFound, "source directory not found")
+		}
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+
+	return c.JSON(http.StatusOK, map[string]any{
+		"from":    req.From,
+		"to":      req.To,
+		"renamed": count,
+	})
 }
 
 func (h *Handlers) DeleteFile(c echo.Context) error {

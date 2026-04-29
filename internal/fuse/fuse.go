@@ -62,8 +62,9 @@ type dirCacheEntry struct {
 }
 
 type fileCacheEntry struct {
-	data  []byte
-	stamp time.Time
+	data      []byte
+	stamp     time.Time
+	isSymlink bool
 }
 
 // ClientAuth is a tagged union for the authentication styles kiwifs
@@ -186,19 +187,19 @@ func (c *Client) storeDir(path string, entries []fuse.DirEntry) {
 	c.dirs[path] = &dirCacheEntry{entries: entries, stamp: time.Now()}
 }
 
-func (c *Client) cachedFile(path string) []byte {
+func (c *Client) cachedFile(path string) *fileCacheEntry {
 	c.cacheMu.RLock()
 	defer c.cacheMu.RUnlock()
 	if e, ok := c.files[path]; ok && time.Since(e.stamp) < cacheTTL {
-		return e.data
+		return e
 	}
 	return nil
 }
 
-func (c *Client) storeFile(path string, data []byte) {
+func (c *Client) storeFile(path string, data []byte, isSymlink bool) {
 	c.cacheMu.Lock()
 	defer c.cacheMu.Unlock()
-	c.files[path] = &fileCacheEntry{data: data, stamp: time.Now()}
+	c.files[path] = &fileCacheEntry{data: data, stamp: time.Now(), isSymlink: isSymlink}
 }
 
 // invalidate drops cached copies of a path and its parent directory listing.
@@ -231,6 +232,10 @@ var _ fs.NodeCreater = (*kiwiNode)(nil)
 var _ fs.NodeUnlinker = (*kiwiNode)(nil)
 var _ fs.NodeMkdirer = (*kiwiNode)(nil)
 var _ fs.NodeRmdirer = (*kiwiNode)(nil)
+var _ fs.NodeRenamer = (*kiwiNode)(nil)
+var _ fs.NodeSetattrer = (*kiwiNode)(nil)
+var _ fs.NodeSymlinker = (*kiwiNode)(nil)
+var _ fs.NodeReadlinker = (*kiwiNode)(nil)
 
 func httpErrno(status int) syscall.Errno {
 	switch {
@@ -250,31 +255,44 @@ func childPath(parent, name string) string {
 	return filepath.Join(parent, name)
 }
 
-// statFile issues a GET against the file endpoint and returns (size, found).
+// fileStat holds metadata returned by statFile.
+type fileStat struct {
+	size      int64
+	modTime   time.Time
+	found     bool
+	isSymlink bool
+}
+
+// statFile issues a GET against the file endpoint and returns file metadata.
 // KiwiFS doesn't implement HEAD on /api/kiwi/file, so the only portable way
 // to get a content length is a cached GET. Uses the file cache so a
 // subsequent Read is a no-op on the network.
-func (n *kiwiNode) statFile() (int64, bool, syscall.Errno) {
+func (n *kiwiNode) statFile() (fileStat, syscall.Errno) {
 	if cached := n.client.cachedFile(n.path); cached != nil {
-		return int64(len(cached)), true, 0
+		return fileStat{size: int64(len(cached.data)), found: true, isSymlink: cached.isSymlink}, 0
 	}
 	resp, err := n.client.get(n.client.apiURL("/api/kiwi/file", n.path))
 	if err != nil {
-		return 0, false, syscall.EIO
+		return fileStat{}, syscall.EIO
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
-		return 0, false, 0
+		return fileStat{}, 0
 	}
 	if resp.StatusCode != http.StatusOK {
-		return 0, false, httpErrno(resp.StatusCode)
+		return fileStat{}, httpErrno(resp.StatusCode)
 	}
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return 0, false, syscall.EIO
+		return fileStat{}, syscall.EIO
 	}
-	n.client.storeFile(n.path, data)
-	return int64(len(data)), true, 0
+	var modTime time.Time
+	if lm := resp.Header.Get("Last-Modified"); lm != "" {
+		modTime, _ = http.ParseTime(lm)
+	}
+	isSymlink := resp.Header.Get("X-File-Type") == "symlink"
+	n.client.storeFile(n.path, data, isSymlink)
+	return fileStat{size: int64(len(data)), modTime: modTime, found: true, isSymlink: isSymlink}, 0
 }
 
 // Getattr retrieves file attributes.
@@ -289,30 +307,45 @@ func (n *kiwiNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrO
 		return 0
 	}
 
-	size, found, errno := n.statFile()
+	st, errno := n.statFile()
 	if errno != 0 {
 		return errno
 	}
-	if !found {
+	if !st.found {
 		// File lookup failed — try treating it as a directory. A successful
 		// /tree response is the server's way of saying "this exists and is
 		// a dir".
 		if _, derr := n.listDir(); derr == 0 {
 			out.Mode = 0755 | syscall.S_IFDIR
 			out.Size = 4096
-			out.Mtime = uint64(time.Now().Unix())
+			now := time.Now()
+			out.Mtime = uint64(now.Unix())
+			out.Mtimensec = uint32(now.Nanosecond())
 			out.Atime = out.Mtime
+			out.Atimensec = out.Mtimensec
 			out.Ctime = out.Mtime
+			out.Ctimensec = out.Mtimensec
 			return 0
 		}
 		return syscall.ENOENT
 	}
 
-	out.Mode = 0644 | syscall.S_IFREG
-	out.Size = uint64(size)
-	out.Mtime = uint64(time.Now().Unix())
+	if st.isSymlink {
+		out.Mode = 0777 | syscall.S_IFLNK
+	} else {
+		out.Mode = 0644 | syscall.S_IFREG
+	}
+	out.Size = uint64(st.size)
+	modTime := st.modTime
+	if modTime.IsZero() {
+		modTime = time.Now()
+	}
+	out.Mtime = uint64(modTime.Unix())
+	out.Mtimensec = uint32(modTime.Nanosecond())
 	out.Atime = out.Mtime
+	out.Atimensec = out.Mtimensec
 	out.Ctime = out.Mtime
+	out.Ctimensec = out.Mtimensec
 	return 0
 }
 
@@ -376,13 +409,19 @@ func (n *kiwiNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) 
 		path:   cp,
 	}
 
-	size, found, errno := child.statFile()
+	st, errno := child.statFile()
 	if errno != 0 {
 		return nil, errno
 	}
-	if found {
+	if st.found {
+		if st.isSymlink {
+			out.Mode = 0777 | syscall.S_IFLNK
+			out.Size = uint64(st.size)
+			stable := fs.StableAttr{Mode: syscall.S_IFLNK}
+			return n.NewInode(ctx, child, stable), 0
+		}
 		out.Mode = 0644 | syscall.S_IFREG
-		out.Size = uint64(size)
+		out.Size = uint64(st.size)
 		stable := fs.StableAttr{Mode: syscall.S_IFREG}
 		return n.NewInode(ctx, child, stable), 0
 	}
@@ -397,10 +436,18 @@ func (n *kiwiNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) 
 
 // Open opens a file for reading or writing.
 func (n *kiwiNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
-	return &kiwiFile{
+	fh := &kiwiFile{
 		node:   n,
 		client: n.client,
-	}, 0, 0
+	}
+	if flags&syscall.O_TRUNC != 0 {
+		fh.data = []byte{}
+		fh.dirty = true
+	}
+	if flags&syscall.O_APPEND != 0 {
+		fh.append = true
+	}
+	return fh, 0, 0
 }
 
 // Create creates a new file.
@@ -474,18 +521,198 @@ func (n *kiwiNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 	return n.Unlink(ctx, name)
 }
 
+// Rename moves a file from one path to another via the atomic rename endpoint.
+func (n *kiwiNode) Rename(ctx context.Context, name string, newParent fs.InodeEmbedder, newName string, flags uint32) syscall.Errno {
+	oldPath := childPath(n.path, name)
+	newPath := childPath(newParent.(*kiwiNode).path, newName)
+
+	// Check whether this is a directory — use the bulk rename-dir endpoint.
+	if n.client.cachedFile(oldPath) == nil {
+		resp, err := n.client.get(n.client.apiURL("/api/kiwi/file", oldPath))
+		if err != nil {
+			return syscall.EIO
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode == http.StatusNotFound {
+			child := &kiwiNode{client: n.client, path: oldPath}
+			if _, derr := child.listDir(); derr == 0 {
+				bodyBytes, _ := json.Marshal(map[string]string{"from": oldPath, "to": newPath})
+				dreq, _ := http.NewRequest("POST", n.client.remote+"/api/kiwi/rename-dir", bytes.NewReader(bodyBytes))
+				dreq.Header.Set("Content-Type", "application/json")
+				dreq.Header.Set("X-Actor", "fuse")
+				dresp, derr2 := n.client.do(dreq)
+				if derr2 != nil {
+					return syscall.EIO
+				}
+				defer dresp.Body.Close()
+				if dresp.StatusCode != http.StatusOK {
+					return httpErrno(dresp.StatusCode)
+				}
+				n.client.invalidate(oldPath)
+				n.client.invalidate(newPath)
+				return 0
+			}
+			return syscall.ENOENT
+		}
+		if resp.StatusCode != http.StatusOK {
+			return httpErrno(resp.StatusCode)
+		}
+		io.Copy(io.Discard, resp.Body)
+	}
+
+	bodyBytes, _ := json.Marshal(map[string]string{"from": oldPath, "to": newPath})
+	req, _ := http.NewRequest("POST", n.client.remote+"/api/kiwi/rename", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Actor", "fuse")
+	resp, err := n.client.do(req)
+	if err != nil {
+		return syscall.EIO
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return httpErrno(resp.StatusCode)
+	}
+
+	n.client.invalidate(oldPath)
+	n.client.invalidate(newPath)
+	return 0
+}
+
+// Setattr handles truncate, chmod, and timestamp changes.
+func (n *kiwiNode) Setattr(ctx context.Context, f fs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
+	if in.Valid&fuse.FATTR_SIZE != 0 {
+		if in.Size == 0 {
+			req, _ := http.NewRequest("PUT", n.client.apiURL("/api/kiwi/file", n.path), bytes.NewReader([]byte{}))
+			req.Header.Set("Content-Type", "application/octet-stream")
+			req.Header.Set("X-Actor", "fuse")
+			resp, err := n.client.do(req)
+			if err != nil {
+				return syscall.EIO
+			}
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				return httpErrno(resp.StatusCode)
+			}
+			n.client.invalidate(n.path)
+			n.client.storeFile(n.path, []byte{}, false)
+		} else if f != nil {
+			kf := f.(*kiwiFile)
+			if kf.data == nil {
+				if cached := n.client.cachedFile(n.path); cached != nil {
+					kf.data = append([]byte(nil), cached.data...)
+				} else {
+					resp, err := n.client.get(n.client.apiURL("/api/kiwi/file", n.path))
+					if err != nil {
+						return syscall.EIO
+					}
+					data, _ := io.ReadAll(resp.Body)
+					resp.Body.Close()
+					kf.data = data
+				}
+			}
+			if int64(len(kf.data)) > int64(in.Size) {
+				kf.data = kf.data[:in.Size]
+			} else if int64(len(kf.data)) < int64(in.Size) {
+				grown := make([]byte, in.Size)
+				copy(grown, kf.data)
+				kf.data = grown
+			}
+			kf.dirty = true
+		} else {
+			var content []byte
+			if cached := n.client.cachedFile(n.path); cached != nil {
+				content = append([]byte(nil), cached.data...)
+			} else {
+				resp, err := n.client.get(n.client.apiURL("/api/kiwi/file", n.path))
+				if err != nil {
+					return syscall.EIO
+				}
+				data, _ := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				content = data
+			}
+			if int64(len(content)) > int64(in.Size) {
+				content = content[:in.Size]
+			} else if int64(len(content)) < int64(in.Size) {
+				grown := make([]byte, in.Size)
+				copy(grown, content)
+				content = grown
+			}
+			req, _ := http.NewRequest("PUT", n.client.apiURL("/api/kiwi/file", n.path), bytes.NewReader(content))
+			req.Header.Set("Content-Type", "application/octet-stream")
+			req.Header.Set("X-Actor", "fuse")
+			resp, err := n.client.do(req)
+			if err != nil {
+				return syscall.EIO
+			}
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				return httpErrno(resp.StatusCode)
+			}
+			n.client.invalidate(n.path)
+			n.client.storeFile(n.path, content, false)
+		}
+	}
+	return n.Getattr(ctx, f, out)
+}
+
+// Symlink creates a symlink by writing the target path as file content with
+// a special content-type header so the server stores it as a real symlink.
+func (n *kiwiNode) Symlink(ctx context.Context, target, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	cp := childPath(n.path, name)
+	content := []byte(target)
+
+	req, _ := http.NewRequest("PUT", n.client.apiURL("/api/kiwi/file", cp), bytes.NewReader(content))
+	req.Header.Set("Content-Type", "application/x-symlink")
+	req.Header.Set("X-Actor", "fuse")
+	resp, err := n.client.do(req)
+	if err != nil {
+		return nil, syscall.EIO
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, httpErrno(resp.StatusCode)
+	}
+
+	n.client.invalidate(cp)
+
+	child := &kiwiNode{client: n.client, path: cp}
+	out.Mode = 0777 | syscall.S_IFLNK
+	stable := fs.StableAttr{Mode: syscall.S_IFLNK}
+	return n.NewInode(ctx, child, stable), 0
+}
+
+// Readlink reads the symlink target path from the server's readlink endpoint.
+func (n *kiwiNode) Readlink(ctx context.Context) ([]byte, syscall.Errno) {
+	resp, err := n.client.get(n.client.apiURL("/api/kiwi/readlink", n.path))
+	if err != nil {
+		return nil, syscall.EIO
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, httpErrno(resp.StatusCode)
+	}
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, syscall.EIO
+	}
+	return data, 0
+}
+
 // kiwiFile represents an open file handle.
 type kiwiFile struct {
 	node   *kiwiNode
 	client *Client
 	data   []byte // cached data for reads/writes
 	dirty  bool   // whether Write touched the buffer and we must PUT on Flush
+	append bool   // when true, Write ignores off and appends
 }
 
 // Ensure kiwiFile implements the necessary interfaces
 var _ fs.FileReader = (*kiwiFile)(nil)
 var _ fs.FileWriter = (*kiwiFile)(nil)
 var _ fs.FileFlusher = (*kiwiFile)(nil)
+var _ fs.FileFsyncer = (*kiwiFile)(nil)
 
 // Read reads from the file.
 func (f *kiwiFile) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
@@ -493,7 +720,7 @@ func (f *kiwiFile) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadR
 	// hitting the network.
 	if f.data == nil {
 		if cached := f.client.cachedFile(f.node.path); cached != nil {
-			f.data = cached
+			f.data = cached.data
 		}
 	}
 	if f.data == nil {
@@ -515,7 +742,7 @@ func (f *kiwiFile) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadR
 			return nil, syscall.EIO
 		}
 		f.data = data
-		f.client.storeFile(f.node.path, data)
+		f.client.storeFile(f.node.path, data, false)
 	}
 
 	// Read from cached data
@@ -531,24 +758,49 @@ func (f *kiwiFile) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadR
 	return fuse.ReadResultData(f.data[off:end]), 0
 }
 
+// fuseMaxFileSize limits in-memory file buffers to prevent OOM from
+// writes at absurd offsets or unbounded appends.
+const fuseMaxFileSize = 64 * 1024 * 1024 // 64 MB
+
 // Write writes to the file (accumulates in memory).
 func (f *kiwiFile) Write(ctx context.Context, data []byte, off int64) (uint32, syscall.Errno) {
-	// Ensure buffer is large enough
+	if f.data == nil && !f.dirty {
+		if cached := f.client.cachedFile(f.node.path); cached != nil {
+			f.data = append([]byte(nil), cached.data...)
+		} else if f.append {
+			resp, err := f.client.get(f.client.apiURL("/api/kiwi/file", f.node.path))
+			if err == nil {
+				body, _ := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				if resp.StatusCode == http.StatusOK {
+					f.data = body
+					f.client.storeFile(f.node.path, body, false)
+				}
+			}
+		}
+	}
+	if f.append {
+		off = int64(len(f.data))
+	}
+	if off < 0 {
+		return 0, syscall.EFBIG
+	}
 	need := off + int64(len(data))
+	if need > fuseMaxFileSize || need < 0 {
+		return 0, syscall.EFBIG
+	}
 	if int64(len(f.data)) < need {
 		newData := make([]byte, need)
 		copy(newData, f.data)
 		f.data = newData
 	}
-
-	// Write to buffer
 	copy(f.data[off:], data)
 	f.dirty = true
 	return uint32(len(data)), 0
 }
 
-// Flush writes the buffered data to the remote server.
-func (f *kiwiFile) Flush(ctx context.Context) syscall.Errno {
+// flushToServer PUTs the in-memory buffer to the remote server.
+func (f *kiwiFile) flushToServer() syscall.Errno {
 	if !f.dirty {
 		return 0
 	}
@@ -567,10 +819,18 @@ func (f *kiwiFile) Flush(ctx context.Context) syscall.Errno {
 		return httpErrno(resp.StatusCode)
 	}
 
-	// Our write invalidates sibling caches — drop them so the next read
-	// fetches the server's new truth rather than whatever used to sit here.
 	f.client.invalidate(f.node.path)
-	f.client.storeFile(f.node.path, append([]byte(nil), f.data...))
+	f.client.storeFile(f.node.path, append([]byte(nil), f.data...), false)
 	f.dirty = false
 	return 0
+}
+
+// Flush writes the buffered data to the remote server.
+func (f *kiwiFile) Flush(ctx context.Context) syscall.Errno {
+	return f.flushToServer()
+}
+
+// Fsync flushes data to the server without closing the file.
+func (f *kiwiFile) Fsync(ctx context.Context, flags uint32) syscall.Errno {
+	return f.flushToServer()
 }

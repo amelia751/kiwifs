@@ -72,6 +72,55 @@ title: Test
 	}
 }
 
+func TestParse_OversizedFrontmatterSkipped(t *testing.T) {
+	bigFM := "---\ntitle: bomb\n"
+	for len(bigFM) < MaxFrontmatterBytes+100 {
+		bigFM += "key: " + string(make([]byte, 500)) + "\n"
+	}
+	bigFM += "---\n# Heading After Big FM\n"
+
+	p, err := Parse([]byte(bigFM))
+	if err != nil {
+		t.Fatalf("Parse should not error on oversized FM: %v", err)
+	}
+	if len(p.Frontmatter) > 0 {
+		t.Errorf("expected empty frontmatter for oversized FM, got %d keys", len(p.Frontmatter))
+	}
+	if len(p.Headings) == 0 {
+		t.Error("headings should still be extracted even with oversized FM")
+	}
+}
+
+func TestFrontmatter_OversizedReturnsEmpty(t *testing.T) {
+	bigFM := "---\ntitle: bomb\n"
+	for len(bigFM) < MaxFrontmatterBytes+100 {
+		bigFM += "key: " + string(make([]byte, 500)) + "\n"
+	}
+	bigFM += "---\n# Body\n"
+
+	fm, err := Frontmatter([]byte(bigFM))
+	if err != nil {
+		t.Fatalf("Frontmatter should not error: %v", err)
+	}
+	if len(fm) > 0 {
+		t.Errorf("expected empty FM, got %d keys", len(fm))
+	}
+}
+
+func TestParse_NormalFrontmatterStillWorks(t *testing.T) {
+	content := []byte("---\ntitle: Normal\ntags: [x]\n---\n# Heading\n")
+	p, err := Parse(content)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if p.Frontmatter["title"] != "Normal" {
+		t.Errorf("expected title=Normal, got %v", p.Frontmatter["title"])
+	}
+	if len(p.Headings) != 1 {
+		t.Errorf("expected 1 heading, got %d", len(p.Headings))
+	}
+}
+
 func TestSlugify(t *testing.T) {
 	cases := map[string]string{
 		"Hello World":         "hello-world",

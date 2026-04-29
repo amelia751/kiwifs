@@ -168,11 +168,25 @@ type allRemover interface {
 	RemoveAll(ctx context.Context, path string) error
 }
 
+// IndexFile is the exported entry point for re-indexing a single file.
+func (p *Pipeline) IndexFile(ctx context.Context, path string, content []byte) {
+	p.indexFile(ctx, path, content)
+}
+
+// DeindexFile is the exported entry point for removing a file from all indexes.
+func (p *Pipeline) DeindexFile(ctx context.Context, path string) {
+	p.deindexFile(ctx, path)
+}
+
 // indexFile pushes content into every index (search, links, vectors, meta).
 // When AsyncIdx is set, it enqueues and returns immediately. Otherwise it
 // runs synchronously. Errors are logged, not returned — side-effect
 // failures must not block the write that triggered them.
 func (p *Pipeline) indexFile(ctx context.Context, path string, content []byte) {
+	abs := p.Store.AbsPath(path)
+	if info, err := os.Lstat(abs); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return
+	}
 	if p.AsyncIdx != nil {
 		p.AsyncIdx.Enqueue(path, content)
 		return
@@ -497,7 +511,7 @@ func (p *Pipeline) WriteWithOpts(ctx context.Context, path string, content []byt
 	if err := ctx.Err(); err != nil {
 		return Result{}, err
 	}
-	if opts.IfMatch != "" {
+	if opts.IfMatch != "" && opts.IfMatch != "*" {
 		if current, err := p.Store.Read(ctx, path); err == nil {
 			if ETag(current) != opts.IfMatch {
 				return Result{}, ErrConflict
@@ -507,6 +521,9 @@ func (p *Pipeline) WriteWithOpts(ctx context.Context, path string, content []byt
 		// the previous handler-side behaviour and RFC 7232 §3.1, which
 		// applies If-Match only when the resource exists).
 	}
+	// If-Match: * means "match any existing representation" per RFC 7232 §3.1.
+	// We skip the ETag comparison — the precondition succeeds as long as the
+	// resource exists. For new files (create), * is a no-op.
 	// Mark before the disk write so the fsnotify event fires while the
 	// entry is already visible — otherwise a fast watcher could observe
 	// before we record it. We stamp the etag so a delayed fsnotify batch
@@ -704,6 +721,174 @@ func (p *Pipeline) BulkWrite(ctx context.Context, files []struct {
 	return out, nil
 }
 
+// Rename atomically moves a file from oldPath to newPath. Both the write
+// of the new path and the deletion of the old path happen under a single
+// writeMu acquisition and a single git commit, so a crash between the two
+// can't leave duplicated or lost content.
+func (p *Pipeline) Rename(ctx context.Context, oldPath, newPath, actor string) (Result, error) {
+	if oldPath == "" || newPath == "" {
+		return Result{}, fmt.Errorf("both oldPath and newPath are required")
+	}
+	if oldPath == newPath {
+		content, err := p.Store.Read(ctx, oldPath)
+		if err != nil {
+			return Result{}, fmt.Errorf("read %s: %w", oldPath, err)
+		}
+		return Result{Path: oldPath, ETag: ETag(content)}, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return Result{}, err
+	}
+	actor = coalesce(actor)
+
+	p.writeMu.Lock()
+	defer p.writeMu.Unlock()
+
+	if err := ctx.Err(); err != nil {
+		return Result{}, err
+	}
+
+	content, err := p.Store.Read(ctx, oldPath)
+	if err != nil {
+		return Result{}, fmt.Errorf("read %s: %w", oldPath, err)
+	}
+
+	p.markInflightEtag(newPath, ETag(content))
+	p.markInflight(oldPath)
+
+	if err := p.Store.Write(ctx, newPath, content); err != nil {
+		return Result{}, fmt.Errorf("write %s: %w", newPath, err)
+	}
+
+	if err := p.Store.Delete(ctx, oldPath); err != nil {
+		log.Printf("pipeline: Rename delete(%s) after write(%s) succeeded: %v", oldPath, newPath, err)
+		p.trackUncommitted(oldPath)
+	}
+
+	msg := fmt.Sprintf("%s: rename %s → %s", actor, oldPath, newPath)
+	if err := p.Versioner.BulkCommit(ctx, []string{newPath, oldPath}, actor, msg); err != nil {
+		log.Printf("pipeline: Rename BulkCommit: %v", err)
+		p.trackUncommitted(newPath)
+		p.trackUncommitted(oldPath)
+	}
+
+	p.indexFile(ctx, newPath, content)
+	p.deindexFile(ctx, oldPath)
+
+	etag := ETag(content)
+	p.broadcast(events.Event{Op: "write", Path: newPath, Actor: actor, ETag: etag})
+	p.broadcast(events.Event{Op: "delete", Path: oldPath, Actor: actor})
+
+	return Result{Path: newPath, ETag: etag}, nil
+}
+
+// RenameDir atomically renames a directory on disk and commits all affected
+// paths via git. Re-indexes all files under the new directory.
+func (p *Pipeline) RenameDir(ctx context.Context, from, to, actor string) (int, error) {
+	if from == "" || to == "" {
+		return 0, fmt.Errorf("both from and to are required")
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	actor = coalesce(actor)
+
+	root := p.Store.AbsPath("")
+	absFrom, err := storage.GuardPath(root, from)
+	if err != nil {
+		return 0, err
+	}
+	absTo, err := storage.GuardPath(root, to)
+	if err != nil {
+		return 0, err
+	}
+
+	info, err := os.Stat(absFrom)
+	if err != nil {
+		return 0, fmt.Errorf("stat source: %w", err)
+	}
+	if !info.IsDir() {
+		return 0, fmt.Errorf("source is not a directory: %s", from)
+	}
+
+	p.writeMu.Lock()
+	defer p.writeMu.Unlock()
+
+	if err := os.MkdirAll(filepath.Dir(absTo), 0755); err != nil {
+		return 0, fmt.Errorf("mkdir parent: %w", err)
+	}
+	if err := os.Rename(absFrom, absTo); err != nil {
+		return 0, fmt.Errorf("rename dir: %w", err)
+	}
+
+	var newPaths []string
+	_ = filepath.Walk(absTo, func(path string, fi os.FileInfo, werr error) error {
+		if werr != nil || fi.IsDir() {
+			return nil
+		}
+		rel, _ := filepath.Rel(root, path)
+		rel = filepath.ToSlash(rel)
+		newPaths = append(newPaths, rel)
+		return nil
+	})
+
+	fromNorm := strings.TrimSuffix(from, "/") + "/"
+	toNorm := strings.TrimSuffix(to, "/") + "/"
+	oldPaths := make([]string, 0, len(newPaths))
+	for _, np := range newPaths {
+		op := fromNorm + strings.TrimPrefix(np, toNorm)
+		oldPaths = append(oldPaths, op)
+	}
+
+	for _, np := range newPaths {
+		p.markInflight(np)
+	}
+	for _, op := range oldPaths {
+		p.markInflight(op)
+	}
+
+	allPaths := append(newPaths, oldPaths...)
+	msg := fmt.Sprintf("%s: rename dir %s → %s", actor, from, to)
+	if err := p.Versioner.BulkCommit(ctx, allPaths, actor, msg); err != nil {
+		log.Printf("pipeline: RenameDir BulkCommit: %v", err)
+		for _, p2 := range allPaths {
+			p.trackUncommitted(p2)
+		}
+	}
+
+	for _, np := range newPaths {
+		content, rerr := p.Store.Read(ctx, np)
+		if rerr == nil {
+			p.indexFile(ctx, np, content)
+		}
+	}
+	for _, op := range oldPaths {
+		p.deindexFile(ctx, op)
+	}
+
+	for _, np := range newPaths {
+		p.broadcast(events.Event{Op: "write", Path: np, Actor: actor})
+	}
+	for _, op := range oldPaths {
+		p.broadcast(events.Event{Op: "delete", Path: op, Actor: actor})
+	}
+
+	return len(newPaths), nil
+}
+
+// DeferredDelete records a deletion in git and removes from indexes, without
+// attempting to delete the file from disk (caller already handled that).
+func (p *Pipeline) DeferredDelete(ctx context.Context, path, actor string) {
+	p.writeMu.Lock()
+	defer p.writeMu.Unlock()
+	if err := p.Versioner.CommitDelete(ctx, path, actor); err != nil {
+		log.Printf("pipeline: versioner.CommitDelete(%s): %v", path, err)
+		p.trackUncommitted(path)
+	}
+	p.deindexFile(ctx, path)
+	p.broadcast(events.Event{Op: "delete", Path: path, Actor: actor})
+}
+
 // Delete removes a file and fans out to versioner, searcher, linker, and
 // the SSE hub. Missing files are reported via the storage error unchanged.
 func (p *Pipeline) Delete(ctx context.Context, path, actor string) error {
@@ -730,6 +915,56 @@ func (p *Pipeline) Delete(ctx context.Context, path, actor string) error {
 	p.deindexFile(ctx, path)
 	p.broadcast(events.Event{Op: "delete", Path: path, Actor: actor})
 	return nil
+}
+
+// CreateSymlink creates a real OS symlink on disk and commits it via git.
+func (p *Pipeline) CreateSymlink(ctx context.Context, path, target, actor string) error {
+	if path == "" {
+		return fmt.Errorf("path is required")
+	}
+	root := p.Store.AbsPath("")
+	abs, err := storage.GuardPath(root, path)
+	if err != nil {
+		return err
+	}
+	if filepath.IsAbs(target) {
+		return fmt.Errorf("%w: absolute symlink target not allowed", storage.ErrPathDenied)
+	}
+	resolved := filepath.Clean(filepath.Join(filepath.Dir(abs), target))
+	if rel, err := filepath.Rel(root, resolved); err != nil || strings.HasPrefix(rel, "..") {
+		return fmt.Errorf("%w: symlink target escapes root", storage.ErrPathDenied)
+	}
+
+	p.writeMu.Lock()
+	defer p.writeMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	dir := filepath.Dir(abs)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("mkdir for symlink: %w", err)
+	}
+	os.Remove(abs)
+	if err := os.Symlink(target, abs); err != nil {
+		return fmt.Errorf("symlink: %w", err)
+	}
+	p.commitAndTrack(ctx, path, actor)
+	p.broadcast(events.Event{Op: "write", Path: path, Actor: actor})
+	return nil
+}
+
+// BulkCommitOnly stages and commits multiple paths under writeMu without
+// indexing. Used when the caller has already handled storage and indexing
+// (e.g., NFS directory rename) but needs a serialised git commit.
+func (p *Pipeline) BulkCommitOnly(ctx context.Context, paths []string, actor, message string) {
+	p.writeMu.Lock()
+	defer p.writeMu.Unlock()
+	if err := p.Versioner.BulkCommit(ctx, paths, actor, message); err != nil {
+		log.Printf("pipeline: versioner.BulkCommit: %v", err)
+		for _, path := range paths {
+			p.trackUncommitted(path)
+		}
+	}
 }
 
 // CommitOnly stages and commits a path under writeMu without indexing.

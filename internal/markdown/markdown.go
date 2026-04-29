@@ -40,10 +40,25 @@ type Parsed struct {
 	Headings    []Heading      `json:"headings,omitempty"`
 }
 
+// MaxFrontmatterBytes caps the raw YAML frontmatter block at 64 KB.
+// This is a belt-and-suspenders defence against YAML bomb amplification:
+// gopkg.in/yaml.v3 already rejects excessive aliasing, but a size cap
+// protects against bloated frontmatter regardless of parser behaviour.
+// 64 KB is generous for any legitimate metadata; Kubernetes uses 3 MB for
+// entire manifests.
+const MaxFrontmatterBytes = 64 * 1024
+
 // Parse returns frontmatter + heading outline for content. A malformed
 // frontmatter block returns it as empty but still yields the heading list
 // — we'd rather render a page with partial metadata than fail open.
+// Frontmatter blocks exceeding MaxFrontmatterBytes are silently treated
+// as empty (the body/headings are still extracted).
 func Parse(content []byte) (*Parsed, error) {
+	fm, _, _ := SplitFrontmatter(content)
+	if len(fm) > MaxFrontmatterBytes {
+		return parseFrontmatterless(content)
+	}
+
 	md := goldmark.New(goldmark.WithExtensions(meta.Meta))
 	ctx := parser.NewContext()
 	doc := md.Parser().Parse(text.NewReader(content), parser.WithContext(ctx))
@@ -77,9 +92,45 @@ func Parse(content []byte) (*Parsed, error) {
 	return out, nil
 }
 
+// parseFrontmatterless extracts headings only, skipping frontmatter parsing
+// entirely. Used when the frontmatter block is too large (potential bomb).
+func parseFrontmatterless(content []byte) (*Parsed, error) {
+	_, body, _ := SplitFrontmatter(content)
+	if body == nil {
+		body = content
+	}
+	md := goldmark.New()
+	doc := md.Parser().Parse(text.NewReader(body))
+	out := &Parsed{}
+	ast.Walk(doc, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
+		if !entering {
+			return ast.WalkContinue, nil
+		}
+		h, ok := n.(*ast.Heading)
+		if !ok {
+			return ast.WalkContinue, nil
+		}
+		var buf bytes.Buffer
+		for c := h.FirstChild(); c != nil; c = c.NextSibling() {
+			extractText(&buf, c, body)
+		}
+		txt := strings.TrimSpace(buf.String())
+		if txt != "" {
+			out.Headings = append(out.Headings, Heading{Level: h.Level, Text: txt, Slug: Slugify(txt)})
+		}
+		return ast.WalkContinue, nil
+	})
+	return out, nil
+}
+
 // Frontmatter is a lightweight helper when callers only want the metadata
-// block — avoids walking the full AST.
+// block — avoids walking the full AST. Returns empty if the frontmatter
+// exceeds MaxFrontmatterBytes.
 func Frontmatter(content []byte) (map[string]any, error) {
+	fm, _, _ := SplitFrontmatter(content)
+	if len(fm) > MaxFrontmatterBytes {
+		return map[string]any{}, nil
+	}
 	md := goldmark.New(goldmark.WithExtensions(meta.Meta))
 	ctx := parser.NewContext()
 	md.Parser().Parse(text.NewReader(content), parser.WithContext(ctx))

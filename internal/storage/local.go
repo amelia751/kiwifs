@@ -60,6 +60,9 @@ func (l *Local) AbsPath(path string) string {
 // internal directories (.git, .kiwi, and any other dot-prefixed dirs)
 // that must never be exposed through the API. Returns the absolute path.
 func GuardPath(root, userPath string) (string, error) {
+	if err := validatePathChars(userPath); err != nil {
+		return "", fmt.Errorf("%w: %v", ErrPathDenied, err)
+	}
 	clean := normalizeUserPath(userPath)
 	abs := filepath.Join(root, filepath.FromSlash(clean))
 	rel, err := filepath.Rel(root, abs)
@@ -69,7 +72,30 @@ func GuardPath(root, userPath string) (string, error) {
 	if hasHiddenComponent(rel) {
 		return "", fmt.Errorf("%w: access to internal path denied: %s", ErrPathDenied, userPath)
 	}
+	if isDangerousFile(clean) {
+		return "", fmt.Errorf("%w: write to %s is blocked (would alter git behaviour)", ErrPathDenied, filepath.Base(clean))
+	}
 	return abs, nil
+}
+
+// validatePathChars rejects filenames that are unsafe on POSIX or Windows
+// filesystems: null bytes, control characters (0x00-0x1F), and individual
+// path segments longer than 255 bytes (ext4/APFS limit).
+func validatePathChars(p string) error {
+	for i := 0; i < len(p); i++ {
+		if p[i] == 0 {
+			return fmt.Errorf("path contains null byte at position %d", i)
+		}
+		if p[i] < 0x20 && p[i] != '\t' {
+			return fmt.Errorf("path contains control character 0x%02x at position %d", p[i], i)
+		}
+	}
+	for _, seg := range strings.Split(p, "/") {
+		if len(seg) > 255 {
+			return fmt.Errorf("path segment exceeds 255 bytes: %.40s...", seg)
+		}
+	}
+	return nil
 }
 
 // hasHiddenComponent reports whether any segment of a slash-separated
@@ -82,6 +108,19 @@ func hasHiddenComponent(rel string) bool {
 		}
 	}
 	return false
+}
+
+// dangerousBasename blocks files that could silently alter git behaviour
+// or server semantics if written by an untrusted agent. .gitattributes
+// in particular causes line-ending normalization that drifts ETags.
+var dangerousBasenames = map[string]bool{
+	".gitattributes": true,
+	".gitmodules":    true,
+}
+
+func isDangerousFile(userPath string) bool {
+	base := filepath.Base(filepath.FromSlash(userPath))
+	return dangerousBasenames[base]
 }
 
 // normalizeUserPath canonicalizes user-supplied paths to a safe relative form.

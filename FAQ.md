@@ -152,6 +152,36 @@ Yes. Every write — regardless of how it enters (REST, NFS, S3, WebDAV, FUSE, M
 
 ---
 
+## POSIX & Filesystem Semantics
+
+### Is KiwiFS POSIX-compatible?
+
+Yes, to the degree that matters for agent and human workflows. KiwiFS stores real files on a real filesystem — not blobs in a database. Through NFS and FUSE mounts, agents get standard filesystem semantics: `cat`, `echo >>`, `mv`, `ln -s`, `ls`, `stat`, `rm` all work as expected.
+
+The storage layer uses crash-safe atomic writes (temp+fsync+rename+dirsync), the NFS adapter supports open-then-delete (deferred unlink), and FUSE reports sub-second mtime. See the [POSIX compliance table](README.md#posix-compliance) in the README for the full matrix.
+
+### Do symlinks work?
+
+Yes. Symlinks are supported on both NFS and FUSE mounts. NFS uses real `os.Symlink` on disk. FUSE creates symlinks via the REST API with `Content-Type: application/x-symlink`. There's also a `/api/kiwi/readlink` endpoint. Symlink targets are validated — absolute paths and path-traversal targets (e.g., `../../etc/passwd`) are rejected.
+
+### What happens if I open a file and then delete it?
+
+On NFS, KiwiFS implements POSIX open-unlink semantics: the file is hidden (renamed to `.kiwi-unlinked-*`) and deindexed from search immediately, but the actual deletion and git commit are deferred until the last file handle closes. This matches how Linux ext4/XFS behave.
+
+### Can I `mmap` files on a KiwiFS mount?
+
+On NFS mounts, yes — the kernel handles mmap transparently since NFS presents as a regular filesystem. On FUSE mounts, mmap is not supported because FUSE operates over HTTP (writes are buffered in memory and flushed on `close()`/`fsync()`).
+
+### What prevents two KiwiFS servers from sharing the same directory?
+
+A `flock(2)` advisory lock on `.kiwi/server.lock`. The lock is acquired at startup and released on shutdown. The kernel releases it automatically on any form of process exit (including SIGKILL), so there's no stale lock problem. This is the same pattern used by Prometheus, etcd, and Grafana Loki.
+
+### What happens if git gets stuck mid-commit?
+
+KiwiFS sends SIGTERM (not SIGKILL) to git subprocesses on timeout, giving git a chance to release `index.lock`. A background watcher runs every 10 seconds and removes any `index.lock` older than 60 seconds. On startup, stale locks are also cleaned. This means a stuck git process blocks writes for at most ~70 seconds, not forever.
+
+---
+
 ## Data & Durability
 
 ### What happens if KiwiFS crashes mid-write?

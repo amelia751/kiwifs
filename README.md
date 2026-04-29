@@ -163,7 +163,7 @@ kiwifs mcp --root ~/knowledge          # in-process, no server needed
 kiwifs mcp --remote http://host:3333   # proxy to a running KiwiFS server
 ```
 
-12 tools: `kiwi_read`, `kiwi_write`, `kiwi_search`, `kiwi_tree`, `kiwi_query_meta`, `kiwi_delete`, `kiwi_bulk_write`, `kiwi_query`, `kiwi_aggregate`, `kiwi_import`, `kiwi_export`, `kiwi_analytics`, `kiwi_memory_report`. Plus resources (`kiwi://schema`, `kiwi://file/{path}`, `kiwi://tree/{path}`).
+13 tools: `kiwi_read`, `kiwi_write`, `kiwi_search`, `kiwi_tree`, `kiwi_query_meta`, `kiwi_delete`, `kiwi_bulk_write`, `kiwi_rename`, `kiwi_query`, `kiwi_aggregate`, `kiwi_import`, `kiwi_export`, `kiwi_analytics`, `kiwi_memory_report`. Plus resources (`kiwi://schema`, `kiwi://file/{path}`, `kiwi://tree/{path}`).
 
 **Claude Desktop / Cursor:**
 ```json
@@ -580,6 +580,7 @@ GET    /api/kiwi/file?path=                 → raw markdown + ETag
 PUT    /api/kiwi/file?path=                 → write + git commit + re-index
 DELETE /api/kiwi/file?path=                 → delete + git commit
 POST   /api/kiwi/bulk                       → multi-file write, one commit
+POST   /api/kiwi/rename                     → atomic rename ({"from":"...","to":"..."})
 
 GET    /api/kiwi/search?q=                  → full-text search (BM25)
 POST   /api/kiwi/search/semantic            → vector search
@@ -633,6 +634,63 @@ Writes accept `X-Actor` (git attribution), `X-Provenance` (lineage tracking), an
 5. **Git as the WAL.** Instead of building a custom write-ahead log, every write is a git commit. Crash recovery, audit trail, tamper detection, replication — all for free.
 
 6. **Embeddable.** The Go library (`pkg/kiwi`) lets you embed KiwiFS in any Go application. The web UI components (`<KiwiTree />`, `<KiwiPage />`, `<KiwiEditor />`, `<KiwiSearch />`) are built for future standalone use as an npm package.
+
+---
+
+## POSIX compliance
+
+KiwiFS stores real files on a real filesystem — not blobs in a database. The degree of POSIX compliance depends on the access path:
+
+| Access path | POSIX level | Notes |
+|---|---|---|
+| **Direct filesystem** | Full | Real files, crash-safe atomic writes, mmap works |
+| **NFS mount** | Near-full | Userspace NFSv3, symlinks, open-unlink, advisory locking, stable handles across restarts |
+| **FUSE mount** | Near-full | Remote FUSE client, symlinks, directory rename, sub-second mtime, O_APPEND |
+| **WebDAV** | Partial | MOVE/COPY/MKCOL/DELETE, buffered writes with spill-to-disk |
+| **REST API** | N/A | HTTP semantics (ETag concurrency, not POSIX) |
+| **S3 API** | N/A | S3-compatible, not POSIX |
+| **MCP** | N/A | Tool calls, not file ops |
+
+### What works
+
+| POSIX semantic | NFS | FUSE | How |
+|---|---|---|---|
+| **Atomic writes** | Yes | Yes | `write → fsync → rename(tmp, target) → fsync(dir)` — the gold-standard crash-safe pattern |
+| **rename(2)** | Yes | Yes | Files via pipeline (atomic); directories via bulk endpoint |
+| **O_APPEND** | Yes | Yes | FUSE fetches existing content on open, writes at correct EOF offset |
+| **O_TRUNC / ftruncate** | Yes | Yes | NFS `Truncate()` with 64MB bounds; FUSE `Setattr` with `FATTR_SIZE` |
+| **Symlinks** | Yes | Yes | Real `os.Symlink` on NFS; `Content-Type: application/x-symlink` on FUSE + REST |
+| **readlink** | Yes | Yes | NFS via `os.Readlink`; FUSE via `/api/kiwi/readlink`; REST API endpoint |
+| **Open-then-delete** | Yes | — | NFS defers deletion until last file handle closes (POSIX unlink semantics) |
+| **fsync** | Yes | Yes | NFS `Sync()` pushes through pipeline; FUSE `Fsync()` PUTs to server |
+| **Sub-second mtime** | — | Yes | FUSE `Getattr` reports `Mtimensec` from `Last-Modified` header |
+| **Advisory locking** | Yes | — | NFS has process-local `Lock()`/`Unlock()` per file handle |
+| **Directory rename** | Yes | Yes | FUSE calls `/api/kiwi/rename-dir`; NFS uses `os.Rename` + bulk re-index |
+| **readdir** | Yes | Yes | Both hide internal dirs (`.git`, `.kiwi`) |
+| **stat** | Yes | Yes | Size, mode, mtime — real values, not synthetic |
+| **EFBIG on oversize** | Yes | Yes | 64MB `maxFileSize` limit returns proper errno / HTTP error |
+| **mmap** | — | Passthrough | Works on NFS mount (kernel handles it); FUSE is over HTTP so no kernel mmap |
+| **Path safety** | Yes | Yes | `GuardPath` blocks traversal, null bytes, control chars, 255-byte segment limit |
+
+### Concurrency & durability
+
+- **Optimistic locking** — ETags (content hash). Writes with `If-Match` headers get HTTP 409 on conflict. `If-Match: *` is handled per RFC 7232 §3.1.
+- **Serialized writes** — the pipeline serializes all writes through a single mutex, so concurrent writers are safely queued regardless of protocol.
+- **Single-instance guard** — `flock(2)` on `.kiwi/server.lock` prevents two servers from sharing the same data directory (SQLite + git corruption).
+- **Crash recovery** — stale `index.lock` files are cleaned by a background watcher (10s interval, 60s threshold). Git subprocesses receive SIGTERM before SIGKILL, giving them a chance to release locks.
+- **Line-ending integrity** — `core.autocrlf=false` + `* -text` in `.gitattributes` ensures ETags always match raw content. Writes to `.gitattributes` are blocked by the API.
+- **Frontmatter bomb protection** — YAML frontmatter blocks exceeding 64KB are silently treated as empty (headings still extracted).
+- **Stable NFS handles** — file handles are derived from `SHA-256(namespaceUUID + path)`, surviving server restarts. No more ESTALE.
+
+### What is intentionally not supported
+
+| POSIX semantic | Why |
+|---|---|
+| **Hard links** | Would break git versioning (one blob, multiple paths) |
+| **chmod / chown** | No user/group model — auth is API-key / OIDC, not POSIX uid/gid |
+| **POSIX ACLs** | Same reason — access control is at the HTTP/space level |
+| **Extended attributes (xattr)** | Frontmatter serves the same purpose |
+| **Distributed locking** | Locks are process-local; use `If-Match` for cross-client concurrency |
 
 ---
 

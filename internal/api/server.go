@@ -266,8 +266,11 @@ func (s *Server) setupRoutes() {
 	}
 	api.GET("/tree", h.Tree)
 	api.GET("/file", h.ReadFile)
+	api.GET("/readlink", h.Readlink)
 	api.PUT("/file", h.WriteFile)
 	api.DELETE("/file", h.DeleteFile)
+	api.POST("/rename", h.RenameFile)
+	api.POST("/rename-dir", h.RenameDir)
 	api.POST("/bulk", h.BulkWrite)
 	api.POST("/assets", h.UploadAsset)
 	api.POST("/resolve-links", h.ResolveLinks)
