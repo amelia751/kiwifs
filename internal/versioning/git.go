@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -75,7 +76,28 @@ func NewGit(root string) (*Git, error) {
 		}
 	}
 
+	g.cleanStaleLock()
+
 	return g, nil
+}
+
+// cleanStaleLock removes .git/index.lock if a previous process died
+// mid-commit (OOM, SIGKILL, timeout). A stale lock blocks ALL subsequent
+// git operations — the most common cause of production outages for
+// git-backed systems. Safe to remove at startup because no concurrent
+// git process can be running at this point.
+func (g *Git) cleanStaleLock() {
+	lockPath := filepath.Join(g.root, ".git", "index.lock")
+	info, err := os.Stat(lockPath)
+	if err != nil {
+		return
+	}
+	age := time.Since(info.ModTime())
+	if age > 5*time.Second {
+		if err := os.Remove(lockPath); err == nil {
+			log.Printf("git: removed stale .git/index.lock (age: %s)", age.Round(time.Millisecond))
+		}
+	}
 }
 
 // run executes a subcommand with a hard 30s deadline derived from the
@@ -164,34 +186,66 @@ func (g *Git) output(ctx context.Context, name string, args ...string) (string, 
 // pipeline's writeMu funnels every Write/Delete/BulkWrite through one
 // goroutine at a time, so Git holds no inner lock.
 func (g *Git) Commit(ctx context.Context, path, actor, message string) error {
-	if err := g.run(ctx, "git", "add", "--", path); err != nil {
-		return err
+	abs := filepath.Join(g.root, path)
+	if _, err := os.Stat(abs); err == nil {
+		if err := g.run(ctx, "git", "add", "--", path); err != nil {
+			return err
+		}
+	} else {
+		if err := g.run(ctx, "git", "rm", "--cached", "--ignore-unmatch", "--", path); err != nil {
+			return err
+		}
 	}
-	// Check if there's anything staged.
 	status, err := g.output(ctx, "git", "status", "--porcelain", "--", path)
 	if err != nil {
 		return err
 	}
 	if strings.TrimSpace(status) == "" {
-		return nil // nothing changed, skip commit
+		return nil
 	}
 	return g.commit(ctx, actor, message)
 }
 
 // BulkCommit stages many paths and commits them under one message.
 // Caller must serialise (Pipeline.writeMu).
+//
+// Paths may include files that were created, modified, or deleted since
+// the last commit. We partition paths by on-disk existence:
+//   - Existing files → `git add`
+//   - Missing files  → `git rm --cached --ignore-unmatch` (stages
+//     deletion for tracked files, silently skips untracked ones)
+//
+// This handles all path states: new, modified, deleted, and stale
+// journal entries from a previous crash.
 func (g *Git) BulkCommit(ctx context.Context, paths []string, actor, message string) error {
 	if len(paths) == 0 {
 		return nil
 	}
 
-	addArgs := append([]string{"add", "--"}, paths...)
-	if err := g.run(ctx, "git", addArgs...); err != nil {
-		// If the add itself fails partway, unstage whatever made it in
-		// so we don't contaminate the next commit with half of this
-		// bulk write.
-		_ = g.Unstage(ctx, paths)
-		return err
+	var existPaths, missingPaths []string
+	for _, p := range paths {
+		abs := filepath.Join(g.root, p)
+		if _, err := os.Stat(abs); err == nil {
+			existPaths = append(existPaths, p)
+		} else {
+			missingPaths = append(missingPaths, p)
+		}
+	}
+
+	if len(existPaths) > 0 {
+		addArgs := append([]string{"add", "--"}, existPaths...)
+		if err := g.run(ctx, "git", addArgs...); err != nil {
+			_ = g.Unstage(ctx, existPaths)
+			return err
+		}
+	}
+
+	if len(missingPaths) > 0 {
+		rmArgs := append([]string{"rm", "--cached", "--ignore-unmatch", "-r", "--"}, missingPaths...)
+		if err := g.run(ctx, "git", rmArgs...); err != nil {
+			_ = g.Unstage(ctx, missingPaths)
+			return err
+		}
 	}
 
 	statusArgs := append([]string{"status", "--porcelain", "--"}, paths...)
@@ -204,8 +258,6 @@ func (g *Git) BulkCommit(ctx context.Context, paths []string, actor, message str
 		return nil
 	}
 	if err := g.commit(ctx, actor, message); err != nil {
-		// The commit failed — reset the index so the staged files don't
-		// linger. Without this, the next REST write picks them up.
 		_ = g.Unstage(ctx, paths)
 		return err
 	}

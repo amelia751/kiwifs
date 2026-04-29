@@ -1246,8 +1246,19 @@ const reindexBatchSize = 500
 // over the WAL) see progress and aren't stuck behind a multi-second
 // megatransaction.
 func (s *SQLite) reindexLocked(ctx context.Context) (int, error) {
-	if _, err := s.writeDB.ExecContext(ctx, `DELETE FROM docs`); err != nil {
-		return 0, fmt.Errorf("truncate docs: %w", err)
+	// The docs table is a contentless FTS5 virtual table (content=''),
+	// which does not support DELETE FROM. Drop and recreate it instead.
+	if _, err := s.writeDB.ExecContext(ctx, `DROP TABLE IF EXISTS docs`); err != nil {
+		return 0, fmt.Errorf("drop docs: %w", err)
+	}
+	if _, err := s.writeDB.ExecContext(ctx, `
+		CREATE VIRTUAL TABLE docs USING fts5(
+			path UNINDEXED,
+			content,
+			content='',
+			tokenize = 'porter unicode61 remove_diacritics 1'
+		)`); err != nil {
+		return 0, fmt.Errorf("recreate docs: %w", err)
 	}
 	if _, err := s.writeDB.ExecContext(ctx, `DELETE FROM doc_paths`); err != nil {
 		return 0, fmt.Errorf("truncate doc_paths: %w", err)

@@ -153,7 +153,7 @@ func (h *Handlers) WriteFile(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusRequestEntityTooLarge, "file exceeds 32 MB limit")
 	}
 
-	actor := c.Request().Header.Get("X-Actor")
+	actor := sanitizeActor(c.Request().Header.Get("X-Actor"))
 	if provType, provID, ok := pipeline.ParseProvenanceHeader(c.Request().Header.Get("X-Provenance")); ok {
 		injected, perr := pipeline.InjectProvenance(body, provType, provID, actor)
 		if perr != nil {
@@ -207,9 +207,9 @@ func (h *Handlers) BulkWrite(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "files is required and must be non-empty")
 	}
 
-	actor := req.Actor
-	if actor == "" {
-		actor = c.Request().Header.Get("X-Actor")
+	actor := sanitizeActor(req.Actor)
+	if actor == "anonymous" {
+		actor = sanitizeActor(c.Request().Header.Get("X-Actor"))
 	}
 
 	provType, provID, hasProv := pipeline.ParseProvenanceHeader(c.Request().Header.Get("X-Provenance"))
@@ -313,7 +313,7 @@ func (h *Handlers) UploadAsset(c echo.Context) error {
 	if dir != "" {
 		fullPath = dir + "/" + name
 	}
-	actor := c.Request().Header.Get("X-Actor")
+	actor := sanitizeActor(c.Request().Header.Get("X-Actor"))
 	res, err := h.pipe.Write(c.Request().Context(), fullPath, content, actor)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
@@ -414,7 +414,7 @@ func (h *Handlers) DeleteFile(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusNotFound, "file not found")
 	}
 
-	if err := h.pipe.Delete(c.Request().Context(), path, c.Request().Header.Get("X-Actor")); err != nil {
+	if err := h.pipe.Delete(c.Request().Context(), path, sanitizeActor(c.Request().Header.Get("X-Actor"))); err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
 	return c.JSON(http.StatusOK, map[string]string{"deleted": path})

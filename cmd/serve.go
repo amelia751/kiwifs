@@ -133,6 +133,11 @@ func runServe(cmd *cobra.Command, args []string) error {
 	}
 	defer stack.Close()
 
+	// Recover any paths that were written to disk but not committed
+	// before a previous crash. Must run before the watcher starts so
+	// the git audit trail has no silent gaps.
+	stack.Pipeline.DrainUncommitted(context.Background())
+
 	if !noWatch {
 		w, werr := watcher.New(root, stack.Store, stack.Pipeline)
 		if werr != nil {

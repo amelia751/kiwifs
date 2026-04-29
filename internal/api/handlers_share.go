@@ -44,8 +44,8 @@ func (h *Handlers) CreateShareLink(c echo.Context) error {
 		}
 		dur = d
 	}
-	actor := c.Request().Header.Get("X-Actor")
-	if actor == "" {
+	actor := sanitizeActor(c.Request().Header.Get("X-Actor"))
+	if actor == "anonymous" {
 		actor = pipeline.DefaultActor
 	}
 

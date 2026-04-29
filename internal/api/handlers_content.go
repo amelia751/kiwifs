@@ -105,11 +105,11 @@ func (h *Handlers) AddComment(c echo.Context) error {
 	if err := bindJSON(c, &body); err != nil {
 		return err
 	}
-	actor := body.Author
-	if actor == "" {
-		actor = c.Request().Header.Get("X-Actor")
+	actor := sanitizeActor(body.Author)
+	if actor == "anonymous" {
+		actor = sanitizeActor(c.Request().Header.Get("X-Actor"))
 	}
-	if actor == "" {
+	if actor == "anonymous" {
 		actor = pipeline.DefaultActor
 	}
 	record, err := h.comments.Add(path, comments.Comment{
@@ -136,8 +136,8 @@ func (h *Handlers) DeleteComment(c echo.Context) error {
 	if path == "" || id == "" {
 		return echo.NewHTTPError(http.StatusBadRequest, "path and id are required")
 	}
-	actor := c.Request().Header.Get("X-Actor")
-	if actor == "" {
+	actor := sanitizeActor(c.Request().Header.Get("X-Actor"))
+	if actor == "anonymous" {
 		actor = pipeline.DefaultActor
 	}
 	if err := h.comments.Delete(path, id); err != nil {
@@ -162,8 +162,8 @@ func (h *Handlers) ResolveComment(c echo.Context) error {
 	if path == "" || id == "" {
 		return echo.NewHTTPError(http.StatusBadRequest, "path and id are required")
 	}
-	actor := c.Request().Header.Get("X-Actor")
-	if actor == "" {
+	actor := sanitizeActor(c.Request().Header.Get("X-Actor"))
+	if actor == "anonymous" {
 		actor = pipeline.DefaultActor
 	}
 
@@ -277,8 +277,8 @@ func (h *Handlers) PutTheme(c echo.Context) error {
 	if err := os.WriteFile(p, formatted, 0o644); err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
-	actor := c.Request().Header.Get("X-Actor")
-	if actor == "" {
+	actor := sanitizeActor(c.Request().Header.Get("X-Actor"))
+	if actor == "anonymous" {
 		actor = pipeline.DefaultActor
 	}
 	if cerr := h.versioner.Commit(c.Request().Context(), ".kiwi/theme.json", actor, "theme: update"); cerr != nil {

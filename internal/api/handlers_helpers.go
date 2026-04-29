@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"os"
+	"strings"
 
 	"github.com/kiwifs/kiwifs/internal/config"
 	"github.com/kiwifs/kiwifs/internal/search"
@@ -24,6 +25,26 @@ func requirePath(c echo.Context) (string, error) {
 		return "", echo.NewHTTPError(http.StatusBadRequest, "path is required")
 	}
 	return path, nil
+}
+
+// sanitizeActor strips control characters (newlines, null bytes, tabs) and
+// clamps the actor string to a safe length for use in git env vars and
+// frontmatter. Returns "anonymous" if the result is empty.
+func sanitizeActor(raw string) string {
+	s := strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f { // control characters
+			return -1
+		}
+		return r
+	}, raw)
+	if len(s) > 256 {
+		s = s[:256]
+	}
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "anonymous"
+	}
+	return s
 }
 
 func readFileOr404(ctx context.Context, store storage.Storage, path string) ([]byte, error) {

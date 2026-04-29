@@ -58,8 +58,8 @@ func (h *Handlers) Import(c echo.Context) error {
 		columns = req.Columns
 	}
 
-	actor := c.Request().Header.Get("X-Actor")
-	if actor == "" {
+	actor := sanitizeActor(c.Request().Header.Get("X-Actor"))
+	if actor == "anonymous" {
 		actor = "api-import"
 	}
 
