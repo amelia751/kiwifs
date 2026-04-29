@@ -45,6 +45,8 @@ type Git struct {
 	// build per-call env slices by appending GIT_AUTHOR_*/GIT_COMMITTER_*
 	// to a copy of this rather than calling os.Environ() on every write.
 	baseEnv []string
+	// stopWatcher cancels the background stale-lock watcher goroutine.
+	stopWatcher context.CancelFunc
 }
 
 // NewGit initialises (or opens) a git repo at root.
@@ -73,18 +75,63 @@ func NewGit(root string) (*Git, error) {
 		if err := g.run(context.Background(), "git", "config", "user.name", "KiwiFS"); err != nil {
 			return nil, err
 		}
+		// Disable line-ending normalization. KiwiFS computes ETags from
+		// raw file content; if git normalizes CRLF→LF on commit, the blob
+		// hash drifts from the ETag, making If-Match unreliable. This is
+		// the same approach GitHub uses on server-side repos.
+		_ = g.run(context.Background(), "git", "config", "core.autocrlf", "false")
+
+		// Ship a .gitattributes that explicitly disables text conversion.
+		gaPath := filepath.Join(abs, ".gitattributes")
+		if _, serr := os.Stat(gaPath); os.IsNotExist(serr) {
+			os.WriteFile(gaPath, []byte("# KiwiFS: store files exactly as written — no line-ending normalization.\n# ETags are computed from raw content; normalization would cause hash drift.\n* -text\n"), 0644)
+		}
+	} else {
+		// For existing repos, ensure autocrlf is off.
+		_ = g.run(context.Background(), "git", "config", "core.autocrlf", "false")
 	}
 
 	g.cleanStaleLock()
+	g.startLockWatcher()
 
 	return g, nil
 }
 
-// cleanStaleLock removes .git/index.lock if a previous process died
-// mid-commit (OOM, SIGKILL, timeout). A stale lock blocks ALL subsequent
-// git operations — the most common cause of production outages for
-// git-backed systems. Safe to remove at startup because no concurrent
-// git process can be running at this point.
+// Close stops the background lock watcher. Safe to call multiple times.
+func (g *Git) Close() {
+	if g.stopWatcher != nil {
+		g.stopWatcher()
+	}
+}
+
+// startLockWatcher runs a background goroutine that periodically checks
+// for stale .git/index.lock files. This covers the gap between a
+// context-cancelled commit (which may orphan index.lock) and the next
+// server restart — without this, ALL writes are blocked for the entire
+// server lifetime. Follows the pattern used by Gitea and GitLab Gitaly.
+func (g *Git) startLockWatcher() {
+	ctx, cancel := context.WithCancel(context.Background())
+	g.stopWatcher = cancel
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				g.cleanStaleLock()
+			}
+		}
+	}()
+}
+
+// cleanStaleLock removes .git/index.lock if it's older than 2x the
+// git command timeout (default 60s). Any lock older than that is
+// certainly orphaned — no legitimate git operation takes that long
+// on a local repo. A stale lock blocks ALL subsequent git operations,
+// making this the most common cause of production outages for
+// git-backed systems.
 func (g *Git) cleanStaleLock() {
 	lockPath := filepath.Join(g.root, ".git", "index.lock")
 	info, err := os.Stat(lockPath)
@@ -92,28 +139,32 @@ func (g *Git) cleanStaleLock() {
 		return
 	}
 	age := time.Since(info.ModTime())
-	if age > 5*time.Second {
+	threshold := 2 * gitCmdTimeout
+	if threshold < 10*time.Second {
+		threshold = 10 * time.Second
+	}
+	if age > threshold {
 		if err := os.Remove(lockPath); err == nil {
-			log.Printf("git: removed stale .git/index.lock (age: %s)", age.Round(time.Millisecond))
+			log.Printf("git: removed stale .git/index.lock (age: %s, threshold: %s)", age.Round(time.Millisecond), threshold)
 		}
 	}
 }
 
-// run executes a subcommand with a hard 30s deadline derived from the
-// caller's context — exec.CommandContext kills the process when the
-// context expires, and Setpgid: true puts the child in its own process
-// group so kill propagates to anything it spawned (ssh, git-lfs,
-// credential helpers) instead of leaving orphans behind.
+// run executes a subcommand with a hard deadline derived from the
+// caller's context. On cancellation, SIGTERM is sent first (giving
+// git a chance to release index.lock), followed by SIGKILL after
+// 5 seconds if the process doesn't exit — this is the Gitea/GitLab
+// Gitaly pattern that avoids orphaned lock files.
 //
-// The timeout context wraps the caller's ctx so a caller-cancelled
-// request takes effect immediately while still being capped at
-// gitCmdTimeout for callers that pass context.Background().
+// Setpgid: true puts the child in its own process group so the signal
+// propagates to anything it spawned (ssh, git-lfs, credential helpers).
 func (g *Git) run(ctx context.Context, name string, args ...string) error {
 	ctx, cancel := context.WithTimeout(ctx, gitCmdTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = g.root
 	setProcAttr(cmd)
+	setCancelSignal(cmd)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -149,6 +200,7 @@ func (g *Git) commit(ctx context.Context, actor, message string) error {
 	cmd := exec.CommandContext(ctx, "git", "commit", "-m", message)
 	cmd.Dir = g.root
 	setProcAttr(cmd)
+	setCancelSignal(cmd)
 	cmd.Env = g.commitEnv(actor)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -169,6 +221,7 @@ func (g *Git) output(ctx context.Context, name string, args ...string) (string, 
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = g.root
 	setProcAttr(cmd)
+	setCancelSignal(cmd)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

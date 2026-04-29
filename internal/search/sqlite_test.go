@@ -571,3 +571,35 @@ with p99 latency under 200ms when properly tuned.
 		t.Errorf("index/raw ratio %.2fx exceeds 2.0x target (want <1.5x)", ratio)
 	}
 }
+
+func TestBuildFTS5Query_BareWildcard(t *testing.T) {
+	q := buildFTS5Query("*")
+	if q != "" {
+		t.Fatalf("bare * should be rejected, got %q", q)
+	}
+	q2 := buildFTS5Query("***")
+	if q2 != "" {
+		t.Fatalf("*** should be rejected, got %q", q2)
+	}
+	q3 := buildFTS5Query("* * *")
+	if q3 != "" {
+		t.Fatalf("'* * *' should be rejected, got %q", q3)
+	}
+}
+
+func TestBuildFTS5Query_NormalQuery(t *testing.T) {
+	q := buildFTS5Query("hello world")
+	if q == "" {
+		t.Fatal("normal query should not be empty")
+	}
+}
+
+func TestBuildFTS5Query_PrefixWildcard(t *testing.T) {
+	q := buildFTS5Query("kube*")
+	if q == "" {
+		t.Fatal("prefix wildcard should be allowed")
+	}
+	if q != "kube*" {
+		t.Fatalf("prefix wildcard should pass through: got %q", q)
+	}
+}

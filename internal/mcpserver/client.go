@@ -168,6 +168,21 @@ func (r *RemoteBackend) DeleteFile(ctx context.Context, path, actor string) erro
 	return err
 }
 
+func (r *RemoteBackend) Rename(ctx context.Context, from, to, actor string) (string, error) {
+	body := map[string]string{"from": from, "to": to}
+	var result struct {
+		ETag string `json:"etag"`
+	}
+	hdrs := []string{"Content-Type", "application/json"}
+	if actor != "" {
+		hdrs = append(hdrs, "X-Actor", actor)
+	}
+	if err := r.postJSON(ctx, r.apiPrefix+"/rename", body, &result); err != nil {
+		return "", err
+	}
+	return result.ETag, nil
+}
+
 func (r *RemoteBackend) Tree(ctx context.Context, path string) (json.RawMessage, error) {
 	q := r.apiPrefix + "/tree"
 	if path != "" {

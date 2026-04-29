@@ -164,6 +164,17 @@ func registerTools(s *server.MCPServer, b Backend, opts Options) {
 			Handler: handleDelete(b),
 		},
 		server.ServerTool{
+			Tool: mcp.NewTool("kiwi_rename",
+				mcp.WithDescription("Atomically rename/move a file. The old path is removed and the new path is created in a single git commit. File history is preserved."),
+				mcp.WithString("from", mcp.Required(), mcp.Description("Current file path"), mcp.MaxLength(500)),
+				mcp.WithString("to", mcp.Required(), mcp.Description("New file path"), mcp.MaxLength(500)),
+				mcp.WithString("actor", mcp.Description("Who is renaming")),
+				mcp.WithDestructiveHintAnnotation(true),
+				mcp.WithIdempotentHintAnnotation(false),
+			),
+			Handler: handleRename(b),
+		},
+		server.ServerTool{
 			Tool: mcp.NewTool("kiwi_bulk_write",
 				mcp.WithDescription("Write multiple files in a single atomic git commit. Use this when updating related files together — e.g. writing a run record and updating the coverage strategy in the same operation. Old content is preserved in git history."),
 				mcp.WithArray("files", mcp.Required(), mcp.Description("Array of {path, content} objects")),
@@ -851,6 +862,29 @@ func handleDelete(b Backend) server.ToolHandlerFunc {
 			return mcp.NewToolResultError(fmt.Sprintf("Failed to delete %s: %v", path, err)), nil
 		}
 		return mcp.NewToolResultText(fmt.Sprintf("Deleted %s", path)), nil
+	}
+}
+
+func handleRename(b Backend) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		args := req.GetArguments()
+		from, _ := args["from"].(string)
+		to, _ := args["to"].(string)
+		actor, _ := args["actor"].(string)
+		if from == "" || to == "" {
+			return mcp.NewToolResultError("from and to are required"), nil
+		}
+		if actor == "" {
+			actor = "mcp-agent"
+		}
+		etag, err := b.Rename(ctx, from, to, actor)
+		if err != nil {
+			if isNotFound(err) {
+				return mcp.NewToolResultError(fmt.Sprintf("File not found at %s. Use kiwi_tree to see available files.", from)), nil
+			}
+			return mcp.NewToolResultError(fmt.Sprintf("Failed to rename %s → %s: %v", from, to, err)), nil
+		}
+		return mcp.NewToolResultText(fmt.Sprintf("Renamed %s → %s (ETag: %s)", from, to, etag)), nil
 	}
 }
 

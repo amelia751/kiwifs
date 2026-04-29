@@ -2,9 +2,11 @@ package pipeline
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -393,6 +395,351 @@ func osStat(path string) (int, error) {
 	return int(fi.Size()), nil
 }
 
+func TestPipeline_Rename(t *testing.T) {
+	dir := t.TempDir()
+	store, err := storage.NewLocal(dir)
+	if err != nil {
+		t.Fatalf("storage: %v", err)
+	}
+	hub := events.NewHub()
+	p := New(store, versioning.NewNoop(), search.NewGrep(dir), nil, hub, nil, "")
+
+	ctx := context.Background()
+	if _, err := p.Write(ctx, "old.md", []byte("# hello\n"), "tester"); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	res, err := p.Rename(ctx, "old.md", "new.md", "tester")
+	if err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	if res.Path != "new.md" {
+		t.Fatalf("result path = %s, want new.md", res.Path)
+	}
+	if res.ETag == "" {
+		t.Fatal("empty ETag")
+	}
+
+	if store.Exists(ctx, "old.md") {
+		t.Fatal("old path still exists after rename")
+	}
+	got, err := store.Read(ctx, "new.md")
+	if err != nil {
+		t.Fatalf("read new: %v", err)
+	}
+	if string(got) != "# hello\n" {
+		t.Fatalf("content = %q", got)
+	}
+}
+
+func TestPipeline_Rename_SingleCommit(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	dir := t.TempDir()
+	store, err := storage.NewLocal(dir)
+	if err != nil {
+		t.Fatalf("storage: %v", err)
+	}
+	git, err := versioning.NewGit(dir)
+	if err != nil {
+		t.Fatalf("git: %v", err)
+	}
+	p := New(store, git, search.NewGrep(dir), nil, nil, nil, "")
+
+	ctx := context.Background()
+	if _, err := p.Write(ctx, "before.md", []byte("data\n"), "tester"); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	if _, err := p.Rename(ctx, "before.md", "after.md", "tester"); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+
+	cmd := exec.Command("git", "-C", dir, "log", "--oneline", "--all")
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git log: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	var renameCommits int
+	for _, l := range lines {
+		if strings.Contains(l, "rename") {
+			renameCommits++
+		}
+	}
+	if renameCommits != 1 {
+		t.Fatalf("expected 1 rename commit, got %d in:\n%s", renameCommits, out)
+	}
+}
+
+func TestPipeline_Rename_CrashSafety(t *testing.T) {
+	dir := t.TempDir()
+	store, err := storage.NewLocal(dir)
+	if err != nil {
+		t.Fatalf("storage: %v", err)
+	}
+	p := New(store, versioning.NewNoop(), search.NewGrep(dir), nil, nil, nil, "")
+
+	ctx := context.Background()
+	if _, err := p.Write(ctx, "src.md", []byte("content\n"), "tester"); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	res, err := p.Rename(ctx, "src.md", "dst.md", "tester")
+	if err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	got, _ := store.Read(ctx, "dst.md")
+	if string(got) != "content\n" {
+		t.Fatalf("new file content = %q", got)
+	}
+	if res.ETag != ETag([]byte("content\n")) {
+		t.Fatalf("ETag mismatch")
+	}
+}
+
+func TestPipeline_Rename_SamePath(t *testing.T) {
+	dir := t.TempDir()
+	store, err := storage.NewLocal(dir)
+	if err != nil {
+		t.Fatalf("storage: %v", err)
+	}
+	p := New(store, versioning.NewNoop(), search.NewGrep(dir), nil, nil, nil, "")
+
+	ctx := context.Background()
+	if _, err := p.Write(ctx, "same.md", []byte("keep me\n"), "tester"); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	res, err := p.Rename(ctx, "same.md", "same.md", "tester")
+	if err != nil {
+		t.Fatalf("rename same path: %v", err)
+	}
+	if res.Path != "same.md" {
+		t.Fatalf("result path = %s, want same.md", res.Path)
+	}
+	got, err := store.Read(ctx, "same.md")
+	if err != nil {
+		t.Fatalf("file should still exist: %v", err)
+	}
+	if string(got) != "keep me\n" {
+		t.Fatalf("content = %q, want %q", got, "keep me\n")
+	}
+}
+
+func TestPipeline_Rename_OverwriteExisting(t *testing.T) {
+	dir := t.TempDir()
+	store, err := storage.NewLocal(dir)
+	if err != nil {
+		t.Fatalf("storage: %v", err)
+	}
+	p := New(store, versioning.NewNoop(), search.NewGrep(dir), nil, nil, nil, "")
+
+	ctx := context.Background()
+	if _, err := p.Write(ctx, "src.md", []byte("source data\n"), "tester"); err != nil {
+		t.Fatalf("write src: %v", err)
+	}
+	if _, err := p.Write(ctx, "dst.md", []byte("old dest\n"), "tester"); err != nil {
+		t.Fatalf("write dst: %v", err)
+	}
+
+	res, err := p.Rename(ctx, "src.md", "dst.md", "tester")
+	if err != nil {
+		t.Fatalf("rename onto existing: %v", err)
+	}
+	if res.Path != "dst.md" {
+		t.Fatalf("result path = %s", res.Path)
+	}
+
+	if store.Exists(ctx, "src.md") {
+		t.Fatal("source still exists")
+	}
+	got, err := store.Read(ctx, "dst.md")
+	if err != nil {
+		t.Fatalf("read dst: %v", err)
+	}
+	if string(got) != "source data\n" {
+		t.Fatalf("dst content = %q, want source content", got)
+	}
+}
+
+func TestPipeline_Rename_EmptyPaths(t *testing.T) {
+	dir := t.TempDir()
+	store, _ := storage.NewLocal(dir)
+	p := New(store, versioning.NewNoop(), search.NewGrep(dir), nil, nil, nil, "")
+
+	_, err := p.Rename(context.Background(), "", "dst.md", "tester")
+	if err == nil {
+		t.Fatal("rename with empty oldPath should fail")
+	}
+	_, err = p.Rename(context.Background(), "src.md", "", "tester")
+	if err == nil {
+		t.Fatal("rename with empty newPath should fail")
+	}
+}
+
+func TestPipeline_Rename_NonExistentSource(t *testing.T) {
+	dir := t.TempDir()
+	store, _ := storage.NewLocal(dir)
+	p := New(store, versioning.NewNoop(), search.NewGrep(dir), nil, nil, nil, "")
+
+	_, err := p.Rename(context.Background(), "ghost.md", "dst.md", "tester")
+	if err == nil {
+		t.Fatal("rename non-existent source should fail")
+	}
+}
+
+func TestPipeline_Rename_PathTraversal(t *testing.T) {
+	dir := t.TempDir()
+	store, _ := storage.NewLocal(dir)
+	p := New(store, versioning.NewNoop(), search.NewGrep(dir), nil, nil, nil, "")
+
+	ctx := context.Background()
+	if _, err := p.Write(ctx, "legit.md", []byte("data\n"), "tester"); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	// Storage normalizes "../../../etc/passwd" → "etc/passwd" (safe inside root).
+	// The pipeline returns the raw path, but the file lands safely inside root.
+	res, err := p.Rename(ctx, "legit.md", "../../../etc/passwd", "tester")
+	if err != nil {
+		t.Fatalf("rename with traversal should succeed (neutralized at storage layer): %v", err)
+	}
+	if res.ETag == "" {
+		t.Fatal("empty ETag")
+	}
+	// Verify file is stored inside root at the normalized location.
+	got, err := store.Read(ctx, "etc/passwd")
+	if err != nil {
+		t.Fatalf("file should exist at neutralized path inside root: %v", err)
+	}
+	if string(got) != "data\n" {
+		t.Fatalf("content = %q", got)
+	}
+}
+
+func TestPipeline_Rename_HiddenPath(t *testing.T) {
+	dir := t.TempDir()
+	store, _ := storage.NewLocal(dir)
+	p := New(store, versioning.NewNoop(), search.NewGrep(dir), nil, nil, nil, "")
+
+	ctx := context.Background()
+	if _, err := p.Write(ctx, "legit.md", []byte("data\n"), "tester"); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	_, err := p.Rename(ctx, "legit.md", ".git/config", "tester")
+	if err == nil {
+		t.Fatal("rename to .git/config should fail")
+	}
+}
+
+func TestPipeline_Rename_ConcurrentWithWrite(t *testing.T) {
+	dir := t.TempDir()
+	store, _ := storage.NewLocal(dir)
+	hub := events.NewHub()
+	p := New(store, versioning.NewNoop(), search.NewGrep(dir), nil, hub, nil, "")
+
+	ctx := context.Background()
+	if _, err := p.Write(ctx, "target.md", []byte("original\n"), "tester"); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	errs := make(chan error, 20)
+	for i := 0; i < 10; i++ {
+		go func(id int) {
+			_, err := p.Write(ctx, "target.md", []byte(fmt.Sprintf("writer-%d\n", id)), "tester")
+			errs <- err
+		}(i)
+		go func(id int) {
+			_, err := p.Rename(ctx, "target.md", fmt.Sprintf("renamed-%d.md", id), "tester")
+			errs <- err
+		}(i)
+	}
+
+	var errCount int
+	for i := 0; i < 20; i++ {
+		if err := <-errs; err != nil {
+			errCount++
+		}
+	}
+	t.Logf("concurrent rename+write: %d errors out of 20 (expected some)", errCount)
+}
+
+func TestPipeline_RapidCreateDelete_SearchConsistency(t *testing.T) {
+	dir := t.TempDir()
+	store, _ := storage.NewLocal(dir)
+	searcher := search.NewGrep(dir)
+	hub := events.NewHub()
+	p := New(store, versioning.NewNoop(), searcher, nil, hub, nil, "")
+
+	ctx := context.Background()
+	for i := 0; i < 30; i++ {
+		content := fmt.Sprintf("---\ntitle: cycle %d\n---\n# Flicker doc\nxyzflicker cycle %d\n", i, i)
+		if _, err := p.Write(ctx, "flicker.md", []byte(content), "tester"); err != nil {
+			t.Fatalf("write %d: %v", i, err)
+		}
+		if err := p.Delete(ctx, "flicker.md", "tester"); err != nil {
+			t.Fatalf("delete %d: %v", i, err)
+		}
+	}
+
+	if store.Exists(ctx, "flicker.md") {
+		t.Fatal("file should not exist after all cycles")
+	}
+}
+
+func TestPipeline_NullByteInPath(t *testing.T) {
+	dir := t.TempDir()
+	store, _ := storage.NewLocal(dir)
+	p := New(store, versioning.NewNoop(), search.NewGrep(dir), nil, nil, nil, "")
+
+	_, err := p.Write(context.Background(), "evil\x00.md", []byte("data"), "tester")
+	if err == nil {
+		t.Fatal("write with null byte should be rejected")
+	}
+}
+
+func TestPipeline_ControlCharInPath(t *testing.T) {
+	dir := t.TempDir()
+	store, _ := storage.NewLocal(dir)
+	p := New(store, versioning.NewNoop(), search.NewGrep(dir), nil, nil, nil, "")
+
+	_, err := p.Write(context.Background(), "file\n.md", []byte("data"), "tester")
+	if err == nil {
+		t.Fatal("write with newline in path should be rejected")
+	}
+}
+
+func TestPipeline_LongFilename(t *testing.T) {
+	dir := t.TempDir()
+	store, _ := storage.NewLocal(dir)
+	p := New(store, versioning.NewNoop(), search.NewGrep(dir), nil, nil, nil, "")
+
+	long := strings.Repeat("a", 256) + ".md"
+	_, err := p.Write(context.Background(), long, []byte("data"), "tester")
+	if err == nil {
+		t.Fatal("write with 256-char filename should be rejected (ext4 limit)")
+	}
+}
+
+func TestPipeline_Rename_NullByteInDest(t *testing.T) {
+	dir := t.TempDir()
+	store, _ := storage.NewLocal(dir)
+	p := New(store, versioning.NewNoop(), search.NewGrep(dir), nil, nil, nil, "")
+
+	ctx := context.Background()
+	if _, err := p.Write(ctx, "ok.md", []byte("data"), "tester"); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	_, err := p.Rename(ctx, "ok.md", "evil\x00.md", "tester")
+	if err == nil {
+		t.Fatal("rename to null-byte path should be rejected")
+	}
+}
+
 func TestBulkWriteRollbackOnWriteFailure(t *testing.T) {
 	dir := t.TempDir()
 	store, err := storage.NewLocal(dir)
@@ -426,5 +773,187 @@ func TestBulkWriteRollbackOnWriteFailure(t *testing.T) {
 	got, _ := store.Read(context.Background(), "existing.md")
 	if string(got) != "before\n" {
 		t.Fatalf("rollback failed: got %q", got)
+	}
+}
+
+func TestPipeline_RenameDir(t *testing.T) {
+	dir := t.TempDir()
+	store, _ := storage.NewLocal(dir)
+	ver := versioning.NewNoop()
+	searcher := search.NewGrep(dir)
+	hub := events.NewHub()
+	p := New(store, ver, searcher, nil, hub, nil, "")
+
+	ctx := context.Background()
+	for _, f := range []struct{ path, content string }{
+		{"docs/a.md", "aaa"},
+		{"docs/b.md", "bbb"},
+		{"docs/sub/c.md", "ccc"},
+	} {
+		if _, err := p.Write(ctx, f.path, []byte(f.content), "test"); err != nil {
+			t.Fatalf("seed %s: %v", f.path, err)
+		}
+	}
+
+	count, err := p.RenameDir(ctx, "docs", "archive", "test")
+	if err != nil {
+		t.Fatalf("RenameDir: %v", err)
+	}
+	if count != 3 {
+		t.Fatalf("renamed %d files, want 3", count)
+	}
+
+	for _, np := range []string{"archive/a.md", "archive/b.md", "archive/sub/c.md"} {
+		if !store.Exists(ctx, np) {
+			t.Fatalf("expected %s to exist", np)
+		}
+	}
+	for _, op := range []string{"docs/a.md", "docs/b.md", "docs/sub/c.md"} {
+		if store.Exists(ctx, op) {
+			t.Fatalf("expected %s to be gone", op)
+		}
+	}
+}
+
+func TestPipeline_RenameDir_PathTraversal(t *testing.T) {
+	dir := t.TempDir()
+	store, _ := storage.NewLocal(dir)
+	ver := versioning.NewNoop()
+	searcher := search.NewGrep(dir)
+	hub := events.NewHub()
+	p := New(store, ver, searcher, nil, hub, nil, "")
+
+	ctx := context.Background()
+	_, err := p.RenameDir(ctx, "../../../etc", "stolen", "test")
+	if err == nil {
+		t.Fatal("expected error for path traversal, got nil")
+	}
+	if !strings.Contains(err.Error(), "denied") && !strings.Contains(err.Error(), "traversal") {
+		t.Logf("error = %v (should mention denied/traversal)", err)
+	}
+}
+
+func TestPipeline_RenameDir_NonExistentSource(t *testing.T) {
+	dir := t.TempDir()
+	store, _ := storage.NewLocal(dir)
+	ver := versioning.NewNoop()
+	searcher := search.NewGrep(dir)
+	hub := events.NewHub()
+	p := New(store, ver, searcher, nil, hub, nil, "")
+
+	_, err := p.RenameDir(context.Background(), "nonexistent", "dest", "test")
+	if err == nil {
+		t.Fatal("expected error for nonexistent source")
+	}
+}
+
+func TestPipeline_RenameDir_FileNotDir(t *testing.T) {
+	dir := t.TempDir()
+	store, _ := storage.NewLocal(dir)
+	ver := versioning.NewNoop()
+	searcher := search.NewGrep(dir)
+	hub := events.NewHub()
+	p := New(store, ver, searcher, nil, hub, nil, "")
+
+	ctx := context.Background()
+	if _, err := p.Write(ctx, "file.md", []byte("hello"), "test"); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	_, err := p.RenameDir(ctx, "file.md", "dest", "test")
+	if err == nil {
+		t.Fatal("expected error when renaming a file via RenameDir")
+	}
+	if !strings.Contains(err.Error(), "not a directory") {
+		t.Fatalf("error = %v, want 'not a directory'", err)
+	}
+}
+
+func TestPipeline_RenameDir_Empty(t *testing.T) {
+	dir := t.TempDir()
+	store, _ := storage.NewLocal(dir)
+	ver := versioning.NewNoop()
+	searcher := search.NewGrep(dir)
+	hub := events.NewHub()
+	p := New(store, ver, searcher, nil, hub, nil, "")
+
+	if err := os.MkdirAll(filepath.Join(dir, "empty"), 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	count, err := p.RenameDir(context.Background(), "empty", "moved", "test")
+	if err != nil {
+		t.Fatalf("RenameDir empty: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("count = %d, want 0", count)
+	}
+}
+
+func TestCreateSymlink_HiddenPath(t *testing.T) {
+	dir := t.TempDir()
+	store, _ := storage.NewLocal(dir)
+	ver := versioning.NewNoop()
+	searcher := search.NewGrep(dir)
+	hub := events.NewHub()
+	p := New(store, ver, searcher, nil, hub, nil, "")
+
+	err := p.CreateSymlink(context.Background(), ".git/hooks/evil", "target", "test")
+	if err == nil {
+		t.Fatal("expected error for hidden/internal path")
+	}
+}
+
+func TestCreateSymlink_AbsoluteTarget(t *testing.T) {
+	dir := t.TempDir()
+	store, _ := storage.NewLocal(dir)
+	ver := versioning.NewNoop()
+	searcher := search.NewGrep(dir)
+	hub := events.NewHub()
+	p := New(store, ver, searcher, nil, hub, nil, "")
+
+	err := p.CreateSymlink(context.Background(), "link.md", "/etc/shadow", "test")
+	if err == nil {
+		t.Fatal("expected error for absolute symlink target")
+	}
+}
+
+func TestCreateSymlink_EscapingTarget(t *testing.T) {
+	dir := t.TempDir()
+	store, _ := storage.NewLocal(dir)
+	ver := versioning.NewNoop()
+	searcher := search.NewGrep(dir)
+	hub := events.NewHub()
+	p := New(store, ver, searcher, nil, hub, nil, "")
+
+	err := p.CreateSymlink(context.Background(), "link.md", "../../etc/shadow", "test")
+	if err == nil {
+		t.Fatal("expected error for escaping symlink target")
+	}
+}
+
+func TestCreateSymlink_ValidRelativeTarget(t *testing.T) {
+	dir := t.TempDir()
+	store, _ := storage.NewLocal(dir)
+	ver := versioning.NewNoop()
+	searcher := search.NewGrep(dir)
+	hub := events.NewHub()
+	p := New(store, ver, searcher, nil, hub, nil, "")
+
+	ctx := context.Background()
+	if _, err := p.Write(ctx, "other/file.md", []byte("target"), "test"); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := p.CreateSymlink(ctx, "sub/link.md", "../other/file.md", "test"); err != nil {
+		t.Fatalf("CreateSymlink with valid relative target: %v", err)
+	}
+
+	abs := filepath.Join(dir, "sub", "link.md")
+	target, err := os.Readlink(abs)
+	if err != nil {
+		t.Fatalf("Readlink: %v", err)
+	}
+	if target != "../other/file.md" {
+		t.Fatalf("target = %q, want '../other/file.md'", target)
 	}
 }

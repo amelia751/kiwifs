@@ -10,7 +10,10 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
+
+	"github.com/hanwen/go-fuse/v2/fuse"
 )
 
 // mockKiwi captures the minimum of the KiwiFS REST API the FUSE client
@@ -23,6 +26,7 @@ type mockKiwi struct {
 	fileHits atomic.Int32
 	treeHits atomic.Int32
 	puts     atomic.Int32
+	renames  atomic.Int32
 }
 
 func newMock() *mockKiwi {
@@ -72,6 +76,50 @@ func (m *mockKiwi) handler() http.Handler {
 		default:
 			http.Error(w, "method", http.StatusMethodNotAllowed)
 		}
+	})
+	mux.HandleFunc("/api/kiwi/rename", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method", http.StatusMethodNotAllowed)
+			return
+		}
+		m.renames.Add(1)
+		var req struct {
+			From string `json:"from"`
+			To   string `json:"to"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		data, ok := m.files[req.From]
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		m.files[req.To] = data
+		delete(m.files, req.From)
+		json.NewEncoder(w).Encode(map[string]string{"from": req.From, "to": req.To, "etag": "abc"})
+	})
+	mux.HandleFunc("/api/kiwi/rename-dir", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method", http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct {
+			From string `json:"from"`
+			To   string `json:"to"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if _, ok := m.dirs[req.From]; !ok {
+			http.NotFound(w, r)
+			return
+		}
+		m.dirs[req.To] = m.dirs[req.From]
+		delete(m.dirs, req.From)
+		json.NewEncoder(w).Encode(map[string]any{"from": req.From, "to": req.To, "renamed": len(m.dirs[req.To])})
 	})
 	return mux
 }
@@ -130,12 +178,12 @@ func TestStatFilePopulatesFileCache(t *testing.T) {
 	c := NewClient(srv.URL)
 	n := &kiwiNode{client: c, path: "note.md"}
 
-	size, found, errno := n.statFile()
-	if errno != 0 || !found {
-		t.Fatalf("statFile: found=%v errno=%v", found, errno)
+	st, errno := n.statFile()
+	if errno != 0 || !st.found {
+		t.Fatalf("statFile: found=%v errno=%v", st.found, errno)
 	}
-	if size != int64(len("hello world")) {
-		t.Fatalf("size = %d, want %d", size, len("hello world"))
+	if st.size != int64(len("hello world")) {
+		t.Fatalf("size = %d, want %d", st.size, len("hello world"))
 	}
 	// The stat should have primed the file cache so a subsequent Read()
 	// goes zero-RTT — the whole point of caching.
@@ -266,6 +314,338 @@ func TestBearerAuthHeader(t *testing.T) {
 	}
 	if got := seen.Load().(string); got != "Bearer tok" {
 		t.Fatalf("Authorization = %q, want %q", got, "Bearer tok")
+	}
+}
+
+func TestRename(t *testing.T) {
+	m := newMock()
+	m.files["old.md"] = []byte("rename me")
+	srv := httptest.NewServer(m.handler())
+	defer srv.Close()
+
+	c := NewClient(srv.URL)
+	parent := &kiwiNode{client: c, path: ""}
+	newParent := &kiwiNode{client: c, path: ""}
+
+	errno := parent.Rename(nil, "old.md", newParent, "new.md", 0)
+	if errno != 0 {
+		t.Fatalf("Rename errno: %v", errno)
+	}
+	if _, ok := m.files["old.md"]; ok {
+		t.Fatal("old path should have been deleted")
+	}
+	got, ok := m.files["new.md"]
+	if !ok {
+		t.Fatal("new path should exist")
+	}
+	if string(got) != "rename me" {
+		t.Fatalf("new content = %q, want %q", got, "rename me")
+	}
+	if r := m.renames.Load(); r != 1 {
+		t.Fatalf("expected 1 atomic rename call, got %d", r)
+	}
+	if p := m.puts.Load(); p != 0 {
+		t.Fatalf("expected 0 PUT calls (atomic rename should replace GET+PUT+DELETE), got %d", p)
+	}
+}
+
+func TestRename_NonASCII(t *testing.T) {
+	m := newMock()
+	m.files["café.md"] = []byte("french content")
+	srv := httptest.NewServer(m.handler())
+	defer srv.Close()
+
+	c := NewClient(srv.URL)
+	parent := &kiwiNode{client: c, path: ""}
+	newParent := &kiwiNode{client: c, path: ""}
+
+	errno := parent.Rename(nil, "café.md", newParent, "日記.md", 0)
+	if errno != 0 {
+		t.Fatalf("Rename non-ASCII errno: %v", errno)
+	}
+	if _, ok := m.files["café.md"]; ok {
+		t.Fatal("old non-ASCII path should have been deleted")
+	}
+	got, ok := m.files["日記.md"]
+	if !ok {
+		t.Fatal("new non-ASCII path should exist")
+	}
+	if string(got) != "french content" {
+		t.Fatalf("content = %q", got)
+	}
+}
+
+func TestRenameDirectory(t *testing.T) {
+	m := newMock()
+	m.dirs["mydir"] = []treeResponse{{Name: "a.md", IsDir: false}}
+	srv := httptest.NewServer(m.handler())
+	defer srv.Close()
+
+	c := NewClient(srv.URL)
+	parent := &kiwiNode{client: c, path: ""}
+	newParent := &kiwiNode{client: c, path: ""}
+
+	errno := parent.Rename(nil, "mydir", newParent, "newdir", 0)
+	if errno != 0 {
+		t.Fatalf("directory rename errno = %v, want 0", errno)
+	}
+	if _, ok := m.dirs["newdir"]; !ok {
+		t.Fatal("expected newdir to exist after rename")
+	}
+	if _, ok := m.dirs["mydir"]; ok {
+		t.Fatal("expected mydir to be deleted after rename")
+	}
+}
+
+func TestSetattr_Truncate(t *testing.T) {
+	m := newMock()
+	m.files["note.md"] = []byte("hello world")
+	srv := httptest.NewServer(m.handler())
+	defer srv.Close()
+
+	c := NewClient(srv.URL)
+	n := &kiwiNode{client: c, path: "note.md"}
+
+	in := &fuse.SetAttrIn{}
+	in.Valid = fuse.FATTR_SIZE
+	in.Size = 0
+	out := &fuse.AttrOut{}
+
+	errno := n.Setattr(nil, nil, in, out)
+	if errno != 0 {
+		t.Fatalf("Setattr errno: %v", errno)
+	}
+	if got := m.files["note.md"]; len(got) != 0 {
+		t.Fatalf("file should be empty after truncate, got %d bytes", len(got))
+	}
+}
+
+func TestSetattr_TruncateNonZero(t *testing.T) {
+	m := newMock()
+	m.files["note.md"] = []byte("hello world")
+	srv := httptest.NewServer(m.handler())
+	defer srv.Close()
+
+	c := NewClient(srv.URL)
+	n := &kiwiNode{client: c, path: "note.md"}
+
+	in := &fuse.SetAttrIn{}
+	in.Valid = fuse.FATTR_SIZE
+	in.Size = 5
+	out := &fuse.AttrOut{}
+
+	errno := n.Setattr(nil, nil, in, out)
+	if errno != 0 {
+		t.Fatalf("Setattr errno: %v", errno)
+	}
+	if got := m.files["note.md"]; string(got) != "hello" {
+		t.Fatalf("truncated content = %q, want %q", got, "hello")
+	}
+}
+
+func TestFsync(t *testing.T) {
+	m := newMock()
+	srv := httptest.NewServer(m.handler())
+	defer srv.Close()
+
+	c := NewClient(srv.URL)
+	n := &kiwiNode{client: c, path: "synced.md"}
+	f := &kiwiFile{node: n, client: c, data: []byte("sync this"), dirty: true}
+
+	errno := f.Fsync(nil, 0)
+	if errno != 0 {
+		t.Fatalf("Fsync errno: %v", errno)
+	}
+	if m.puts.Load() != 1 {
+		t.Fatalf("puts = %d, want 1", m.puts.Load())
+	}
+	got, ok := m.files["synced.md"]
+	if !ok {
+		t.Fatal("file should exist on server after fsync")
+	}
+	if string(got) != "sync this" {
+		t.Fatalf("server content = %q, want %q", got, "sync this")
+	}
+	if f.dirty {
+		t.Fatal("dirty should be false after fsync")
+	}
+}
+
+func TestOpenTrunc(t *testing.T) {
+	m := newMock()
+	m.files["trunc.md"] = []byte("old content")
+	srv := httptest.NewServer(m.handler())
+	defer srv.Close()
+
+	c := NewClient(srv.URL)
+	n := &kiwiNode{client: c, path: "trunc.md"}
+
+	fh, _, errno := n.Open(nil, syscall.O_TRUNC)
+	if errno != 0 {
+		t.Fatalf("Open errno: %v", errno)
+	}
+	kf := fh.(*kiwiFile)
+	if len(kf.data) != 0 {
+		t.Fatalf("data after O_TRUNC = %d bytes, want 0", len(kf.data))
+	}
+	if !kf.dirty {
+		t.Fatal("dirty should be true after O_TRUNC")
+	}
+}
+
+func TestOpenAppend(t *testing.T) {
+	m := newMock()
+	m.files["append.md"] = []byte("first ")
+	srv := httptest.NewServer(m.handler())
+	defer srv.Close()
+
+	c := NewClient(srv.URL)
+	n := &kiwiNode{client: c, path: "append.md"}
+	c.storeFile("append.md", []byte("first "), false)
+
+	fh, _, errno := n.Open(nil, syscall.O_APPEND)
+	if errno != 0 {
+		t.Fatalf("Open errno: %v", errno)
+	}
+	kf := fh.(*kiwiFile)
+	if !kf.append {
+		t.Fatal("append should be true after O_APPEND")
+	}
+
+	kf.Write(nil, []byte("second "), 0)
+	kf.Write(nil, []byte("third"), 0)
+
+	want := "first second third"
+	if string(kf.data) != want {
+		t.Fatalf("data = %q, want %q", kf.data, want)
+	}
+}
+
+func TestOpenAppend_Uncached(t *testing.T) {
+	m := newMock()
+	m.files["remote.md"] = []byte("existing ")
+	srv := httptest.NewServer(m.handler())
+	defer srv.Close()
+
+	c := NewClient(srv.URL)
+	n := &kiwiNode{client: c, path: "remote.md"}
+
+	fh, _, errno := n.Open(nil, syscall.O_APPEND)
+	if errno != 0 {
+		t.Fatalf("Open errno: %v", errno)
+	}
+	kf := fh.(*kiwiFile)
+
+	kf.Write(nil, []byte("appended"), 0)
+
+	want := "existing appended"
+	if string(kf.data) != want {
+		t.Fatalf("data = %q, want %q (append without cache should fetch from server)", kf.data, want)
+	}
+}
+
+func TestRename_PathTraversal(t *testing.T) {
+	m := newMock()
+	m.files["legit.md"] = []byte("ok")
+	srv := httptest.NewServer(m.handler())
+	defer srv.Close()
+
+	c := NewClient(srv.URL)
+	parent := &kiwiNode{client: c, path: ""}
+	newParent := &kiwiNode{client: c, path: ""}
+
+	errno := parent.Rename(nil, "legit.md", newParent, "../../../etc/passwd", 0)
+	if errno != 0 && errno != syscall.EIO {
+		t.Logf("Rename with path traversal got errno %v (server should reject)", errno)
+	}
+}
+
+func TestSymlink_SendsCorrectRequest(t *testing.T) {
+	var gotMethod, gotContentType string
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotContentType = r.Header.Get("Content-Type")
+		gotBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"path":"link.md","type":"symlink"}`))
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL)
+	req, _ := http.NewRequest("PUT", c.apiURL("/api/kiwi/file", "link.md"), bytes.NewReader([]byte("../other/target.md")))
+	req.Header.Set("Content-Type", "application/x-symlink")
+	req.Header.Set("X-Actor", "fuse")
+	resp, err := c.do(req)
+	if err != nil {
+		t.Fatalf("symlink request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if gotMethod != "PUT" {
+		t.Fatalf("method = %q, want PUT", gotMethod)
+	}
+	if gotContentType != "application/x-symlink" {
+		t.Fatalf("Content-Type = %q, want application/x-symlink", gotContentType)
+	}
+	if string(gotBody) != "../other/target.md" {
+		t.Fatalf("body = %q, want ../other/target.md", gotBody)
+	}
+}
+
+func TestReadlink(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/kiwi/readlink" {
+			t.Errorf("expected /api/kiwi/readlink, got %s", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("../other/target.md"))
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL)
+	n := &kiwiNode{client: c, path: "link.md"}
+	data, errno := n.Readlink(nil)
+	if errno != 0 {
+		t.Fatalf("Readlink errno = %v, want 0", errno)
+	}
+	if string(data) != "../other/target.md" {
+		t.Fatalf("Readlink = %q, want ../other/target.md", data)
+	}
+}
+
+func TestStatFile_DetectsSymlink(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-File-Type", "symlink")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("target content"))
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL)
+	n := &kiwiNode{client: c, path: "link.md"}
+	st, errno := n.statFile()
+	if errno != 0 {
+		t.Fatalf("statFile errno = %v", errno)
+	}
+	if !st.found {
+		t.Fatal("expected found=true")
+	}
+	if !st.isSymlink {
+		t.Fatal("expected isSymlink=true for X-File-Type: symlink header")
+	}
+	if st.size != int64(len("target content")) {
+		t.Fatalf("size = %d, want %d", st.size, len("target content"))
+	}
+
+	cached := c.cachedFile("link.md")
+	if cached == nil {
+		t.Fatal("expected symlink to be cached")
+	}
+	if !cached.isSymlink {
+		t.Fatal("cached entry should preserve isSymlink=true")
 	}
 }
 

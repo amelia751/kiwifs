@@ -2,9 +2,17 @@
 
 package versioning
 
-import "os/exec"
+import (
+	"os/exec"
+	"time"
+)
 
 // setProcAttr is a no-op on Windows where Setpgid is not available.
-// exec.CommandContext still terminates the child process on timeout;
-// Windows process groups are managed differently by the OS.
 func setProcAttr(cmd *exec.Cmd) {}
+
+// setCancelSignal on Windows uses WaitDelay for a grace period before
+// the process is killed. Windows has no SIGTERM equivalent for console
+// apps, so the default kill behaviour is acceptable.
+func setCancelSignal(cmd *exec.Cmd) {
+	cmd.WaitDelay = 5 * time.Second
+}

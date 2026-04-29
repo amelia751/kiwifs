@@ -149,13 +149,158 @@ func TestLocalWriteAtomic(t *testing.T) {
 }
 
 func TestLocalConfinesTraversalToRoot(t *testing.T) {
-	// filepath.Clean("/" + "../escape") → "/escape", so traversal attempts
-	// collapse onto root rather than escaping it. Verify the path the
-	// storage layer resolves stays within root.
 	dir := t.TempDir()
 	l, _ := NewLocal(dir)
 	abs := l.AbsPath("../escape.md")
 	if !strings.HasPrefix(abs, l.root) {
 		t.Fatalf("traversal escaped root: %s not under %s", abs, l.root)
+	}
+}
+
+func TestGuardPath_NullByte(t *testing.T) {
+	dir := t.TempDir()
+	_, err := GuardPath(dir, "file\x00.md")
+	if err == nil {
+		t.Fatal("null byte in path should be rejected")
+	}
+	if !strings.Contains(err.Error(), "null byte") {
+		t.Fatalf("error should mention null byte: %v", err)
+	}
+}
+
+func TestGuardPath_ControlChars(t *testing.T) {
+	dir := t.TempDir()
+	for _, c := range []byte{0x01, 0x0A, 0x0D, 0x1F} {
+		path := "file" + string(c) + ".md"
+		_, err := GuardPath(dir, path)
+		if err == nil {
+			t.Fatalf("control char 0x%02x should be rejected", c)
+		}
+	}
+}
+
+func TestGuardPath_TabAllowed(t *testing.T) {
+	dir := t.TempDir()
+	_, err := GuardPath(dir, "notes\ttab.md")
+	if err != nil {
+		t.Fatalf("tab should be allowed in paths: %v", err)
+	}
+}
+
+func TestGuardPath_LongSegment(t *testing.T) {
+	dir := t.TempDir()
+	long := strings.Repeat("a", 256) + ".md"
+	_, err := GuardPath(dir, long)
+	if err == nil {
+		t.Fatal("256-byte filename should be rejected")
+	}
+	if !strings.Contains(err.Error(), "255 bytes") {
+		t.Fatalf("error should mention 255 bytes: %v", err)
+	}
+}
+
+func TestGuardPath_255ByteSegmentAllowed(t *testing.T) {
+	dir := t.TempDir()
+	name := strings.Repeat("a", 252) + ".md"
+	_, err := GuardPath(dir, name)
+	if err != nil {
+		t.Fatalf("255-byte filename should be allowed: %v", err)
+	}
+}
+
+func TestGuardPath_LeadingTrailingSpaces(t *testing.T) {
+	dir := t.TempDir()
+	l, _ := NewLocal(dir)
+	ctx := context.Background()
+
+	if err := l.Write(ctx, " leading.md", []byte("data")); err != nil {
+		t.Fatalf("write leading space: %v", err)
+	}
+	got, err := l.Read(ctx, " leading.md")
+	if err != nil {
+		t.Fatalf("read leading space: %v", err)
+	}
+	if string(got) != "data" {
+		t.Fatalf("content = %q", got)
+	}
+
+	if err := l.Write(ctx, "trailing.md ", []byte("data2")); err != nil {
+		t.Fatalf("write trailing space: %v", err)
+	}
+	got2, err := l.Read(ctx, "trailing.md ")
+	if err != nil {
+		t.Fatalf("read trailing space: %v", err)
+	}
+	if string(got2) != "data2" {
+		t.Fatalf("content = %q", got2)
+	}
+}
+
+func TestWrite_NullByteRejected(t *testing.T) {
+	dir := t.TempDir()
+	l, _ := NewLocal(dir)
+	err := l.Write(context.Background(), "evil\x00.md", []byte("data"))
+	if err == nil {
+		t.Fatal("write with null byte should fail")
+	}
+}
+
+func TestRead_NullByteRejected(t *testing.T) {
+	dir := t.TempDir()
+	l, _ := NewLocal(dir)
+	_, err := l.Read(context.Background(), "evil\x00.md")
+	if err == nil {
+		t.Fatal("read with null byte should fail")
+	}
+}
+
+func TestDelete_NullByteRejected(t *testing.T) {
+	dir := t.TempDir()
+	l, _ := NewLocal(dir)
+	err := l.Delete(context.Background(), "evil\x00.md")
+	if err == nil {
+		t.Fatal("delete with null byte should fail")
+	}
+}
+
+func TestGuardPath_GitattributesBlocked(t *testing.T) {
+	dir := t.TempDir()
+	// Root-level .gitattributes — caught by hidden component check
+	_, err := GuardPath(dir, ".gitattributes")
+	if err == nil {
+		t.Fatal(".gitattributes should be blocked")
+	}
+
+	// Subdirectory .gitattributes — also caught by hidden component check
+	_, err2 := GuardPath(dir, "subdir/.gitattributes")
+	if err2 == nil {
+		t.Fatal("subdir/.gitattributes should be blocked")
+	}
+
+	// Verify isDangerousFile catches the basename independently
+	if !isDangerousFile(".gitattributes") {
+		t.Fatal("isDangerousFile should flag .gitattributes")
+	}
+	if !isDangerousFile("any/path/.gitmodules") {
+		t.Fatal("isDangerousFile should flag .gitmodules")
+	}
+	if isDangerousFile("normal.md") {
+		t.Fatal("isDangerousFile should not flag normal.md")
+	}
+}
+
+func TestGuardPath_GitmodulesBlocked(t *testing.T) {
+	dir := t.TempDir()
+	_, err := GuardPath(dir, "subdir/.gitmodules")
+	if err == nil {
+		t.Fatal(".gitmodules should be blocked")
+	}
+}
+
+func TestGuardPath_NormalGitFilesAllowed(t *testing.T) {
+	dir := t.TempDir()
+	_, err := GuardPath(dir, "gitattributes-info.md")
+	if err != nil {
+		t.Fatalf("gitattributes-info.md should be allowed: %v", err)
 	}
 }

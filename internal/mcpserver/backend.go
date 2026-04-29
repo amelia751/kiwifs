@@ -70,6 +70,7 @@ type Backend interface {
 	Analytics(ctx context.Context, scope string, staleThreshold int) (json.RawMessage, error)
 	MemoryReport(ctx context.Context, episodesPrefix string) (json.RawMessage, error)
 	HealthCheckPage(ctx context.Context, path string) (json.RawMessage, error)
+	Rename(ctx context.Context, from, to, actor string) (string, error)
 	Backlinks(ctx context.Context, path string) ([]Backlink, error)
 	ResolveWikiLinks(ctx context.Context, content string) string
 	PublicURL() string
