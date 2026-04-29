@@ -113,6 +113,7 @@ func (g *Git) run(ctx context.Context, name string, args ...string) error {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = g.root
+	setProcAttr(cmd)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -147,6 +148,7 @@ func (g *Git) commit(ctx context.Context, actor, message string) error {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", "commit", "-m", message)
 	cmd.Dir = g.root
+	setProcAttr(cmd)
 	cmd.Env = g.commitEnv(actor)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -166,6 +168,7 @@ func (g *Git) output(ctx context.Context, name string, args ...string) (string, 
 	defer cancel()
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = g.root
+	setProcAttr(cmd)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
