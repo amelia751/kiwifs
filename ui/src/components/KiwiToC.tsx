@@ -1,19 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import GithubSlugger from "github-slugger";
 import { cn } from "@/lib/cn";
 import { Button } from "@/components/ui/button";
 
 type Heading = { id: string; text: string; depth: number };
-
-// slug matches rehype-slug's behaviour closely enough for our purposes:
-// lowercase, spaces → hyphens, strip non word/hyphens.
-function slug(text: string): string {
-  return text
-    .trim()
-    .toLowerCase()
-    .replace(/[^\w\s-]/g, "")
-    .replace(/\s+/g, "-")
-    .replace(/-+/g, "-");
-}
 
 // Parse headings directly from markdown. Doing this on the source (rather than
 // walking the rendered DOM) avoids a race where the ToC mounts before
@@ -21,6 +11,7 @@ function slug(text: string): string {
 function parseHeadings(md: string): Heading[] {
   const lines = md.split("\n");
   const out: Heading[] = [];
+  const slugger = new GithubSlugger();
   let inFence = false;
   for (const line of lines) {
     if (/^```/.test(line)) {
@@ -33,7 +24,9 @@ function parseHeadings(md: string): Heading[] {
     const depth = m[1].length;
     if (depth < 2 || depth > 4) continue; // h1 is the page title; skip h5/h6
     const text = m[2].replace(/\[([^\]]+)\]\([^)]+\)/g, "$1").trim();
-    out.push({ id: slug(text), text, depth });
+    const id = slugger.slug(text);
+    if (!id) continue;
+    out.push({ id, text, depth });
   }
   return out;
 }
