@@ -530,7 +530,10 @@ CLI flags override config: `kiwifs serve --port 4000 --search sqlite --versionin
 ### Docker
 
 ```bash
-# Build locally (pre-built images coming soon)
+# Pull from Docker Hub
+docker run -v ./knowledge:/data -p 3333:3333 ameliaanhlam/kiwifs
+
+# Or build locally
 docker build -t kiwifs .
 docker run -v ./knowledge:/data -p 3333:3333 kiwifs
 ```

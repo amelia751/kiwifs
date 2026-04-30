@@ -4,7 +4,6 @@ on:
   push:
     tags:
       - 'v*'
-  workflow_dispatch:
 
 permissions:
   contents: write
@@ -60,10 +59,6 @@ jobs:
           CGO_ENABLED: 0
         run: |
           VERSION=${GITHUB_REF#refs/tags/}
-          if [ -z "$VERSION" ]; then
-            VERSION="dev"
-          fi
-
           OUTPUT="kiwifs-${{ matrix.os }}-${{ matrix.arch }}"
           if [ "${{ matrix.os }}" = "windows" ]; then
             OUTPUT="${OUTPUT}.exe"
@@ -71,10 +66,7 @@ jobs:
 
           go build -ldflags="-s -w -X main.version=$VERSION" -o "$OUTPUT" .
 
-          # Create tarball
           tar -czf "${OUTPUT}.tar.gz" "$OUTPUT"
-
-          # Generate checksums
           sha256sum "${OUTPUT}.tar.gz" > "${OUTPUT}.tar.gz.sha256"
 
       - name: Upload artifacts
@@ -105,7 +97,7 @@ jobs:
           ls -lh release/
 
       - name: Create Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           files: release/*
           generate_release_notes: true
@@ -135,11 +127,9 @@ jobs:
       - name: Extract version
         id: version
         run: |
-          VERSION=${GITHUB_REF#refs/tags/}
-          if [ -z "$VERSION" ]; then
-            VERSION="latest"
-          fi
+          VERSION=${GITHUB_REF#refs/tags/v}
           echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "full_tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
 
       - name: Build and push
         uses: docker/build-push-action@v5
@@ -148,5 +138,7 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
-            kiwifs/kiwifs:${{ steps.version.outputs.version }}
-            kiwifs/kiwifs:latest
+            ${{ secrets.DOCKER_USERNAME }}/kiwifs:${{ steps.version.outputs.version }}
+            ${{ secrets.DOCKER_USERNAME }}/kiwifs:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
