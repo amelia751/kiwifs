@@ -9,7 +9,7 @@ import rehypeAutolinkHeadings from "rehype-autolink-headings";
 import matter from "gray-matter";
 import Zoom from "react-medium-image-zoom";
 import "react-medium-image-zoom/dist/styles.css";
-import { AlertTriangle, Calendar, ChevronDown, ChevronRight, Edit, FileAxis3D, FileQuestion, History as HistoryIcon, Link2, MessageSquareQuote, Pin, Plus, Star, Tag, User } from "lucide-react";
+import { AlertTriangle, Calendar, CheckSquare, ChevronDown, ChevronRight, Edit, FileAxis3D, FileQuestion, History as HistoryIcon, Link2, List, MessageSquareQuote, Pin, Plus, Star, Tag, Type, User } from "lucide-react";
 import { api, type TreeEntry } from "@/lib/api";
 import { titleize } from "@/lib/paths";
 import { KiwiBreadcrumb } from "./KiwiBreadcrumb";
@@ -40,6 +40,12 @@ type Props = {
   refreshKey?: number;
 };
 
+type FrontmatterProperty = {
+  key: string;
+  value: unknown;
+  kind: "text" | "list" | "date" | "boolean" | "object";
+};
+
 const CALLOUT_PREFIXES: Array<{ emoji: string; cls: string }> = [
   { emoji: "ℹ️", cls: "kiwi-callout-info" },
   { emoji: "⚠️", cls: "kiwi-callout-warn" },
@@ -54,6 +60,91 @@ function splitCallout(text: string): { emoji: string; cls: string; rest: string 
     }
   }
   return null;
+}
+
+function parseMarkdownPage(content: string): { body: string; meta: Record<string, unknown> } {
+  const fallback = splitFrontmatterBlock(content);
+
+  try {
+    const m = matter(content);
+    const parsedMeta = (m.data || {}) as Record<string, unknown>;
+    const meta = Object.keys(parsedMeta).length > 0
+      ? parsedMeta
+      : fallback
+        ? parseSimpleFrontmatter(fallback.raw)
+        : {};
+    const body = stripDuplicateTitle(fallback && m.content === content ? fallback.body : m.content, meta);
+    return { body, meta };
+  } catch {
+    if (fallback) {
+      const meta = parseSimpleFrontmatter(fallback.raw);
+      return { body: stripDuplicateTitle(fallback.body, meta), meta };
+    }
+    return { body: content, meta: {} };
+  }
+}
+
+function splitFrontmatterBlock(content: string): { raw: string; body: string } | null {
+  const withoutBom = content.replace(/^\uFEFF/, "");
+  if (!withoutBom.startsWith("---\n") && !withoutBom.startsWith("---\r\n")) return null;
+
+  const rest = withoutBom.replace(/^---[ \t]*\r?\n/, "");
+  const match = rest.match(/\r?\n---[ \t]*(?:\r?\n|$)/);
+  if (!match || match.index == null) return null;
+
+  const raw = rest.slice(0, match.index);
+  const body = rest.slice(match.index + match[0].length);
+  return { raw, body };
+}
+
+function parseSimpleFrontmatter(raw: string): Record<string, unknown> {
+  const meta: Record<string, unknown> = {};
+  let listKey: string | null = null;
+
+  for (const line of raw.split(/\r?\n/)) {
+    const listItem = line.match(/^\s+-\s+(.*)$/);
+    if (listKey && listItem) {
+      const current = meta[listKey];
+      if (Array.isArray(current)) current.push(parseFrontmatterScalar(listItem[1]));
+      continue;
+    }
+
+    const entry = line.match(/^([A-Za-z0-9_-]+):(?:\s*(.*))?$/);
+    if (!entry) continue;
+
+    const [, key, rawValue = ""] = entry;
+    const value = rawValue.trim();
+    if (value === "") {
+      meta[key] = [];
+      listKey = key;
+      continue;
+    }
+
+    meta[key] = parseFrontmatterScalar(value);
+    listKey = null;
+  }
+
+  return meta;
+}
+
+function parseFrontmatterScalar(value: string): unknown {
+  const trimmed = value.trim();
+  if ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'"))) {
+    return trimmed.slice(1, -1);
+  }
+  if (trimmed === "true") return true;
+  if (trimmed === "false") return false;
+  if (/^-?\d+(?:\.\d+)?$/.test(trimmed)) return Number(trimmed);
+  return trimmed;
+}
+
+function stripDuplicateTitle(body: string, meta: Record<string, unknown>): string {
+  if (typeof meta.title !== "string") return body;
+  const h1Match = body.match(/^\s*#\s+(.+)\n?/);
+  if (h1Match && h1Match[1].trim() === meta.title.trim()) {
+    return body.replace(/^\s*#\s+.+\n?/, "");
+  }
+  return body;
 }
 
 export function KiwiPage({ path, tree, onNavigate, onEdit, onHistory, onToggleStar, isStarred, onTogglePin, isPinned, onDeleted, onDuplicated, onMoved, onTagClick, refreshKey }: Props) {
@@ -108,26 +199,14 @@ export function KiwiPage({ path, tree, onNavigate, onEdit, onHistory, onToggleSt
 
   const parsed = useMemo(() => {
     if (content == null) return { body: "", meta: {} as Record<string, unknown> };
-    try {
-      const m = matter(content);
-      let body = m.content;
-      if (typeof m.data?.title === "string") {
-        const h1Match = body.match(/^\s*#\s+(.+)\n?/);
-        if (h1Match && h1Match[1].trim() === m.data.title.trim()) {
-          body = body.replace(/^\s*#\s+.+\n?/, "");
-        }
-      }
-      return { body, meta: (m.data || {}) as Record<string, unknown> };
-    } catch {
-      return { body: content, meta: {} };
-    }
+    return parseMarkdownPage(content);
   }, [content]);
 
+  const properties = useMemo(() => frontmatterProperties(parsed.meta), [parsed.meta]);
   const badges = useMemo(() => frontmatterBadges(parsed.meta), [parsed.meta]);
   const frontmatterTitle = typeof parsed.meta.title === "string" ? parsed.meta.title : null;
   const statusBadge = badges.find((b) => b.key === "status");
   const tagBadges = badges.filter((b) => b.key === "tags");
-  const otherBadges = badges.filter((b) => b.key !== "status" && b.key !== "tags");
 
   if (error) {
     const is404 = error.startsWith("Error: 404") || error.includes("404");
@@ -269,19 +348,12 @@ export function KiwiPage({ path, tree, onNavigate, onEdit, onHistory, onToggleSt
               </div>
             )}
 
-            {/* ── Other labels ── */}
-            {otherBadges.length > 0 && (
-              <div className="flex flex-wrap gap-1.5 mt-2">
-                {otherBadges.map((b) => (
-                  <Badge
-                    key={b.key + ":" + b.value}
-                    variant="outline"
-                  >
-                    <span className="text-muted-foreground mr-1">{b.key}:</span>
-                    <span>{b.value}</span>
-                  </Badge>
-                ))}
-              </div>
+            {/* ── Properties ── */}
+            {properties.length > 0 && (
+              <FrontmatterProperties
+                properties={properties}
+                onTagClick={onTagClick}
+              />
             )}
           </div>
 
@@ -298,7 +370,7 @@ export function KiwiPage({ path, tree, onNavigate, onEdit, onHistory, onToggleSt
                     [rehypeAutolinkHeadings, { behavior: "wrap" }],
                   ]}
                   components={{
-                    a: ({ href, children, ...rest }) => {
+                    a: ({ href, children, node: _node, ...rest }) => {
                       const h = href ?? "";
                       if (h.startsWith("kiwi:")) {
                         const target = h.slice("kiwi:".length);
@@ -344,7 +416,7 @@ export function KiwiPage({ path, tree, onNavigate, onEdit, onHistory, onToggleSt
                         </a>
                       );
                     },
-                    code: ({ className, children, ...rest }: any) => {
+                    code: ({ className, children, node: _node, ...rest }: any) => {
                       const match = /language-([A-Za-z0-9_-]+)/.exec(className || "");
                       const lang = match ? match[1] : undefined;
                       const raw = String(children).replace(/\n$/, "");
@@ -357,12 +429,12 @@ export function KiwiPage({ path, tree, onNavigate, onEdit, onHistory, onToggleSt
                       return <ShikiCode code={raw} lang={lang} />;
                     },
                     pre: ({ children }) => <>{children}</>,
-                    img: ({ src, alt, ...rest }) => (
+                    img: ({ src, alt, node: _node, ...rest }) => (
                       <Zoom wrapElement="span" classDialog="kiwi-zoom-dialog" zoomMargin={32}>
                         <img src={src as string} alt={alt as string} {...(rest as any)} />
                       </Zoom>
                     ),
-                    p: ({ children, ...rest }) => {
+                    p: ({ children, node: _node, ...rest }) => {
                       const arr = Array.isArray(children) ? children : [children];
                       const first = arr[0];
                       if (typeof first === "string") {
@@ -423,6 +495,139 @@ export function KiwiPage({ path, tree, onNavigate, onEdit, onHistory, onToggleSt
         </div>
       </div>
     </div>
+  );
+}
+
+/* ── Frontmatter properties ── */
+
+function FrontmatterProperties({
+  properties,
+  onTagClick,
+}: {
+  properties: FrontmatterProperty[];
+  onTagClick?: (tag: string) => void;
+}) {
+  return (
+    <section className="mt-6 border-t border-border/70 pt-4" aria-label="Properties">
+      <div className="mb-2 text-sm font-semibold text-foreground">Properties</div>
+      <div className="space-y-1.5 text-sm">
+        {properties.map((property) => (
+          <div
+            key={property.key}
+            className="grid grid-cols-[minmax(8rem,12rem)_1fr] gap-4 rounded-md px-2 py-1.5 hover:bg-muted/40"
+          >
+            <div className="flex min-w-0 items-center gap-2 text-muted-foreground">
+              <PropertyIcon kind={property.kind} />
+              <span className="truncate font-medium">{property.key}</span>
+            </div>
+            <div className="min-w-0 text-foreground/90">
+              <PropertyValue property={property} onTagClick={onTagClick} />
+            </div>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function PropertyIcon({ kind }: { kind: FrontmatterProperty["kind"] }) {
+  const className = "h-4 w-4 shrink-0";
+  if (kind === "date") return <Calendar className={className} />;
+  if (kind === "boolean") return <CheckSquare className={className} />;
+  if (kind === "list" || kind === "object") return <List className={className} />;
+  return <Type className={className} />;
+}
+
+function PropertyValue({
+  property,
+  onTagClick,
+}: {
+  property: FrontmatterProperty;
+  onTagClick?: (tag: string) => void;
+}) {
+  const { key, value } = property;
+
+  return <SemanticFrontmatterValue propertyKey={key} value={value} onTagClick={onTagClick} />;
+}
+
+function SemanticFrontmatterValue({
+  propertyKey,
+  value,
+  onTagClick,
+}: {
+  propertyKey: string;
+  value: unknown;
+  onTagClick?: (tag: string) => void;
+}) {
+  if (Array.isArray(value)) {
+    if (value.length === 0) return <span className="text-muted-foreground">[]</span>;
+
+    return (
+      <ul className="m-0 flex list-none flex-wrap gap-1.5 p-0" aria-label={`${propertyKey} values`}>
+        {value.map((item, index) => (
+          <li key={`${propertyKey}-${index}`} className="min-w-0">
+            <SemanticFrontmatterValue propertyKey={propertyKey} value={item} onTagClick={onTagClick} />
+          </li>
+        ))}
+      </ul>
+    );
+  }
+
+  if (isPlainObject(value)) {
+    const entries = Object.entries(value).filter(([, nestedValue]) => nestedValue != null);
+    if (entries.length === 0) return <span className="text-muted-foreground">{`{}`}</span>;
+
+    return (
+      <dl className="m-0 space-y-1 rounded-md border border-border/60 p-2">
+        {entries.map(([nestedKey, nestedValue]) => (
+          <div key={nestedKey} className="grid grid-cols-[minmax(6rem,10rem)_1fr] gap-2">
+            <dt className="min-w-0 truncate text-muted-foreground">{nestedKey}</dt>
+            <dd className="m-0 min-w-0">
+              <SemanticFrontmatterValue propertyKey={nestedKey} value={nestedValue} onTagClick={onTagClick} />
+            </dd>
+          </div>
+        ))}
+      </dl>
+    );
+  }
+
+  if (typeof value === "boolean") {
+    return (
+      <label className="inline-flex items-center gap-2">
+        <input type="checkbox" checked={value} readOnly aria-label={String(value)} className="h-4 w-4" />
+        <span className="text-muted-foreground">{String(value)}</span>
+      </label>
+    );
+  }
+
+  const text = formatFrontmatterValue(value);
+  const isLong = text.length > 80;
+  const isTag = propertyKey === "tags" && typeof value === "string";
+
+  if (isTag) {
+    return (
+      <button
+        type="button"
+        className="rounded-full border border-border bg-muted/60 px-2 py-0.5 text-xs hover:bg-primary/20"
+        onClick={() => onTagClick?.(text)}
+      >
+        {text}
+      </button>
+    );
+  }
+
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return <time dateTime={value.toISOString()}>{text}</time>;
+  }
+
+  if (isDateLikeString(value)) {
+    return <time dateTime={text}>{text}</time>;
+  }
+
+  return (
+    <span className={isLong ? "block whitespace-pre-wrap break-words leading-relaxed" : "break-words"}>
+      {text}
+    </span>
   );
 }
 
@@ -513,6 +718,44 @@ function statusColor(value: string): string {
   return "";
 }
 
+function frontmatterProperties(meta: Record<string, unknown>): FrontmatterProperty[] {
+  return Object.entries(meta)
+    .filter(([, value]) => value != null)
+    .map(([key, value]) => ({
+      key,
+      value,
+      kind: frontmatterKind(value),
+    }));
+}
+
+function frontmatterKind(value: unknown): FrontmatterProperty["kind"] {
+  if (typeof value === "boolean") return "boolean";
+  if (value instanceof Date || isDateLikeString(value)) return "date";
+  if (Array.isArray(value)) return "list";
+  if (isPlainObject(value)) return "object";
+  return "text";
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value != null && !Array.isArray(value) && !(value instanceof Date);
+}
+
+function isDateLikeString(value: unknown): boolean {
+  return typeof value === "string" && /^\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2})?/.test(value);
+}
+
+function formatFrontmatterValue(value: unknown): string {
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? "" : value.toLocaleDateString();
+  }
+  if (value == null) return "";
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (Array.isArray(value)) return value.map(formatFrontmatterValue).join(", ");
+  if (typeof value === "object") return JSON.stringify(value, null, 2);
+  return String(value);
+}
+
 function frontmatterBadges(
   meta: Record<string, unknown>
 ): Array<{ key: string; value: string }> {
@@ -523,15 +766,15 @@ function frontmatterBadges(
     if (Array.isArray(raw)) {
       for (const item of raw) {
         if (item == null) continue;
-        out.push({ key, value: String(item) });
+        out.push({ key, value: formatFrontmatterValue(item) });
       }
       continue;
     }
-    if (typeof raw === "object") {
+    if (typeof raw === "object" && !(raw instanceof Date)) {
       out.push({ key, value: JSON.stringify(raw) });
       continue;
     }
-    out.push({ key, value: String(raw) });
+    out.push({ key, value: formatFrontmatterValue(raw) });
   }
   return out;
 }
