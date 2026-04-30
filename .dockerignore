@@ -1,0 +1,48 @@
+# Version control
+.git
+.github
+.gitignore
+
+# IDE / editor
+.vscode
+.idea
+.claude
+
+# Documentation (not needed in image)
+*.md
+!README.md
+!npm/README.md
+LAYOUT.md
+
+# Design docs / internal
+todo*.md
+tasks.md
+kiwifs.md
+
+# Environment & secrets
+.env
+.env.*
+*.pem
+*.key
+secrets/
+
+# Pre-built binaries (we build fresh in Docker)
+kiwifs
+kiwifs-*
+*.test
+*.tar.gz
+*.sha256
+
+# Runtime data
+knowledge/
+
+# Test files
+tests/
+
+# Node modules (ui stage installs its own)
+ui/node_modules
+ui/dist
+
+# OS artifacts
+.DS_Store
+Thumbs.db

@@ -25,9 +25,14 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /kiwifs .
 # Stage 3: Minimal runtime.
 FROM alpine:3.20
 
-RUN apk add --no-cache git ca-certificates
+RUN apk add --no-cache git ca-certificates \
+    && addgroup -S kiwi && adduser -S kiwi -G kiwi
 
 COPY --from=builder /kiwifs /usr/local/bin/kiwifs
+
+RUN mkdir -p /data && chown kiwi:kiwi /data
+
+USER kiwi
 
 EXPOSE 3333
 
