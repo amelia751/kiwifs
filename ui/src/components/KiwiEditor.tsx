@@ -18,6 +18,7 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { dirOf, stem, titleize } from "@/lib/paths";
 import { KiwiBreadcrumb } from "./KiwiBreadcrumb";
+import { ExcalidrawMarkdownEditor, isExcalidrawMarkdown } from "./ExcalidrawMarkdownPreview";
 import { formatDistanceToNow } from "date-fns";
 
 const wikiLinkPluginKey = new PluginKey("kiwi-wiki-links");
@@ -122,6 +123,23 @@ export function KiwiEditor({ path, tree, onClose, onSaved, onNavigate, saveRef }
     );
   }
 
+  if (isExcalidrawMarkdown(initialMd)) {
+    return (
+      <ExcalidrawEditorInner
+        path={path}
+        initialMd={initialMd}
+        etagRef={etagRef}
+        saving={saving}
+        setSaving={setSaving}
+        setError={setError}
+        onClose={onClose}
+        onSaved={onSaved}
+        onNavigate={onNavigate}
+        saveRef={saveRef}
+      />
+    );
+  }
+
   return (
     <EditorInner
       path={path}
@@ -137,6 +155,124 @@ export function KiwiEditor({ path, tree, onClose, onSaved, onNavigate, saveRef }
       onNavigate={onNavigate}
       saveRef={saveRef}
     />
+  );
+}
+
+function ExcalidrawEditorInner({
+  path,
+  initialMd,
+  etagRef,
+  saving,
+  setSaving,
+  setError,
+  onClose,
+  onSaved,
+  onNavigate,
+  saveRef,
+}: {
+  path: string;
+  initialMd: string;
+  etagRef: React.MutableRefObject<string | null>;
+  saving: boolean;
+  setSaving: (v: boolean) => void;
+  setError: (v: string | null) => void;
+  onClose: () => void;
+  onSaved: (p: string) => void;
+  onNavigate?: (path: string) => void;
+  saveRef?: React.MutableRefObject<SaveHandle | null>;
+}) {
+  const [currentMd, setCurrentMd] = useState(initialMd);
+  const [saveStatus, setSaveStatus] = useState<SaveStatus>("clean");
+  const savedFlashTimer = useRef<number | null>(null);
+
+  const fmTitle = useMemo(() => {
+    try {
+      const parsed = matter(initialMd);
+      if (typeof parsed.data?.title === "string") return parsed.data.title;
+    } catch {}
+    return null;
+  }, [initialMd]);
+
+  const onSaveRef = useRef<(opts?: { close?: boolean }) => Promise<void>>(async () => {});
+  onSaveRef.current = async (opts) => {
+    setSaving(true);
+    setSaveStatus("saving");
+    setError(null);
+    try {
+      const res = await api.writeFile(path, currentMd, etagRef.current || undefined);
+      etagRef.current = res.etag ? `"${res.etag}"` : null;
+      setSaveStatus("saved");
+      if (savedFlashTimer.current) window.clearTimeout(savedFlashTimer.current);
+      savedFlashTimer.current = window.setTimeout(() => setSaveStatus("clean"), 2000);
+      if (opts?.close) onSaved(path);
+    } catch (e) {
+      setSaveStatus("error");
+      setError(String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const markChanged = useCallback((nextMd: string) => {
+    setCurrentMd(nextMd);
+    setSaveStatus(nextMd === initialMd ? "clean" : "dirty");
+  }, [initialMd]);
+
+  useEffect(() => {
+    if (!saveRef) return;
+    saveRef.current = { save: () => onSaveRef.current({ close: true }) };
+    return () => { saveRef.current = null; };
+  }, [saveRef]);
+
+  useEffect(() => {
+    return () => {
+      if (savedFlashTimer.current) window.clearTimeout(savedFlashTimer.current);
+    };
+  }, []);
+
+  return (
+    <div className="flex flex-col h-full">
+      <div className="sticky top-0 z-10 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/80 border-b border-border shrink-0">
+        <div className="px-8 py-2 max-w-6xl mx-auto">
+          {onNavigate
+            ? <KiwiBreadcrumb path={path} onNavigate={onNavigate} />
+            : <div className="text-sm text-muted-foreground font-mono truncate">{path}</div>}
+        </div>
+      </div>
+
+      <div className="flex-1 overflow-auto kiwi-scroll">
+        <div className="max-w-6xl mx-auto px-8 py-6">
+          <div className="mb-6">
+            <div className="flex items-start justify-between gap-4">
+              <div className="min-w-0">
+                <h1 className="text-2xl font-bold tracking-tight text-foreground leading-tight">
+                  {fmTitle || titleize(path)}
+                </h1>
+                <div className="flex items-center gap-2 mt-2">
+                  <SaveIndicator status={saveStatus} />
+                </div>
+              </div>
+              <div className="flex items-center gap-2 shrink-0 pt-1">
+                <Button
+                  onClick={() => onSaveRef.current({ close: true })}
+                  disabled={saving || saveStatus === "clean"}
+                  size="sm"
+                  variant={saveStatus === "dirty" ? "default" : "outline"}
+                >
+                  <Save className="h-3.5 w-3.5" />
+                  {saving ? "Saving…" : "Save & Close"}
+                </Button>
+                <Button variant="outline" size="sm" onClick={onClose}>
+                  <X className="h-3.5 w-3.5" /> Close
+                </Button>
+              </div>
+            </div>
+          </div>
+
+          <ExcalidrawMarkdownEditor markdown={initialMd} onChange={markChanged} />
+        </div>
+      </div>
+    </div>
   );
 }
 

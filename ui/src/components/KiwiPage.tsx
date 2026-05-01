@@ -19,6 +19,7 @@ import { KiwiComments } from "./KiwiComments";
 import { KiwiQuery } from "./KiwiQuery";
 import { PageActions } from "./PageActions";
 import { ShikiCode } from "./ShikiCode";
+import { ExcalidrawMarkdownPreview, isExcalidrawMarkdown } from "./ExcalidrawMarkdownPreview";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { buildResolver, remarkWikiLinks } from "@/lib/wikiLinks";
@@ -360,6 +361,9 @@ export function KiwiPage({ path, tree, onNavigate, onEdit, onHistory, onToggleSt
           {/* ── Content zone + ToC ── */}
           <div className="flex gap-6">
             <article className="min-w-0 flex-1">
+              {isExcalidrawMarkdown(content, parsed.meta) ? (
+                <ExcalidrawMarkdownPreview markdown={content} title={frontmatterTitle || titleize(path)} />
+              ) : (
               <div ref={proseRef} className="kiwi-prose">
                 <ReactMarkdown
                   remarkPlugins={[remarkGfm, remarkMath, [remarkWikiLinks, { resolver }]]}
@@ -456,6 +460,7 @@ export function KiwiPage({ path, tree, onNavigate, onEdit, onHistory, onToggleSt
                   {parsed.body}
                 </ReactMarkdown>
               </div>
+              )}
 
               {/* ── Footer zone: fixed order, collapsible ── */}
               <div className="mt-12 space-y-2">
@@ -490,7 +495,7 @@ export function KiwiPage({ path, tree, onNavigate, onEdit, onHistory, onToggleSt
                 </div>
               </div>
             </article>
-            <KiwiToC markdown={parsed.body} containerRef={proseRef} />
+            {!isExcalidrawMarkdown(content, parsed.meta) && <KiwiToC markdown={parsed.body} containerRef={proseRef} />}
           </div>
         </div>
       </div>
