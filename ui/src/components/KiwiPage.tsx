@@ -148,6 +148,23 @@ function stripDuplicateTitle(body: string, meta: Record<string, unknown>): strin
   return body;
 }
 
+const IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".avif", ".bmp", ".heic", ".heif", ".ico"]);
+const VIDEO_EXTS = new Set([".mp4", ".webm", ".ogv", ".mov"]);
+const AUDIO_EXTS = new Set([".mp3", ".ogg", ".wav", ".flac", ".m4a", ".opus", ".aac", ".weba"]);
+
+function classifyMedia(src: string): "image" | "video" | "audio" | "pdf" | "unknown" {
+  if (!src) return "unknown";
+  const url = src.split("?")[0].split("#")[0];
+  const dot = url.lastIndexOf(".");
+  if (dot === -1) return "unknown";
+  const ext = url.substring(dot).toLowerCase();
+  if (IMAGE_EXTS.has(ext)) return "image";
+  if (VIDEO_EXTS.has(ext)) return "video";
+  if (AUDIO_EXTS.has(ext)) return "audio";
+  if (ext === ".pdf") return "pdf";
+  return "unknown";
+}
+
 export function KiwiPage({ path, tree, onNavigate, onEdit, onHistory, onToggleStar, isStarred, onTogglePin, isPinned, onDeleted, onDuplicated, onMoved, onTagClick, refreshKey }: Props) {
   const [content, setContent] = useState<string | null>(null);
   const [lastModified, setLastModified] = useState<string | null>(null);
@@ -433,11 +450,57 @@ export function KiwiPage({ path, tree, onNavigate, onEdit, onHistory, onToggleSt
                       return <ShikiCode code={raw} lang={lang} />;
                     },
                     pre: ({ children }) => <>{children}</>,
-                    img: ({ src, alt, node: _node, ...rest }) => (
-                      <Zoom wrapElement="span" classDialog="kiwi-zoom-dialog" zoomMargin={32}>
-                        <img src={src as string} alt={alt as string} {...(rest as any)} />
-                      </Zoom>
-                    ),
+                    img: ({ src, alt, node: _node, width, height, ...rest }) => {
+                      let resolvedSrc = src as string;
+                      if (resolvedSrc && !resolvedSrc.startsWith("http") && !resolvedSrc.startsWith("/raw/") && !resolvedSrc.startsWith("/api/")) {
+                        resolvedSrc = resolvedSrc.startsWith("/") ? `/raw${resolvedSrc}` : `/raw/${resolvedSrc}`;
+                      }
+                      const kind = classifyMedia(resolvedSrc);
+                      switch (kind) {
+                        case "video":
+                          return (
+                            <figure className="kiwi-media">
+                              <video controls preload="metadata" className="max-w-full rounded-md">
+                                <source src={resolvedSrc} />
+                              </video>
+                              {alt && <figcaption className="text-sm text-muted-foreground mt-1">{alt}</figcaption>}
+                            </figure>
+                          );
+                        case "audio":
+                          return (
+                            <figure className="kiwi-media">
+                              <audio controls preload="metadata" className="w-full">
+                                <source src={resolvedSrc} />
+                              </audio>
+                              {alt && <figcaption className="text-sm text-muted-foreground mt-1">{alt}</figcaption>}
+                            </figure>
+                          );
+                        case "pdf":
+                          return (
+                            <figure className="kiwi-media">
+                              <iframe
+                                src={resolvedSrc}
+                                title={alt || "PDF"}
+                                className="w-full rounded-md border border-border"
+                                style={{ height: "600px" }}
+                              />
+                              {alt && <figcaption className="text-sm text-muted-foreground mt-1">{alt}</figcaption>}
+                            </figure>
+                          );
+                        default:
+                          return (
+                            <Zoom wrapElement="span" classDialog="kiwi-zoom-dialog" zoomMargin={32}>
+                              <img
+                                src={resolvedSrc}
+                                alt={alt as string}
+                                {...(width ? { width: Number(width) } : {})}
+                                {...(height ? { height: Number(height) } : {})}
+                                {...(rest as any)}
+                              />
+                            </Zoom>
+                          );
+                      }
+                    },
                     p: ({ children, node: _node, ...rest }) => {
                       const arr = Array.isArray(children) ? children : [children];
                       const first = arr[0];

@@ -103,6 +103,14 @@
 .kiwi-prose img {
   @apply rounded-lg max-w-full;
 }
+.kiwi-media {
+  @apply my-4;
+}
+.kiwi-media video,
+.kiwi-media audio,
+.kiwi-media iframe {
+  max-width: 100%;
+}
 .kiwi-prose .kiwi-zoom {
   @apply inline-block;
 }

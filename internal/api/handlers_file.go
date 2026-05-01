@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -16,6 +17,21 @@ import (
 	"github.com/kiwifs/kiwifs/internal/storage"
 	"github.com/labstack/echo/v4"
 )
+
+func init() {
+	for ext, ct := range map[string]string{
+		".avif": "image/avif",
+		".heic": "image/heic",
+		".heif": "image/heif",
+		".flac": "audio/flac",
+		".m4a":  "audio/mp4",
+		".opus": "audio/ogg",
+		".webm": "video/webm",
+		".mov":  "video/quicktime",
+	} {
+		mime.AddExtensionType(ext, ct)
+	}
+}
 
 func (h *Handlers) Tree(c echo.Context) error {
 	path := c.QueryParam("path")
@@ -287,14 +303,36 @@ func (h *Handlers) BulkWrite(c echo.Context) error {
 	return c.JSON(http.StatusOK, bulkResponse{Count: len(results), Files: results})
 }
 
-const defaultMaxAssetSize = 10 << 20 // 10 MiB
+const defaultMaxAssetSize = 100 << 20 // 100 MiB
 
 var defaultAllowedAssetTypes = []string{
+	// Images
 	"image/png",
 	"image/jpeg",
 	"image/gif",
 	"image/webp",
 	"image/svg+xml",
+	"image/avif",
+	"image/heic",
+	"image/heif",
+	"image/bmp",
+
+	// Video
+	"video/mp4",
+	"video/webm",
+	"video/ogg",
+	"video/quicktime",
+
+	// Audio
+	"audio/mpeg",
+	"audio/ogg",
+	"audio/wav",
+	"audio/webm",
+	"audio/flac",
+	"audio/aac",
+	"audio/mp4",
+
+	// Documents
 	"application/pdf",
 }
 
@@ -406,11 +444,37 @@ func assetMarkdown(path, name, ct string) string {
 	if alt == "" {
 		alt = name
 	}
-	url := "/" + path
-	if strings.HasPrefix(ct, "image/") {
+	url := "/raw/" + path
+	switch {
+	case strings.HasPrefix(ct, "image/"),
+		strings.HasPrefix(ct, "video/"),
+		strings.HasPrefix(ct, "audio/"):
 		return fmt.Sprintf("![%s](%s)", alt, url)
+	default:
+		return fmt.Sprintf("[%s](%s)", alt, url)
 	}
-	return fmt.Sprintf("[%s](%s)", alt, url)
+}
+
+func (h *Handlers) ServeRawFile(c echo.Context) error {
+	path := c.Param("*")
+	abs, err := storage.GuardPath(h.store.AbsPath(""), path)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+	}
+	content, err := os.ReadFile(abs)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return echo.NewHTTPError(http.StatusNotFound, "not found")
+		}
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	ct := detectContentType(path, content)
+	c.Response().Header().Set("X-Content-Type-Options", "nosniff")
+	if ct == "image/svg+xml" {
+		c.Response().Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'")
+	}
+	c.Response().Header().Set("Cache-Control", "public, max-age=3600, must-revalidate")
+	return c.Blob(http.StatusOK, ct, content)
 }
 
 func parseSize(s string) (int64, error) {

@@ -1,5 +1,6 @@
 # Binary
 kiwifs
+kiwifs-*
 *.test
 
 # Design docs (internal, not part of OSS repo)
@@ -28,3 +29,6 @@ secrets/
 # Runtime data (created by `kiwifs init`)
 knowledge/
 !cmd/templates/knowledge/
+
+# Storybook
+ui/storybook-static/

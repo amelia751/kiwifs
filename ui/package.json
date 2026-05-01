@@ -7,12 +7,15 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "typecheck": "tsc -b --noEmit"
+    "typecheck": "tsc -b --noEmit",
+    "storybook": "storybook dev -p 6006",
+    "build-storybook": "storybook build"
   },
   "dependencies": {
     "@blocknote/core": "^0.22.0",
     "@blocknote/mantine": "^0.22.0",
     "@blocknote/react": "^0.22.0",
+    "@excalidraw/excalidraw": "^0.18.0",
     "@radix-ui/react-context-menu": "^2.2.16",
     "@radix-ui/react-dialog": "^1.1.15",
     "@radix-ui/react-label": "^2.1.8",
@@ -36,6 +39,7 @@
     "gray-matter": "^4.0.3",
     "katex": "^0.16.45",
     "lucide-react": "^0.468.0",
+    "lz-string": "^1.5.0",
     "react": "^18.3.1",
     "react-colorful": "^5.6.1",
     "react-diff-viewer-continued": "^4.2.0",
@@ -53,17 +57,23 @@
     "tailwind-merge": "^2.5.5",
     "tailwindcss-animate": "^1.0.7",
     "unified": "^11.0.5",
-    "unist-util-visit": "^5.0.0",
-    "@excalidraw/excalidraw": "^0.18.0",
-    "lz-string": "^1.5.0"
+    "unist-util-visit": "^5.0.0"
   },
   "devDependencies": {
+    "@storybook/addon-actions": "^8.6.18",
+    "@storybook/addon-essentials": "^8.6.14",
+    "@storybook/addon-links": "^8.6.18",
+    "@storybook/blocks": "^8.6.14",
+    "@storybook/react": "^8.6.18",
+    "@storybook/react-vite": "^8.6.18",
+    "@storybook/test": "^8.6.18",
     "@types/node": "^22.19.17",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.4",
     "autoprefixer": "^10.4.20",
     "postcss": "^8.4.49",
+    "storybook": "^8.6.18",
     "tailwindcss": "^3.4.16",
     "typescript": "^5.7.2",
     "vite": "^5.4.11"

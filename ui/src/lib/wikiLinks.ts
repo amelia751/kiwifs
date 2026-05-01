@@ -1,8 +1,12 @@
-// Remark plugin + resolver for [[wiki-link]] syntax.
+// Remark plugin + resolver for [[wiki-link]] and ![[embed]] syntax.
 //
 // Parses `[[target]]` or `[[target|label]]` inside text nodes and replaces
 // them with link nodes whose URL is a `kiwi:` pseudo-protocol. React-markdown
 // then renders those as clickable spans via a custom <a> component.
+//
+// `![[target]]` is the Obsidian-style embed syntax: it emits an image node
+// instead of a link, so the media-aware img override renders it as
+// <img>, <video>, <audio>, or <iframe> based on file extension.
 //
 // Resolution is fuzzy:
 //   [[authentication]]         → concepts/authentication.md
@@ -21,7 +25,7 @@ export type LinkResolver = (target: string) => string | null;
 function flatten(tree: TreeEntry): string[] {
   const out: string[] = [];
   const walk = (n: TreeEntry) => {
-    if (!n.isDir && n.path.toLowerCase().endsWith(".md")) out.push(n.path);
+    if (!n.isDir) out.push(n.path);
     (n.children || []).forEach(walk);
   };
   walk(tree);
@@ -29,21 +33,20 @@ function flatten(tree: TreeEntry): string[] {
 }
 
 function normalize(s: string): string {
-  return s.toLowerCase().replace(/\.md$/, "").replace(/[-_\s]+/g, "-");
+  return s.toLowerCase().replace(/\.[^.]+$/, "").replace(/[-_\s]+/g, "-");
 }
 
 export function buildResolver(tree: TreeEntry | null): LinkResolver {
   if (!tree) return () => null;
   const paths = flatten(tree);
 
-  // Build several lookups: exact path → path, and normalized stem → path.
   const byPath = new Map<string, string>();
   const byNormPath = new Map<string, string>();
   const byStem = new Map<string, string>();
   for (const p of paths) {
     byPath.set(p, p);
     byNormPath.set(normalize(p), p);
-    const stem = p.substring(p.lastIndexOf("/") + 1).replace(/\.md$/i, "");
+    const stem = p.substring(p.lastIndexOf("/") + 1).replace(/\.[^.]+$/, "");
     byStem.set(normalize(stem), p);
   }
 
@@ -55,8 +58,6 @@ export function buildResolver(tree: TreeEntry | null): LinkResolver {
     const n = normalize(t);
     if (byNormPath.has(n)) return byNormPath.get(n)!;
     if (byStem.has(n)) return byStem.get(n)!;
-    // Suffix match: [[auth]] resolves to concepts/authentication.md if stem
-    // starts with it — useful but bounded to avoid absurd matches.
     for (const [stem, p] of byStem.entries()) {
       if (stem.startsWith(n)) return p;
     }
@@ -64,21 +65,19 @@ export function buildResolver(tree: TreeEntry | null): LinkResolver {
   };
 }
 
-// Extract all [[wiki]] targets from a markdown string. Used by the server
-// when indexing, and by the client when recomputing the link graph.
+// Extract all [[wiki]] targets from a markdown string (including ![[embeds]]).
 export function extractWikiTargets(md: string): string[] {
   const out: string[] = [];
-  const re = /\[\[([^\]|]+)(?:\|[^\]]+)?\]\]/g;
+  const re = /!?\[\[([^\]|]+)(?:\|[^\]]+)?\]\]/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(md)) !== null) out.push(m[1].trim());
   return out;
 }
 
-// Remark plugin: rewrite [[x]] occurrences in text nodes into link nodes.
-// `resolver` can return null for unknown targets — those are rendered as
-// "missing" wiki links (dotted underline) so authors see broken refs.
+// Remark plugin: rewrite [[x]] and ![[x]] occurrences in text nodes.
+// [[x]] → link node (wiki link), ![[x]] → image node (embed).
 export function remarkWikiLinks(opts: { resolver: LinkResolver }) {
-  const re = /\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g;
+  const re = /(!?)\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g;
 
   return (tree: Root) => {
     visit(tree, "text", (node, index, parent) => {
@@ -93,25 +92,61 @@ export function remarkWikiLinks(opts: { resolver: LinkResolver }) {
         if (m.index > last) {
           parts.push({ type: "text", value: node.value.slice(last, m.index) });
         }
-        const target = m[1].trim();
-        const label = (m[2] || target).trim();
+        const isEmbed = m[1] === "!";
+        const target = m[2].trim();
+        const label = (m[3] || target).trim();
         const resolved = opts.resolver(target);
-        const url = resolved
-          ? `kiwi:${resolved}`
-          : `kiwi-missing:${target}`;
-        parts.push({
-          type: "link",
-          url,
-          title: resolved || `Missing: ${target}`,
-          children: [{ type: "text", value: label }],
-          data: {
-            hProperties: {
-              className: resolved ? "wiki-link" : "wiki-link wiki-link-missing",
-              dataKiwiTarget: resolved || target,
-              dataKiwiMissing: resolved ? undefined : "true",
+
+        if (isEmbed) {
+          const src = resolved ? `/raw/${resolved}` : `/raw/${target}`;
+          const sizeMatch = label !== target ? label.match(/^(\d+)(?:x(\d+))?$/) : null;
+          const width = sizeMatch ? sizeMatch[1] : undefined;
+          const height = sizeMatch ? sizeMatch[2] : undefined;
+
+          if (resolved && resolved.endsWith(".md")) {
+            parts.push({
+              type: "link",
+              url: `kiwi:${resolved}`,
+              title: "Embedded page (click to open)",
+              children: [{ type: "text", value: label }],
+              data: {
+                hProperties: {
+                  className: "wiki-link wiki-embed-page",
+                  dataKiwiTarget: resolved,
+                },
+              },
+            });
+          } else {
+            parts.push({
+              type: "image",
+              url: src,
+              alt: sizeMatch ? (resolved || target) : label,
+              data: {
+                hProperties: {
+                  ...(width ? { width } : {}),
+                  ...(height ? { height } : {}),
+                },
+              },
+            });
+          }
+        } else {
+          const url = resolved
+            ? `kiwi:${resolved}`
+            : `kiwi-missing:${target}`;
+          parts.push({
+            type: "link",
+            url,
+            title: resolved || `Missing: ${target}`,
+            children: [{ type: "text", value: label }],
+            data: {
+              hProperties: {
+                className: resolved ? "wiki-link" : "wiki-link wiki-link-missing",
+                dataKiwiTarget: resolved || target,
+                dataKiwiMissing: resolved ? undefined : "true",
+              },
             },
-          },
-        });
+          });
+        }
         last = m.index + m[0].length;
       }
       if (last < node.value.length) {

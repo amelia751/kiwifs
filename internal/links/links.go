@@ -55,7 +55,7 @@ type Linker interface {
 // character except ] and |. We deliberately keep this simple — wiki links
 // inside fenced code blocks or inline code are still captured, which is
 // usually what authors want (code-block [[x]] is quite rare in practice).
-var wikiLinkRe = regexp.MustCompile(`\[\[([^\]|]+)(?:\|[^\]]+)?\]\]`)
+var wikiLinkRe = regexp.MustCompile(`!?\[\[([^\]|]+)(?:\|[^\]]+)?\]\]`)
 
 // Extract pulls [[target]] entries out of a markdown body. Targets are
 // returned verbatim (trimmed of surrounding whitespace) in order of

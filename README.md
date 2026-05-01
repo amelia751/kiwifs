@@ -5,11 +5,11 @@
 <h1 align="center">KiwiFS</h1>
 
 <p align="center">
-  <strong>A virtual filesystem agents can write, search, query, and trust.</strong>
+  <strong>Knowledge filesystem agents can write to, search, query, and trust.</strong>
 </p>
 
 <p align="center">
-  One Go binary, zero config. Agents write with <code>cat</code>. Humans read in a wiki. Git versions everything. Full-text + vector search. DQL queries over structured metadata.
+  Agents write with <code>cat</code>. Humans read in a wiki. Git versions everything. One binary, zero config.
 </p>
 
 <p align="center">
@@ -34,9 +34,9 @@ kiwifs init ./knowledge && kiwifs serve --root ./knowledge
 
 ## The problem
 
-Virtual filesystems for agents are an emerging primitive — but files are just files. Or are they?
+Knowledge filesystems for agents are an emerging primitive — but files are just files. Or are they?
 
-Current VFS solutions fall into one of these camps:
+Current solutions fall into one of these camps:
 
 - **Database tables pretending to be files** — no search, no versioning, no human interface. You get `read()` and `write()`, nothing else.
 - **Read-only retrieval layers** — agents can search but can't write. The filesystem is a one-way mirror.
@@ -44,7 +44,7 @@ Current VFS solutions fall into one of these camps:
 - **Ephemeral sandboxes** — agent dies, files die. No persistence across sessions.
 - **Proprietary SaaS** — locked to a vendor's ecosystem. Can't self-host, can't extend.
 
-A real VFS needs to be all of these at once:
+A real knowledge filesystem needs to be all of these at once:
 
 - **Writable** — agents write with `cat`, `echo`, `curl`, or MCP tools. Not read-only, not API-only.
 - **Searchable** — full-text (BM25) and semantic (vector) over the same files.
@@ -772,7 +772,7 @@ KiwiFS stores real files on a real filesystem — not blobs in a database. The d
 
 ## Inspired by
 
-- **[PocketBase](https://pocketbase.io)** — single Go binary, zero config, just works. KiwiFS is PocketBase for knowledge.
+- **[PocketBase](https://pocketbase.io)** — single Go binary, zero config, just works. KiwiFS brings the same philosophy to knowledge infrastructure.
 - **[Obsidian](https://obsidian.md)** — files are the database. Wiki links. Graph view. KiwiFS is Obsidian for the web — plus an agent interface and an API.
 - **[Karpathy's LLM Wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f)** — raw sources in, compiled wiki out, agent maintains it. KiwiFS is the production runtime for this pattern.
 - **[Mintlify ChromaFS](https://www.mintlify.com/blog/how-we-built-a-virtual-filesystem-for-our-assistant)** — the filesystem is the best agent interface. Agents already know `cat`/`grep`/`ls`.

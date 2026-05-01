@@ -121,7 +121,7 @@ func (s *Server) setupMiddleware() {
 		ExposeHeaders:   []string{"ETag", "Last-Modified", "X-Permalink"},
 	}))
 	s.echo.Use(middleware.Recover())
-	s.echo.Use(middleware.BodyLimit("32M"))
+	s.echo.Use(middleware.BodyLimit("110M"))
 	s.echo.Use(middleware.RateLimiterWithConfig(middleware.RateLimiterConfig{
 		Skipper: func(c echo.Context) bool {
 			p := c.Path()
@@ -315,6 +315,8 @@ func (s *Server) setupRoutes() {
 	s.echo.GET("/api/kiwi/public/:token", h.PublicPage)
 	s.echo.GET("/api/kiwi/public/file", h.PublicFile)
 	s.echo.GET("/api/kiwi/public/tree", h.PublicTree)
+
+	s.echo.GET("/raw/*", h.ServeRawFile)
 
 	uiHandler := webui.Handler()
 	s.echo.GET("/", uiHandler)

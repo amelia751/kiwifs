@@ -260,11 +260,12 @@ export const api = {
     });
     if (!res.ok) {
       const text = await res.text().catch(() => "");
+      if (res.status === 413) throw new Error("File too large (max 100 MB)");
+      if (res.status === 415) throw new Error(`File type not supported: ${file.type}`);
       throw new Error(`${res.status} ${res.statusText}: ${text}`);
     }
     const body = (await res.json()) as { path: string };
-    const p = new URLSearchParams({ path: body.path });
-    return `${kiwiBase()}/file?${p}`;
+    return "/raw/" + body.path;
   },
 
   async search(q: string, opts?: { modifiedAfter?: string }): Promise<SearchResponse> {
