@@ -1,5 +1,4 @@
 import { useState, useEffect, createElement, type ReactNode } from "react";
-import type { Decorator } from "@storybook/react";
 import {
   mockTree,
   mockMarkdownRich,
