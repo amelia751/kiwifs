@@ -7,6 +7,7 @@ import {
   mockMarkdownSimple,
   mockMarkdownRich,
   mockMarkdownExcalidraw,
+  mockMarkdownRenderingTest,
 } from "./__mocks__/data";
 
 const meta: Meta<typeof KiwiPage> = {
@@ -113,6 +114,21 @@ export const Starred: Story = {
   decorators: [
     (Story) => (
       <MockApiProvider overrides={{ fileContent: mockMarkdownRich }}>
+        <div className="h-screen bg-background text-foreground">
+          <Story />
+        </div>
+      </MockApiProvider>
+    ),
+  ],
+};
+
+export const RenderingTest: Story = {
+  args: {
+    path: "tests/rendering-test.md",
+  },
+  decorators: [
+    (Story) => (
+      <MockApiProvider overrides={{ fileContent: mockMarkdownRenderingTest }}>
         <div className="h-screen bg-background text-foreground">
           <Story />
         </div>

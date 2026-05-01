@@ -340,6 +340,149 @@ export const mockGraphNodes: GraphNode[] = [
   { path: "episodes/example-episode.md", tags: ["episode"] },
 ];
 
+export const mockMarkdownRenderingTest = `---
+title: Rendering Test — All Features
+tags:
+  - test
+  - rendering
+---
+
+## Wide Table Horizontal Scroll
+
+| Col 1 | Col 2 | Col 3 | Col 4 | Col 5 | Col 6 | Col 7 | Col 8 | Col 9 | Col 10 |
+|-------|-------|-------|-------|-------|-------|-------|-------|-------|--------|
+| Alpha | Bravo | Charlie | Delta | Echo | Foxtrot | Golf | Hotel | India | Juliet |
+| Data A | Data B | Data C | Data D | Data E | Data F | Data G | Data H | Data I | Data J |
+| Row 3 | Row 3 | Row 3 | Row 3 | Row 3 | Row 3 | Row 3 | Row 3 | Row 3 | Row 3 |
+
+## Normal Table
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Tables | Done | Styled with scroll wrapper |
+| Details | Done | Collapsible sections |
+| Kbd | Done | Keyboard shortcuts |
+
+## Collapsible Details/Summary
+
+<details>
+<summary>Click to expand this section</summary>
+
+This is hidden content inside a collapsible section.
+
+It supports **bold**, *italic*, and \`inline code\`.
+
+- Bullet one
+- Bullet two
+
+</details>
+
+<details>
+<summary>Another collapsible (nested code)</summary>
+
+\`\`\`bash
+echo "Hello from inside details"
+\`\`\`
+
+</details>
+
+## Keyboard Shortcuts
+
+Press <kbd>Ctrl</kbd>+<kbd>C</kbd> to copy and <kbd>Ctrl</kbd>+<kbd>V</kbd> to paste.
+
+On macOS use <kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd> to open the command palette.
+
+## Strikethrough
+
+This text is normal but ~~this text is deleted~~ and this is normal again.
+
+~~Entire line struck through~~
+
+## Task Lists
+
+- [x] Wide table horizontal scroll
+- [x] Details/summary styling
+- [x] Kbd styling
+- [x] Strikethrough
+- [ ] Task list styling (testing now!)
+- [ ] More items to come
+
+### Mixed list
+
+- Regular item
+- [x] Done task
+- [ ] Todo task
+- Another regular item
+
+## Footnotes
+
+KiwiFS uses SQLite FTS5 for full-text search[^1]. The indexer runs asynchronously after each write[^2].
+
+[^1]: FTS5 is SQLite's built-in full-text search extension with BM25 ranking.
+[^2]: Async indexing drops write latency from ~5.5ms to ~1ms.
+
+## Deeply Nested Content
+
+> Blockquote level 1
+>
+> > Nested blockquote level 2
+> >
+> > > Level 3 — this should still render cleanly
+
+### Deeply nested lists
+
+1. First level
+   1. Second level
+      1. Third level
+         - Mixed bullet at level 4
+         - Another bullet
+      2. Back to third level
+   2. Back to second
+2. Back to first
+
+## Inline Elements
+
+Here is **bold**, *italic*, ***bold italic***, \`inline code\`, and a [regular link](https://example.com).
+
+Auto-linked URL: https://example.com/auto-link-test
+
+## Math Block
+
+$$
+\\int_{-\\infty}^{\\infty} e^{-x^2} dx = \\sqrt{\\pi}
+$$
+
+Inline math: $E = mc^2$ in a sentence.
+
+## Code Blocks
+
+\`\`\`typescript
+interface KiwiConfig {
+  dataDir: string;
+  port: number;
+  search: {
+    vector?: { enabled: boolean; embedder: string };
+  };
+}
+\`\`\`
+
+## Horizontal Rule
+
+Content above the rule.
+
+---
+
+Content below the rule.
+
+## Images and Media
+
+![Broken image test](/raw/assets/nonexistent.png)
+
+## Wiki Links
+
+Link to [[wikilinks]] and a missing link to [[nonexistent-page]].
+`;
+
 export const mockGraphEdges: GraphEdge[] = [
   { source: "concepts/frontmatter.md", target: "concepts/wikilinks.md" },
   { source: "concepts/frontmatter.md", target: "decisions/use-sqlite-for-search.md" },

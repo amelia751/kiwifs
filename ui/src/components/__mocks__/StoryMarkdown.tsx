@@ -53,6 +53,11 @@ export function StoryMarkdown({
             }
             return <a href={h} {...rest}>{kids}</a>;
           },
+          table: ({ children, node: _node, ...rest }: any) => (
+            <div className="kiwi-table-wrapper">
+              <table {...rest}>{children}</table>
+            </div>
+          ),
         }}
       >
         {children}

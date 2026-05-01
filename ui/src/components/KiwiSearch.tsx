@@ -21,6 +21,8 @@ type Props = {
   onSelect: (path: string) => void;
   tree: TreeEntry | null;
   initialQuery?: string;
+  /** Hide the Full-text / Semantic mode chips (defaults to false). */
+  hideModeToggle?: boolean;
 };
 
 type Mode = "fts" | "semantic";
@@ -63,7 +65,7 @@ function clearRecentSearches() {
   localStorage.removeItem(RECENT_KEY);
 }
 
-export function KiwiSearch({ open, onOpenChange, onSelect, tree, initialQuery }: Props) {
+export function KiwiSearch({ open, onOpenChange, onSelect, tree, initialQuery, hideModeToggle }: Props) {
   const [query, setQuery] = useState("");
   const [mode, setMode] = useState<Mode>("fts");
   const [hits, setHits] = useState<Hit[]>([]);
@@ -206,17 +208,21 @@ export function KiwiSearch({ open, onOpenChange, onSelect, tree, initialQuery }:
         onValueChange={setQuery}
       />
       <div className="flex items-center gap-1 px-3 py-2 border-b border-border text-xs flex-wrap">
-        <ModeChip
-          active={mode === "fts"}
-          onClick={() => setMode("fts")}
-          label="Full-text"
-        />
-        <ModeChip
-          active={mode === "semantic"}
-          onClick={() => setMode("semantic")}
-          label="Semantic"
-          icon={<Sparkles className="h-3 w-3" />}
-        />
+        {!hideModeToggle && (
+          <>
+            <ModeChip
+              active={mode === "fts"}
+              onClick={() => setMode("fts")}
+              label="Full-text"
+            />
+            <ModeChip
+              active={mode === "semantic"}
+              onClick={() => setMode("semantic")}
+              label="Semantic"
+              icon={<Sparkles className="h-3 w-3" />}
+            />
+          </>
+        )}
         {dirs.length > 0 && (
           <>
             <span className="w-px h-4 bg-border mx-1" />

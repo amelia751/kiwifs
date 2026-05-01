@@ -145,6 +145,54 @@
   @apply bg-primary/20;
 }
 
+/* ─── Wide table horizontal scroll ─── */
+.kiwi-table-wrapper {
+  @apply overflow-x-auto my-4 rounded-lg border border-border;
+  -webkit-overflow-scrolling: touch;
+}
+.kiwi-table-wrapper table {
+  @apply w-full text-sm border-collapse my-0;
+}
+.kiwi-table-wrapper th,
+.kiwi-table-wrapper td {
+  @apply border border-border px-3 py-2 text-left align-top;
+}
+.kiwi-table-wrapper th {
+  @apply bg-muted font-semibold;
+}
+
+/* ─── Collapsible <details>/<summary> ─── */
+.kiwi-prose details {
+  @apply border border-border rounded-lg my-4;
+}
+.kiwi-prose details summary {
+  @apply px-4 py-2 cursor-pointer font-medium hover:bg-muted/50 transition-colors;
+}
+.kiwi-prose details[open] summary {
+  @apply border-b border-border;
+}
+.kiwi-prose details > :not(summary) {
+  @apply px-4;
+}
+
+/* ─── <kbd> keyboard shortcut ─── */
+.kiwi-prose kbd {
+  @apply inline-block px-1.5 py-0.5 text-xs font-mono border border-border rounded bg-muted shadow-sm;
+}
+
+/* ─── Strikethrough ─── */
+.kiwi-prose del {
+  @apply line-through text-muted-foreground;
+}
+
+/* ─── Task list checkboxes ─── */
+.kiwi-prose ul:has(> li > input[type="checkbox"]) {
+  @apply list-none pl-2;
+}
+.kiwi-prose li > input[type="checkbox"] {
+  @apply mr-2 rounded;
+}
+
 /* ─── Search snippet highlights ─── */
 .kiwi-search-snippet mark {
   @apply bg-primary/15 text-foreground rounded-sm px-0.5;

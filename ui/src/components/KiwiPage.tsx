@@ -501,6 +501,11 @@ export function KiwiPage({ path, tree, onNavigate, onEdit, onHistory, onToggleSt
                           );
                       }
                     },
+                    table: ({ children, node: _node, ...rest }) => (
+                      <div className="kiwi-table-wrapper">
+                        <table {...(rest as any)}>{children}</table>
+                      </div>
+                    ),
                     p: ({ children, node: _node, ...rest }) => {
                       const arr = Array.isArray(children) ? children : [children];
                       const first = arr[0];
