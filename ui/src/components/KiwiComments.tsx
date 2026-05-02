@@ -280,7 +280,7 @@ export function KiwiComments({ path, containerRef, renderKey, refreshKey }: Prop
             <div className="mb-1 text-xs text-muted-foreground flex items-center gap-1.5">
               <span>{activeView.author} · {formatDate(activeView.createdAt)}</span>
               {activeView.resolved && (
-                <span className="text-green-500 flex items-center gap-0.5">
+                <span className="text-green-700 dark:text-green-400 flex items-center gap-0.5">
                   <CheckCircle className="h-3 w-3" /> Resolved
                 </span>
               )}
@@ -365,7 +365,7 @@ function CommentsList({
                   <div className="text-xs text-muted-foreground mb-1 flex items-center gap-1.5">
                     <span>{c.author} · {formatDate(c.createdAt)}</span>
                     {c.resolved && (
-                      <span className="text-green-500 flex items-center gap-0.5">
+                      <span className="text-green-700 dark:text-green-400 flex items-center gap-0.5">
                         <CheckCircle className="h-3 w-3" /> Resolved
                       </span>
                     )}

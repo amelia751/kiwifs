@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { getCurrentSpace } from "../lib/api";
+import { TreeSkeleton } from "./TreeSkeleton";
 import {
   ChevronRight,
   Copy,
@@ -120,7 +121,7 @@ export function KiwiTree({ activePath, onSelect, refreshKey, onCreateChild, onDe
     );
   }
   if (!root) {
-    return <div className="p-3 text-sm text-muted-foreground">Loading…</div>;
+    return <TreeSkeleton />;
   }
 
   const toggle = (p: string) => {

@@ -230,6 +230,102 @@ export const mockMarkdownRichBody = mockMarkdownRich
 export const mockMarkdownSimpleBody = mockMarkdownSimple
   .replace(/^---[\s\S]*?---\n*/, "");
 
+export const mockMarkdownRenderingTest = `---
+title: Rendering Test — All Features
+tags:
+  - test
+  - rendering
+author: Kiwi Team
+---
+
+## Code Block with Copy Button
+
+\`\`\`typescript
+interface KiwiConfig {
+  dataDir: string;
+  port: number;
+  search: {
+    vector?: { enabled: boolean; embedder: string };
+  };
+}
+
+const config: KiwiConfig = {
+  dataDir: "./knowledge",
+  port: 3333,
+  search: { vector: { enabled: true, embedder: "ollama" } },
+};
+\`\`\`
+
+\`\`\`bash
+curl -fsSL https://raw.githubusercontent.com/kiwifs/kiwifs/main/install.sh | sh
+kiwifs init ./knowledge && kiwifs serve --root ./knowledge
+\`\`\`
+
+## Wide Table with Scroll
+
+| Col 1 | Col 2 | Col 3 | Col 4 | Col 5 | Col 6 | Col 7 | Col 8 | Col 9 | Col 10 |
+|-------|-------|-------|-------|-------|-------|-------|-------|-------|--------|
+| Alpha | Bravo | Charlie | Delta | Echo | Foxtrot | Golf | Hotel | India | Juliet |
+| Data A | Data B | Data C | Data D | Data E | Data F | Data G | Data H | Data I | Data J |
+
+## Collapsible Details
+
+<details>
+<summary>Click to expand — hidden content inside</summary>
+
+This section is collapsible. It supports **bold**, *italic*, and \`inline code\`.
+
+- Bullet one
+- Bullet two
+
+</details>
+
+## Keyboard Shortcuts
+
+Press <kbd>Ctrl</kbd>+<kbd>C</kbd> to copy and <kbd>Ctrl</kbd>+<kbd>V</kbd> to paste.
+
+## Task Lists
+
+- [x] Copy code button on code blocks
+- [x] Loading skeletons
+- [x] Error boundary
+- [x] Reading time + word count
+- [ ] More features coming
+
+## Footnotes
+
+KiwiFS uses SQLite FTS5 for full-text search[^1]. The indexer runs asynchronously[^2].
+
+[^1]: FTS5 is SQLite's built-in full-text search extension with BM25 ranking.
+[^2]: Async indexing drops write latency from ~5.5ms to ~1ms.
+
+## Callouts
+
+> ℹ️ This is an info callout with **bold** and \`code\`.
+
+> ⚠️ Warning: this action cannot be undone.
+
+## Math
+
+$$
+\\int_{-\\infty}^{\\infty} e^{-x^2} dx = \\sqrt{\\pi}
+$$
+
+Inline math: $E = mc^2$ in a sentence.
+
+## Strikethrough & Emphasis
+
+This text is normal but ~~this text is deleted~~ and this is normal again.
+
+## Wiki Links
+
+Link to [[wikilinks]] and a missing page [[nonexistent-page]].
+
+## Images
+
+![Broken image test](/raw/assets/nonexistent.png)
+`;
+
 export const mockSearchResults: SearchResult[] = [
   {
     path: "concepts/frontmatter.md",
@@ -339,149 +435,6 @@ export const mockGraphNodes: GraphNode[] = [
   { path: "decisions/use-sqlite-for-search.md", tags: ["architecture"] },
   { path: "episodes/example-episode.md", tags: ["episode"] },
 ];
-
-export const mockMarkdownRenderingTest = `---
-title: Rendering Test — All Features
-tags:
-  - test
-  - rendering
----
-
-## Wide Table Horizontal Scroll
-
-| Col 1 | Col 2 | Col 3 | Col 4 | Col 5 | Col 6 | Col 7 | Col 8 | Col 9 | Col 10 |
-|-------|-------|-------|-------|-------|-------|-------|-------|-------|--------|
-| Alpha | Bravo | Charlie | Delta | Echo | Foxtrot | Golf | Hotel | India | Juliet |
-| Data A | Data B | Data C | Data D | Data E | Data F | Data G | Data H | Data I | Data J |
-| Row 3 | Row 3 | Row 3 | Row 3 | Row 3 | Row 3 | Row 3 | Row 3 | Row 3 | Row 3 |
-
-## Normal Table
-
-| Feature | Status | Notes |
-|---------|--------|-------|
-| Tables | Done | Styled with scroll wrapper |
-| Details | Done | Collapsible sections |
-| Kbd | Done | Keyboard shortcuts |
-
-## Collapsible Details/Summary
-
-<details>
-<summary>Click to expand this section</summary>
-
-This is hidden content inside a collapsible section.
-
-It supports **bold**, *italic*, and \`inline code\`.
-
-- Bullet one
-- Bullet two
-
-</details>
-
-<details>
-<summary>Another collapsible (nested code)</summary>
-
-\`\`\`bash
-echo "Hello from inside details"
-\`\`\`
-
-</details>
-
-## Keyboard Shortcuts
-
-Press <kbd>Ctrl</kbd>+<kbd>C</kbd> to copy and <kbd>Ctrl</kbd>+<kbd>V</kbd> to paste.
-
-On macOS use <kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd> to open the command palette.
-
-## Strikethrough
-
-This text is normal but ~~this text is deleted~~ and this is normal again.
-
-~~Entire line struck through~~
-
-## Task Lists
-
-- [x] Wide table horizontal scroll
-- [x] Details/summary styling
-- [x] Kbd styling
-- [x] Strikethrough
-- [ ] Task list styling (testing now!)
-- [ ] More items to come
-
-### Mixed list
-
-- Regular item
-- [x] Done task
-- [ ] Todo task
-- Another regular item
-
-## Footnotes
-
-KiwiFS uses SQLite FTS5 for full-text search[^1]. The indexer runs asynchronously after each write[^2].
-
-[^1]: FTS5 is SQLite's built-in full-text search extension with BM25 ranking.
-[^2]: Async indexing drops write latency from ~5.5ms to ~1ms.
-
-## Deeply Nested Content
-
-> Blockquote level 1
->
-> > Nested blockquote level 2
-> >
-> > > Level 3 — this should still render cleanly
-
-### Deeply nested lists
-
-1. First level
-   1. Second level
-      1. Third level
-         - Mixed bullet at level 4
-         - Another bullet
-      2. Back to third level
-   2. Back to second
-2. Back to first
-
-## Inline Elements
-
-Here is **bold**, *italic*, ***bold italic***, \`inline code\`, and a [regular link](https://example.com).
-
-Auto-linked URL: https://example.com/auto-link-test
-
-## Math Block
-
-$$
-\\int_{-\\infty}^{\\infty} e^{-x^2} dx = \\sqrt{\\pi}
-$$
-
-Inline math: $E = mc^2$ in a sentence.
-
-## Code Blocks
-
-\`\`\`typescript
-interface KiwiConfig {
-  dataDir: string;
-  port: number;
-  search: {
-    vector?: { enabled: boolean; embedder: string };
-  };
-}
-\`\`\`
-
-## Horizontal Rule
-
-Content above the rule.
-
----
-
-Content below the rule.
-
-## Images and Media
-
-![Broken image test](/raw/assets/nonexistent.png)
-
-## Wiki Links
-
-Link to [[wikilinks]] and a missing link to [[nonexistent-page]].
-`;
 
 export const mockGraphEdges: GraphEdge[] = [
   { source: "concepts/frontmatter.md", target: "concepts/wikilinks.md" },

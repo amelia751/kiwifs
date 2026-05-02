@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Copy, Download, MoreHorizontal, Move, Trash2 } from "lucide-react";
+import { Copy, Download, MoreHorizontal, Move, Printer, Trash2 } from "lucide-react";
 import { api } from "@/lib/api";
 import { stem } from "@/lib/paths";
 import { Button } from "@/components/ui/button";
@@ -104,7 +104,7 @@ export function PageActions({ path, onDeleted, onDuplicated, onMoved }: Props) {
     <>
       <Popover open={menuOpen} onOpenChange={setMenuOpen}>
         <PopoverTrigger asChild>
-          <Button variant="ghost" size="icon" className="h-8 w-8">
+          <Button variant="ghost" size="icon" className="h-8 w-8" aria-label="More actions">
             <MoreHorizontal className="h-4 w-4" />
           </Button>
         </PopoverTrigger>
@@ -133,6 +133,11 @@ export function PageActions({ path, onDeleted, onDuplicated, onMoved }: Props) {
             icon={<Download className="h-3.5 w-3.5" />}
             label="Export as Markdown"
             onClick={handleExport}
+          />
+          <MenuButton
+            icon={<Printer className="h-3.5 w-3.5" />}
+            label="Print / Save as PDF"
+            onClick={() => { setMenuOpen(false); window.print(); }}
           />
           <div className="h-px bg-border my-1" />
           <MenuButton
