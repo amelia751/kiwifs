@@ -4,14 +4,16 @@ import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeSlug from "rehype-slug";
 import rehypeRaw from "rehype-raw";
+import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import rehypeKatex from "rehype-katex";
 import rehypeAutolinkHeadings from "rehype-autolink-headings";
 import matter from "gray-matter";
 import Zoom from "react-medium-image-zoom";
 import "react-medium-image-zoom/dist/styles.css";
-import { AlertTriangle, Calendar, CheckSquare, ChevronDown, ChevronRight, Edit, FileAxis3D, FileQuestion, History as HistoryIcon, Link2, List, MessageSquareQuote, Pin, Plus, Star, Tag, Type, User } from "lucide-react";
+import { AlertTriangle, BookOpen, Calendar, CheckSquare, ChevronDown, ChevronRight, Edit, FileAxis3D, FileQuestion, History as HistoryIcon, Link2, List, MessageSquareQuote, Pin, Plus, Star, Tag, Type, User } from "lucide-react";
 import { api, type TreeEntry } from "@/lib/api";
 import { titleize } from "@/lib/paths";
+import { readingTime } from "@/lib/readingTime";
 import { KiwiBreadcrumb } from "./KiwiBreadcrumb";
 import { KiwiToC } from "./KiwiToC";
 import { KiwiBacklinks } from "./KiwiBacklinks";
@@ -20,6 +22,9 @@ import { KiwiQuery } from "./KiwiQuery";
 import { PageActions } from "./PageActions";
 import { ShikiCode } from "./ShikiCode";
 import { ExcalidrawMarkdownPreview, isExcalidrawMarkdown } from "./ExcalidrawMarkdownPreview";
+import { ErrorBoundary } from "./ErrorBoundary";
+import { PageSkeleton } from "./PageSkeleton";
+import { trackRecent } from "./KiwiFavorites";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { buildResolver, remarkWikiLinks } from "@/lib/wikiLinks";
@@ -45,6 +50,20 @@ type FrontmatterProperty = {
   key: string;
   value: unknown;
   kind: "text" | "list" | "date" | "boolean" | "object";
+};
+
+const sanitizeSchema = {
+  ...defaultSchema,
+  tagNames: [...(defaultSchema.tagNames || []), "details", "summary", "kbd", "mark", "span", "div", "figure", "figcaption", "video", "audio", "source", "iframe"],
+  attributes: {
+    ...defaultSchema.attributes,
+    "*": [...(defaultSchema.attributes?.["*"] || []), "className", "style", "role"],
+    iframe: ["src", "title", "className", "style"],
+    video: ["controls", "preload", "className"],
+    audio: ["controls", "preload", "className"],
+    source: ["src", "type"],
+    img: [...(defaultSchema.attributes?.img || []), "width", "height"],
+  },
 };
 
 const CALLOUT_PREFIXES: Array<{ emoji: string; cls: string }> = [
@@ -180,6 +199,7 @@ export function KiwiPage({ path, tree, onNavigate, onEdit, onHistory, onToggleSt
     setContent(null);
     setError(null);
     setLastModified(null);
+    trackRecent(path);
     api
       .readFile(path)
       .then((r) => {
@@ -222,6 +242,7 @@ export function KiwiPage({ path, tree, onNavigate, onEdit, onHistory, onToggleSt
 
   const properties = useMemo(() => frontmatterProperties(parsed.meta), [parsed.meta]);
   const badges = useMemo(() => frontmatterBadges(parsed.meta), [parsed.meta]);
+  const reading = useMemo(() => readingTime(parsed.body), [parsed.body]);
   const frontmatterTitle = typeof parsed.meta.title === "string" ? parsed.meta.title : null;
   const statusBadge = badges.find((b) => b.key === "status");
   const tagBadges = badges.filter((b) => b.key === "tags");
@@ -262,7 +283,7 @@ export function KiwiPage({ path, tree, onNavigate, onEdit, onHistory, onToggleSt
     return (
       <div className="flex flex-col h-full">
         <StickyBreadcrumb path={path} onNavigate={onNavigate} />
-        <div className="p-8 text-sm text-muted-foreground">Loading…</div>
+        <PageSkeleton />
       </div>
     );
   }
@@ -274,7 +295,7 @@ export function KiwiPage({ path, tree, onNavigate, onEdit, onHistory, onToggleSt
 
       {/* ── Scrollable content ── */}
       <div className="flex-1 overflow-auto kiwi-scroll">
-        <div className="max-w-6xl mx-auto px-8 py-6">
+        <div className="max-w-6xl mx-auto px-4 md:px-8 py-6">
           {/* ── Page header zone ── */}
           <div className="mb-6">
             <div className="flex items-start justify-between gap-4">
@@ -293,12 +314,12 @@ export function KiwiPage({ path, tree, onNavigate, onEdit, onHistory, onToggleSt
               </div>
               <div className="flex items-center gap-2 shrink-0 pt-1">
                 {onTogglePin && (
-                  <Button variant="ghost" size="icon" onClick={onTogglePin} className="h-8 w-8">
+                  <Button variant="ghost" size="icon" onClick={onTogglePin} className="h-8 w-8" aria-label={isPinned ? "Unpin page" : "Pin page"}>
                     <Pin className={"h-4 w-4" + (isPinned ? " fill-current text-primary" : "")} />
                   </Button>
                 )}
                 {onToggleStar && (
-                  <Button variant="ghost" size="icon" onClick={onToggleStar} className="h-8 w-8">
+                  <Button variant="ghost" size="icon" onClick={onToggleStar} className="h-8 w-8" aria-label={isStarred ? "Unstar page" : "Star page"}>
                     <Star className={"h-4 w-4" + (isStarred ? " fill-amber-500 text-amber-500" : "")} />
                   </Button>
                 )}
@@ -337,6 +358,12 @@ export function KiwiPage({ path, tree, onNavigate, onEdit, onHistory, onToggleSt
                 <span className="flex items-center gap-1">
                   <MessageSquareQuote className="h-3 w-3" />
                   {commentCount} comment{commentCount === 1 ? "" : "s"}
+                </span>
+              )}
+              {reading.words > 0 && (
+                <span className="flex items-center gap-1">
+                  <BookOpen className="h-3 w-3" />
+                  {reading.words.toLocaleString()} words · {reading.minutes} min read
                 </span>
               )}
               {(versionError || commentError) && (
@@ -379,13 +406,17 @@ export function KiwiPage({ path, tree, onNavigate, onEdit, onHistory, onToggleSt
           <div className="flex gap-6">
             <article className="min-w-0 flex-1">
               {isExcalidrawMarkdown(content, parsed.meta) ? (
-                <ExcalidrawMarkdownPreview markdown={content} title={frontmatterTitle || titleize(path)} />
+                <ErrorBoundary>
+                  <ExcalidrawMarkdownPreview markdown={content} title={frontmatterTitle || titleize(path)} />
+                </ErrorBoundary>
               ) : (
               <div ref={proseRef} className="kiwi-prose">
+                <ErrorBoundary>
                 <ReactMarkdown
                   remarkPlugins={[remarkGfm, remarkMath, [remarkWikiLinks, { resolver }]]}
                   rehypePlugins={[
                     rehypeRaw,
+                    [rehypeSanitize, sanitizeSchema],
                     rehypeKatex,
                     rehypeSlug,
                     [rehypeAutolinkHeadings, { behavior: "wrap" }],
@@ -514,7 +545,7 @@ export function KiwiPage({ path, tree, onNavigate, onEdit, onHistory, onToggleSt
                         if (hit) {
                           const rest2 = [hit.rest, ...arr.slice(1)];
                           return (
-                            <div className={`kiwi-callout ${hit.cls}`}>
+                            <div className={`kiwi-callout ${hit.cls}`} role="note">
                               <span className="mr-1.5">{hit.emoji}</span>
                               {rest2}
                             </div>
@@ -527,6 +558,7 @@ export function KiwiPage({ path, tree, onNavigate, onEdit, onHistory, onToggleSt
                 >
                   {parsed.body}
                 </ReactMarkdown>
+                </ErrorBoundary>
               </div>
               )}
 
@@ -709,7 +741,7 @@ function SemanticFrontmatterValue({
 function StickyBreadcrumb({ path, onNavigate }: { path: string; onNavigate: (p: string) => void }) {
   return (
     <div className="sticky top-0 z-10 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/80 border-b border-border shrink-0">
-      <div className="px-8 py-2 max-w-6xl mx-auto">
+      <div className="px-4 md:px-8 py-2 max-w-6xl mx-auto">
         <KiwiBreadcrumb path={path} onNavigate={onNavigate} />
       </div>
     </div>
@@ -743,6 +775,7 @@ function CollapsibleFooterSection({
     <div className="border border-border rounded-lg">
       <button
         type="button"
+        aria-expanded={!collapsed}
         onClick={() => {
           const next = !collapsed;
           setCollapsed(next);

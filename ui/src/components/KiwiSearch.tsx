@@ -314,7 +314,12 @@ export function KiwiSearch({ open, onOpenChange, onSelect, tree, initialQuery, h
           </CommandGroup>
         )}
         {query && filtered.length === 0 && !loading && !unavailable ? (
-          <CommandEmpty>No results.</CommandEmpty>
+          <CommandEmpty>
+            <div className="text-center py-6">
+              <p className="text-sm text-muted-foreground">No results found.</p>
+              <p className="text-xs text-muted-foreground mt-1">Try broader terms, check spelling, or switch to {mode === "fts" ? "semantic" : "full-text"} search.</p>
+            </div>
+          </CommandEmpty>
         ) : null}
         {filtered.map((r) => (
           <CommandItem
@@ -410,6 +415,7 @@ function ModeChip({
     <button
       type="button"
       onClick={onClick}
+      aria-pressed={active}
       className={cn(
         "inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-xs transition-colors",
         active

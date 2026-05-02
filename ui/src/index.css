@@ -233,3 +233,30 @@
   @apply bg-primary/15 text-foreground rounded px-1 py-0.5 font-medium;
   border-bottom: 2px solid hsl(var(--primary) / 0.5);
 }
+
+/* ─── Mobile / responsive ─── */
+@media (max-width: 768px) {
+  .kiwi-prose { padding-left: 1rem; padding-right: 1rem; }
+}
+@media (pointer: coarse) {
+  .group .opacity-0.group-hover\:opacity-100 { opacity: 1; }
+}
+
+/* ─── Print / PDF export ─── */
+@media print {
+  .kiwi-tree-sidebar,
+  .kiwi-breadcrumb-sticky,
+  .kiwi-page-actions,
+  .kiwi-toc-sidebar,
+  .kiwi-comments-section,
+  .kiwi-backlinks-section,
+  nav, header, footer { display: none !important; }
+
+  .kiwi-prose { max-width: 100% !important; }
+
+  details { open: true; }
+  details[open] summary { border-bottom: none; }
+
+  h1, h2, h3 { break-after: avoid; }
+  pre, table, figure { break-inside: avoid; }
+}

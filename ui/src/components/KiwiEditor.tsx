@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ErrorBoundary } from "./ErrorBoundary";
 import { BlockNoteEditor, filterSuggestionItems } from "@blocknote/core";
 import {
   FormattingToolbarController,
@@ -519,6 +520,7 @@ function EditorInner({
 
           {/* ── Editor content zone ── */}
           <div className="max-w-3xl kiwi-blocknote min-h-[50vh]">
+            <ErrorBoundary>
             {editor && (
               <BlockNoteView
                 editor={editor as BlockNoteEditor}
@@ -584,6 +586,7 @@ function EditorInner({
                 />
               </BlockNoteView>
             )}
+            </ErrorBoundary>
           </div>
         </div>
       </div>
