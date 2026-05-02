@@ -85,3 +85,53 @@ func TestAppend_ReturnsETag(t *testing.T) {
 		t.Fatal("expected ETag header")
 	}
 }
+
+func TestAppend_EmptyContent(t *testing.T) {
+	s := buildTestServer(t)
+	mustPutFile(t, s, "log.md", "existing")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/kiwi/file/append?path=log.md", strings.NewReader(""))
+	rec := httptest.NewRecorder()
+	s.echo.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /file/append with empty body: %d %s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/kiwi/file?path=log.md", nil)
+	rec = httptest.NewRecorder()
+	s.echo.ServeHTTP(rec, req)
+	got := rec.Body.String()
+	if got != "existing\n" {
+		t.Fatalf("content = %q, want %q", got, "existing\n")
+	}
+}
+
+func TestAppend_MissingPath(t *testing.T) {
+	s := buildTestServer(t)
+	req := httptest.NewRequest(http.MethodPost, "/api/kiwi/file/append", strings.NewReader("content"))
+	rec := httptest.NewRecorder()
+	s.echo.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for missing path, got %d", rec.Code)
+	}
+}
+
+func TestAppend_CreatesNestedDir(t *testing.T) {
+	s := buildTestServer(t)
+	req := httptest.NewRequest(http.MethodPost, "/api/kiwi/file/append?path=deep/nested/log.md", strings.NewReader("entry"))
+	rec := httptest.NewRecorder()
+	s.echo.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /file/append to nested path: %d %s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/kiwi/file?path=deep/nested/log.md", nil)
+	rec = httptest.NewRecorder()
+	s.echo.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET nested file: %d", rec.Code)
+	}
+	if got := rec.Body.String(); got != "entry" {
+		t.Fatalf("content = %q, want %q", got, "entry")
+	}
+}

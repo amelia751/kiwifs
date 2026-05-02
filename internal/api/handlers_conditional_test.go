@@ -94,3 +94,16 @@ func TestReadFile_IfNoneMatch_UnquotedETag(t *testing.T) {
 		t.Fatalf("expected 304 with unquoted etag, got %d", rec.Code)
 	}
 }
+
+func TestReadFile_IfNoneMatch_Wildcard(t *testing.T) {
+	s := buildTestServer(t)
+	mustPutFile(t, s, "doc.md", "# Hello\n")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/kiwi/file?path=doc.md", nil)
+	req.Header.Set("If-None-Match", "*")
+	rec := httptest.NewRecorder()
+	s.echo.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotModified {
+		t.Fatalf("expected 304 with wildcard If-None-Match, got %d", rec.Code)
+	}
+}

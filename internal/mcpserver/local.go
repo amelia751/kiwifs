@@ -91,6 +91,17 @@ func (b *LocalBackend) Changes(ctx context.Context, since string, limit int) (*C
 		limit = 500
 	}
 
+	if since != "" {
+		for _, c := range since {
+			if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+				return nil, fmt.Errorf("invalid since: must be a hex commit hash")
+			}
+		}
+		if len(since) < 4 || len(since) > 40 {
+			return nil, fmt.Errorf("invalid since: must be 4–40 hex characters")
+		}
+	}
+
 	var args []string
 	if since != "" {
 		args = []string{"log", "--format=%H|%an|%at|%s", fmt.Sprintf("%s..HEAD", since), fmt.Sprintf("-%d", limit)}
@@ -164,6 +175,7 @@ func parseLocalCommitSubject(subject string) (action, path string) {
 			}
 		case "bulk":
 			action = "write"
+			path = ""
 		default:
 			action = "write"
 		}

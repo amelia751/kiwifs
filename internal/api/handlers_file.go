@@ -118,7 +118,7 @@ func (h *Handlers) ReadFile(c echo.Context) error {
 	}
 
 	if match := c.Request().Header.Get("If-None-Match"); match != "" {
-		if match == etag || strings.Trim(match, `"`) == strings.Trim(etag, `"`) {
+		if match == "*" || match == etag || strings.Trim(match, `"`) == strings.Trim(etag, `"`) {
 			return c.NoContent(http.StatusNotModified)
 		}
 	}

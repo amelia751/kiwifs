@@ -40,20 +40,66 @@ func RewriteLinks(content string, oldTarget string, newTarget string) (string, b
 }
 
 func rewriteLinksInLine(line string, oldForms map[string]bool, newTarget string) string {
-	return wikiLinkFullRe.ReplaceAllStringFunc(line, func(match string) string {
-		sub := wikiLinkFullRe.FindStringSubmatch(match)
-		if len(sub) < 2 {
-			return match
+	segments := splitInlineCode(line)
+	changed := false
+	for i, seg := range segments {
+		if seg.isCode {
+			continue
 		}
-		target := strings.TrimSpace(sub[1])
-		if !matchesTarget(target, oldForms) {
-			return match
+		rewritten := wikiLinkFullRe.ReplaceAllStringFunc(seg.text, func(match string) string {
+			sub := wikiLinkFullRe.FindStringSubmatch(match)
+			if len(sub) < 2 {
+				return match
+			}
+			target := strings.TrimSpace(sub[1])
+			if !matchesTarget(target, oldForms) {
+				return match
+			}
+			changed = true
+			if len(sub) >= 3 && sub[2] != "" {
+				return "[[" + newTarget + "|" + sub[2] + "]]"
+			}
+			return "[[" + newTarget + "]]"
+		})
+		segments[i].text = rewritten
+	}
+	if !changed {
+		return line
+	}
+	var sb strings.Builder
+	for _, seg := range segments {
+		sb.WriteString(seg.text)
+	}
+	return sb.String()
+}
+
+type lineSegment struct {
+	text   string
+	isCode bool
+}
+
+func splitInlineCode(line string) []lineSegment {
+	var segments []lineSegment
+	rest := line
+	for {
+		idx := strings.Index(rest, "`")
+		if idx < 0 {
+			segments = append(segments, lineSegment{text: rest, isCode: false})
+			break
 		}
-		if len(sub) >= 3 && sub[2] != "" {
-			return "[[" + newTarget + "|" + sub[2] + "]]"
+		if idx > 0 {
+			segments = append(segments, lineSegment{text: rest[:idx], isCode: false})
 		}
-		return "[[" + newTarget + "]]"
-	})
+		rest = rest[idx:]
+		end := strings.Index(rest[1:], "`")
+		if end < 0 {
+			segments = append(segments, lineSegment{text: rest, isCode: false})
+			break
+		}
+		segments = append(segments, lineSegment{text: rest[:end+2], isCode: true})
+		rest = rest[end+2:]
+	}
+	return segments
 }
 
 func matchesTarget(target string, forms map[string]bool) bool {

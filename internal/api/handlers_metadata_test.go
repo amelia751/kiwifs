@@ -70,3 +70,40 @@ func TestReadFile_MetadataOnly_StillHasETag(t *testing.T) {
 		t.Fatal("expected ETag header on metadata_only response")
 	}
 }
+
+func TestReadFile_MetadataOnly_BinaryFile(t *testing.T) {
+	s := buildTestServer(t)
+	mustPutFile(t, s, "data.json", `{"key": "value"}`)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/kiwi/file?path=data.json&metadata_only=true", nil)
+	rec := httptest.NewRecorder()
+	s.echo.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d", rec.Code)
+	}
+	var fm map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &fm); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(fm) != 0 {
+		t.Fatalf("expected empty frontmatter for non-markdown, got %v", fm)
+	}
+}
+
+func TestReadFile_MetadataOnly_WithIfNoneMatch(t *testing.T) {
+	s := buildTestServer(t)
+	mustPutFile(t, s, "doc.md", "---\nstatus: draft\n---\n# Doc\n")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/kiwi/file?path=doc.md", nil)
+	rec := httptest.NewRecorder()
+	s.echo.ServeHTTP(rec, req)
+	etag := rec.Header().Get("ETag")
+
+	req = httptest.NewRequest(http.MethodGet, "/api/kiwi/file?path=doc.md&metadata_only=true", nil)
+	req.Header.Set("If-None-Match", etag)
+	rec = httptest.NewRecorder()
+	s.echo.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotModified {
+		t.Fatalf("expected 304 on metadata_only with matching etag, got %d", rec.Code)
+	}
+}

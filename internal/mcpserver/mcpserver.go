@@ -944,7 +944,15 @@ func handleChanges(b Backend) server.ToolHandlerFunc {
 
 		var sb strings.Builder
 		for _, ch := range result.Changes {
-			fmt.Fprintf(&sb, "%s %s %s (by %s at %s)\n", ch.Seq[:8], ch.Action, ch.Path, ch.Actor, ch.Timestamp)
+			seq := ch.Seq
+			if len(seq) > 8 {
+				seq = seq[:8]
+			}
+			if ch.Path != "" {
+				fmt.Fprintf(&sb, "%s %s %s (by %s at %s)\n", seq, ch.Action, ch.Path, ch.Actor, ch.Timestamp)
+			} else {
+				fmt.Fprintf(&sb, "%s %s (by %s at %s)\n", seq, ch.Action, ch.Actor, ch.Timestamp)
+			}
 		}
 		fmt.Fprintf(&sb, "\nlast_seq: %s\n", result.LastSeq)
 		return mcp.NewToolResultText(sb.String()), nil

@@ -38,7 +38,7 @@ func TestParseCommitSubject(t *testing.T) {
 		{"agent: write concepts/auth.md", "write", "concepts/auth.md"},
 		{"kiwifs: delete reports/old.md", "delete", "reports/old.md"},
 		{"agent: rename old.md → new.md", "rename", "new.md"},
-		{"agent: bulk write — 5 files", "write", "write — 5 files"},
+		{"agent: bulk write — 5 files", "write", ""},
 		{"write concepts/auth.md", "write", "concepts/auth.md"},
 	}
 	for _, tt := range tests {

@@ -102,3 +102,62 @@ func TestRewriteLinks_EmptyTargets(t *testing.T) {
 		t.Fatal("expected changed=false for empty newTarget")
 	}
 }
+
+func TestRewriteLinks_InInlineCode(t *testing.T) {
+	content := "Use `[[auth]]` syntax for links, but [[auth]] is real."
+	got, changed := RewriteLinks(content, "auth.md", "authentication")
+	if !changed {
+		t.Fatal("expected changed=true")
+	}
+	want := "Use `[[auth]]` syntax for links, but [[authentication]] is real."
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+func TestRewriteLinks_AllInInlineCode(t *testing.T) {
+	content := "Use `[[auth]]` for raw link syntax."
+	got, changed := RewriteLinks(content, "auth.md", "authentication")
+	if changed {
+		t.Fatal("expected changed=false when all links in inline code")
+	}
+	if got != content {
+		t.Fatalf("content should be unchanged")
+	}
+}
+
+func TestRewriteLinks_NewTargetWithSpecialChars(t *testing.T) {
+	content := "See [[auth]] for details."
+	got, changed := RewriteLinks(content, "auth.md", "auth (v2)")
+	if !changed {
+		t.Fatal("expected changed=true")
+	}
+	want := "See [[auth (v2)]] for details."
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+func TestRewriteLinks_ConsecutiveLinksOnSameLine(t *testing.T) {
+	content := "Compare [[auth]] with [[session]] and [[auth|login]]."
+	got, changed := RewriteLinks(content, "auth.md", "authentication")
+	if !changed {
+		t.Fatal("expected changed=true")
+	}
+	want := "Compare [[authentication]] with [[session]] and [[authentication|login]]."
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+func TestRewriteLinks_NestedCodeBlocksAndInlineCode(t *testing.T) {
+	content := "Real [[auth]] link.\n```\ncode [[auth]] block\n```\nAnother `[[auth]]` inline.\nFinal [[auth]] real."
+	got, changed := RewriteLinks(content, "auth.md", "authentication")
+	if !changed {
+		t.Fatal("expected changed=true")
+	}
+	want := "Real [[authentication]] link.\n```\ncode [[auth]] block\n```\nAnother `[[auth]]` inline.\nFinal [[authentication]] real."
+	if got != want {
+		t.Fatalf("got:\n%s\nwant:\n%s", got, want)
+	}
+}

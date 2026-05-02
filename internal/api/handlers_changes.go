@@ -109,9 +109,9 @@ func parseCommitSubject(subject string) (action, path string) {
 				path = strings.TrimSpace(path[idx+len(" → "):])
 			}
 		}
-		// Handle "bulk write — N files" format
 		if action == "bulk" {
 			action = "write"
+			path = ""
 		}
 		return action, path
 	}
