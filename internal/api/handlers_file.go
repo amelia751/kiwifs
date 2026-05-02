@@ -117,8 +117,10 @@ func (h *Handlers) ReadFile(c echo.Context) error {
 		c.Response().Header().Set("Last-Modified", modTime.Format(http.TimeFormat))
 	}
 
-	if match := c.Request().Header.Get("If-None-Match"); match != "" && match == etag {
-		return c.NoContent(http.StatusNotModified)
+	if match := c.Request().Header.Get("If-None-Match"); match != "" {
+		if match == "*" || match == etag || strings.Trim(match, `"`) == strings.Trim(etag, `"`) {
+			return c.NoContent(http.StatusNotModified)
+		}
 	}
 	if !modTime.IsZero() {
 		if ims := c.Request().Header.Get("If-Modified-Since"); ims != "" {
@@ -132,6 +134,11 @@ func (h *Handlers) ReadFile(c echo.Context) error {
 
 	if pl := config.Permalink(h.publicURL, path); pl != "" {
 		c.Response().Header().Set("X-Permalink", pl)
+	}
+
+	if c.QueryParam("metadata_only") == "true" {
+		fm := extractFrontmatter(content)
+		return c.JSON(http.StatusOK, fm)
 	}
 
 	if c.QueryParam("resolve_links") == "true" && h.publicURL != "" && h.linkResolver != nil {
@@ -531,8 +538,10 @@ func (h *Handlers) RenameFile(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "from and to are required")
 	}
 
+	updateLinks := c.QueryParam("update_links") != "false"
 	actor := sanitizeActor(c.Request().Header.Get("X-Actor"))
-	res, err := h.pipe.Rename(c.Request().Context(), req.From, req.To, actor)
+
+	res, updatedLinks, err := h.pipe.RenameWithLinks(c.Request().Context(), req.From, req.To, actor, updateLinks)
 	if err != nil {
 		if errors.Is(err, storage.ErrPathDenied) {
 			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
@@ -543,11 +552,15 @@ func (h *Handlers) RenameFile(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
 
-	return c.JSON(http.StatusOK, map[string]string{
+	resp := map[string]any{
 		"from": req.From,
 		"to":   res.Path,
 		"etag": res.ETag,
-	})
+	}
+	if len(updatedLinks) > 0 {
+		resp["updated_links"] = updatedLinks
+	}
+	return c.JSON(http.StatusOK, resp)
 }
 
 func (h *Handlers) RenameDir(c echo.Context) error {
@@ -575,6 +588,38 @@ func (h *Handlers) RenameDir(c echo.Context) error {
 		"from":    req.From,
 		"to":      req.To,
 		"renamed": count,
+	})
+}
+
+func (h *Handlers) AppendFile(c echo.Context) error {
+	path, err := requirePath(c)
+	if err != nil {
+		return err
+	}
+	const maxAppendBody = 32 << 20
+	body, err := io.ReadAll(io.LimitReader(c.Request().Body, maxAppendBody+1))
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "failed to read body")
+	}
+	if len(body) > maxAppendBody {
+		return echo.NewHTTPError(http.StatusRequestEntityTooLarge, "body exceeds 32 MB limit")
+	}
+	separator := c.QueryParam("separator")
+	if separator == "" {
+		separator = "\n"
+	}
+	actor := sanitizeActor(c.Request().Header.Get("X-Actor"))
+	res, err := h.pipe.Append(c.Request().Context(), path, string(body), separator, actor)
+	if err != nil {
+		if errors.Is(err, storage.ErrPathDenied) {
+			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+		}
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	c.Response().Header().Set("ETag", fmt.Sprintf(`"%s"`, res.ETag))
+	return c.JSON(http.StatusOK, map[string]string{
+		"path": res.Path,
+		"etag": res.ETag,
 	})
 }
 

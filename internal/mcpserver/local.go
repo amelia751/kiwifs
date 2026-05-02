@@ -2,16 +2,17 @@ package mcpserver
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
-
-	"database/sql"
 
 	"github.com/kiwifs/kiwifs/internal/bootstrap"
 	"github.com/kiwifs/kiwifs/internal/config"
@@ -79,6 +80,110 @@ func (b *LocalBackend) init() error {
 	return b.err
 }
 
+func (b *LocalBackend) Changes(ctx context.Context, since string, limit int) (*ChangesResult, error) {
+	if err := b.init(); err != nil {
+		return nil, err
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 500 {
+		limit = 500
+	}
+
+	if since != "" {
+		for _, c := range since {
+			if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+				return nil, fmt.Errorf("invalid since: must be a hex commit hash")
+			}
+		}
+		if len(since) < 4 || len(since) > 40 {
+			return nil, fmt.Errorf("invalid since: must be 4–40 hex characters")
+		}
+	}
+
+	var args []string
+	if since != "" {
+		args = []string{"log", "--format=%H|%an|%at|%s", fmt.Sprintf("%s..HEAD", since), fmt.Sprintf("-%d", limit)}
+	} else {
+		args = []string{"log", "--format=%H|%an|%at|%s", fmt.Sprintf("-%d", limit)}
+	}
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = b.root
+	out, err := cmd.Output()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			stderr := string(exitErr.Stderr)
+			if strings.Contains(stderr, "unknown revision") {
+				return nil, fmt.Errorf("unknown sequence")
+			}
+			if strings.Contains(stderr, "does not have any commits") {
+				return &ChangesResult{Changes: []Change{}, LastSeq: ""}, nil
+			}
+		}
+		return nil, fmt.Errorf("git log: %w", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	changes := make([]Change, 0, len(lines))
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "|", 4)
+		if len(parts) < 4 {
+			continue
+		}
+		hash, author, tsStr, subject := parts[0], parts[1], parts[2], parts[3]
+		ts, _ := strconv.ParseInt(tsStr, 10, 64)
+		action, path := parseLocalCommitSubject(subject)
+		changes = append(changes, Change{
+			Seq:       hash,
+			Path:      path,
+			Action:    action,
+			Actor:     author,
+			Timestamp: time.Unix(ts, 0).UTC().Format(time.RFC3339),
+		})
+	}
+
+	lastSeq := ""
+	if len(changes) > 0 {
+		lastSeq = changes[0].Seq
+	}
+	return &ChangesResult{Changes: changes, LastSeq: lastSeq}, nil
+}
+
+func parseLocalCommitSubject(subject string) (action, path string) {
+	subject = strings.TrimSpace(subject)
+	if idx := strings.Index(subject, ": "); idx >= 0 {
+		subject = subject[idx+2:]
+	}
+	subject = strings.TrimSpace(subject)
+	parts := strings.SplitN(subject, " ", 2)
+	if len(parts) == 2 {
+		act := strings.ToLower(parts[0])
+		path = strings.TrimSpace(parts[1])
+		switch act {
+		case "write", "create", "update":
+			action = "write"
+		case "delete", "remove":
+			action = "delete"
+		case "rename", "move":
+			action = "rename"
+			if idx := strings.Index(path, " → "); idx >= 0 {
+				path = strings.TrimSpace(path[idx+len(" → "):])
+			}
+		case "bulk":
+			action = "write"
+			path = ""
+		default:
+			action = "write"
+		}
+		return action, path
+	}
+	return "write", subject
+}
+
 func (b *LocalBackend) ReadFile(ctx context.Context, path string) (string, string, error) {
 	if err := b.init(); err != nil {
 		return "", "", err
@@ -117,6 +222,20 @@ func (b *LocalBackend) DeleteFile(ctx context.Context, path, actor string) error
 	return b.stack.Pipeline.Delete(ctx, path, actor)
 }
 
+func (b *LocalBackend) Append(ctx context.Context, path, content, separator, actor string) (string, error) {
+	if err := b.init(); err != nil {
+		return "", err
+	}
+	if actor == "" {
+		actor = "mcp-agent"
+	}
+	res, err := b.stack.Pipeline.Append(ctx, path, content, separator, actor)
+	if err != nil {
+		return "", err
+	}
+	return res.ETag, nil
+}
+
 func (b *LocalBackend) Rename(ctx context.Context, from, to, actor string) (string, error) {
 	if err := b.init(); err != nil {
 		return "", err
@@ -126,6 +245,17 @@ func (b *LocalBackend) Rename(ctx context.Context, from, to, actor string) (stri
 		return "", err
 	}
 	return res.ETag, nil
+}
+
+func (b *LocalBackend) RenameWithLinks(ctx context.Context, from, to, actor string, updateLinks bool) (string, []string, error) {
+	if err := b.init(); err != nil {
+		return "", nil, err
+	}
+	res, updated, err := b.stack.Pipeline.RenameWithLinks(ctx, from, to, actor, updateLinks)
+	if err != nil {
+		return "", nil, err
+	}
+	return res.ETag, updated, nil
 }
 
 func (b *LocalBackend) Tree(ctx context.Context, path string) (json.RawMessage, error) {
@@ -203,7 +333,7 @@ type orMetaQuerier interface {
 	QueryMetaOr(ctx context.Context, andFilters, orFilters []search.MetaFilter, sort, order string, limit, offset int) ([]search.MetaResult, error)
 }
 
-func (b *LocalBackend) QueryMetaOr(ctx context.Context, andFilters, orFilters []string, sort, order string, limit, offset int) ([]MetaResult, error) {
+func (b *LocalBackend) QueryMetaOr(ctx context.Context, andFilters, orFilters []string, sort, order string, limit, offset int, paths ...string) ([]MetaResult, error) {
 	if err := b.init(); err != nil {
 		return nil, err
 	}
@@ -230,6 +360,9 @@ func (b *LocalBackend) QueryMetaOr(ctx context.Context, andFilters, orFilters []
 		parsedOr = append(parsedOr, f)
 	}
 
+	if len(paths) > 0 {
+		return b.queryMetaByPaths(ctx, paths)
+	}
 	results, err := mq.QueryMetaOr(ctx, parsedAnd, parsedOr, sort, order, limit, offset)
 	if err != nil {
 		return nil, err
@@ -240,6 +373,37 @@ func (b *LocalBackend) QueryMetaOr(ctx context.Context, andFilters, orFilters []
 		out[i] = MetaResult{Path: r.Path, Frontmatter: fm}
 	}
 	return out, nil
+}
+
+func (b *LocalBackend) queryMetaByPaths(ctx context.Context, paths []string) ([]MetaResult, error) {
+	sq, ok := b.stack.Searcher.(*search.SQLite)
+	if !ok {
+		return nil, fmt.Errorf("paths filter requires sqlite search backend")
+	}
+	placeholders := make([]string, len(paths))
+	args := make([]any, len(paths))
+	for i, p := range paths {
+		placeholders[i] = "?"
+		args[i] = p
+	}
+	query := fmt.Sprintf("SELECT path, frontmatter FROM file_meta WHERE path IN (%s)", strings.Join(placeholders, ","))
+	rows, err := sq.ReadDB().QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []MetaResult
+	for rows.Next() {
+		var path, fmStr string
+		if err := rows.Scan(&path, &fmStr); err != nil {
+			return nil, err
+		}
+		out = append(out, MetaResult{Path: path, Frontmatter: json.RawMessage(fmStr)})
+	}
+	if out == nil {
+		out = []MetaResult{}
+	}
+	return out, rows.Err()
 }
 
 func (b *LocalBackend) ViewRefresh(ctx context.Context, path string) (bool, error) {

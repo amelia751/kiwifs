@@ -586,6 +586,52 @@ func (p *Pipeline) ObserveDelete(ctx context.Context, path, actor string) {
 	p.broadcast(events.Event{Op: "delete", Path: path, Actor: actor})
 }
 
+const maxFileSize = 64 * 1024 * 1024 // 64 MiB
+
+// Append atomically appends content to a file. If the file does not exist,
+// it is created with just the new content. The operation runs inside writeMu
+// so there is no read-modify-write race window.
+func (p *Pipeline) Append(ctx context.Context, path, content, separator, actor string) (Result, error) {
+	if path == "" {
+		return Result{}, fmt.Errorf("path is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return Result{}, err
+	}
+	if separator == "" {
+		separator = "\n"
+	}
+	actor = coalesce(actor)
+
+	p.writeMu.Lock()
+	defer p.writeMu.Unlock()
+
+	if err := ctx.Err(); err != nil {
+		return Result{}, err
+	}
+
+	var newContent []byte
+	if existing, err := p.Store.Read(ctx, path); err == nil && len(existing) > 0 {
+		newContent = append(existing, []byte(separator+content)...)
+	} else {
+		newContent = []byte(content)
+	}
+
+	if len(newContent) > maxFileSize {
+		return Result{}, fmt.Errorf("result exceeds %d-byte limit", maxFileSize)
+	}
+
+	p.markInflightEtag(path, ETag(newContent))
+	if err := p.Store.Write(ctx, path, newContent); err != nil {
+		return Result{}, err
+	}
+	p.commitAndTrack(ctx, path, actor)
+	p.indexFile(ctx, path, newContent)
+	etag := ETag(newContent)
+	p.broadcast(events.Event{Op: "write", Path: path, Actor: actor, ETag: etag})
+	return Result{Path: path, ETag: etag}, nil
+}
+
 // BulkWrite persists many files under a single git commit. On partial
 // failure it rolls back to the pre-write state (best-effort, not ACID).
 func (p *Pipeline) BulkWrite(ctx context.Context, files []struct {
@@ -780,6 +826,114 @@ func (p *Pipeline) Rename(ctx context.Context, oldPath, newPath, actor string) (
 	p.broadcast(events.Event{Op: "delete", Path: oldPath, Actor: actor})
 
 	return Result{Path: newPath, ETag: etag}, nil
+}
+
+// RenameWithLinks atomically renames a file and optionally rewrites all
+// [[wiki-links]] that reference the old path. The rename and all link updates
+// are committed as a single git operation.
+func (p *Pipeline) RenameWithLinks(ctx context.Context, oldPath, newPath, actor string, updateLinks bool) (Result, []string, error) {
+	if !updateLinks || p.Linker == nil {
+		res, err := p.Rename(ctx, oldPath, newPath, actor)
+		return res, nil, err
+	}
+
+	if oldPath == "" || newPath == "" {
+		return Result{}, nil, fmt.Errorf("both oldPath and newPath are required")
+	}
+	if oldPath == newPath {
+		content, err := p.Store.Read(ctx, oldPath)
+		if err != nil {
+			return Result{}, nil, fmt.Errorf("read %s: %w", oldPath, err)
+		}
+		return Result{Path: oldPath, ETag: ETag(content)}, nil, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return Result{}, nil, err
+	}
+	actor = coalesce(actor)
+
+	backlinks, err := p.Linker.Backlinks(ctx, oldPath)
+	if err != nil {
+		backlinks = nil
+	}
+
+	p.writeMu.Lock()
+	defer p.writeMu.Unlock()
+
+	content, err := p.Store.Read(ctx, oldPath)
+	if err != nil {
+		return Result{}, nil, fmt.Errorf("read %s: %w", oldPath, err)
+	}
+
+	type fileUpdate struct {
+		Path    string
+		Content []byte
+	}
+	var updates []fileUpdate
+	var updatedPaths []string
+
+	newStem := strings.TrimSuffix(newPath, ".md")
+	if idx := strings.LastIndex(newStem, "/"); idx >= 0 {
+		newStem = newStem[idx+1:]
+	}
+
+	for _, bl := range backlinks {
+		if bl.Path == oldPath {
+			continue
+		}
+		src, err := p.Store.Read(ctx, bl.Path)
+		if err != nil {
+			continue
+		}
+		rewritten, changed := links.RewriteLinks(string(src), oldPath, newStem)
+		if changed {
+			updates = append(updates, fileUpdate{Path: bl.Path, Content: []byte(rewritten)})
+			updatedPaths = append(updatedPaths, bl.Path)
+		}
+	}
+
+	p.markInflightEtag(newPath, ETag(content))
+	p.markInflight(oldPath)
+
+	if err := p.Store.Write(ctx, newPath, content); err != nil {
+		return Result{}, nil, fmt.Errorf("write %s: %w", newPath, err)
+	}
+	if err := p.Store.Delete(ctx, oldPath); err != nil {
+		log.Printf("pipeline: Rename delete(%s) after write(%s) succeeded: %v", oldPath, newPath, err)
+		p.trackUncommitted(oldPath)
+	}
+
+	for _, u := range updates {
+		p.markInflightEtag(u.Path, ETag(u.Content))
+		if err := p.Store.Write(ctx, u.Path, u.Content); err != nil {
+			log.Printf("pipeline: RenameWithLinks write(%s): %v", u.Path, err)
+		}
+	}
+
+	allPaths := []string{newPath, oldPath}
+	allPaths = append(allPaths, updatedPaths...)
+	msg := fmt.Sprintf("%s: rename %s → %s", actor, oldPath, newPath)
+	if len(updatedPaths) > 0 {
+		msg += fmt.Sprintf(" (updated %d links)", len(updatedPaths))
+	}
+	if err := p.Versioner.BulkCommit(ctx, allPaths, actor, msg); err != nil {
+		log.Printf("pipeline: RenameWithLinks BulkCommit: %v", err)
+		for _, pa := range allPaths {
+			p.trackUncommitted(pa)
+		}
+	}
+
+	p.indexFile(ctx, newPath, content)
+	p.deindexFile(ctx, oldPath)
+	for _, u := range updates {
+		p.indexFile(ctx, u.Path, u.Content)
+	}
+
+	etag := ETag(content)
+	p.broadcast(events.Event{Op: "write", Path: newPath, Actor: actor, ETag: etag})
+	p.broadcast(events.Event{Op: "delete", Path: oldPath, Actor: actor})
+
+	return Result{Path: newPath, ETag: etag}, updatedPaths, nil
 }
 
 // RenameDir atomically renames a directory on disk and commits all affected

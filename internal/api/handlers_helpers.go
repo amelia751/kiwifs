@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/kiwifs/kiwifs/internal/config"
+	"github.com/kiwifs/kiwifs/internal/markdown"
 	"github.com/kiwifs/kiwifs/internal/search"
 	"github.com/kiwifs/kiwifs/internal/storage"
 	"github.com/labstack/echo/v4"
@@ -72,6 +73,14 @@ func storageErrToHTTP(err error) *echo.HTTPError {
 		return echo.NewHTTPError(http.StatusNotFound, "not found")
 	}
 	return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+}
+
+func extractFrontmatter(content []byte) map[string]any {
+	fm, err := markdown.Frontmatter(content)
+	if err != nil || fm == nil {
+		return map[string]any{}
+	}
+	return fm
 }
 
 func buildSearchEntries(results []search.Result, publicURL string) []searchResultEntry {

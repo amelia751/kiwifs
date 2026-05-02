@@ -117,6 +117,21 @@ func (r *RemoteBackend) postJSON(ctx context.Context, path string, body, out any
 	return nil
 }
 
+func (r *RemoteBackend) Changes(ctx context.Context, since string, limit int) (*ChangesResult, error) {
+	params := url.Values{}
+	if since != "" {
+		params.Set("since", since)
+	}
+	if limit > 0 {
+		params.Set("limit", strconv.Itoa(limit))
+	}
+	var result ChangesResult
+	if err := r.getJSON(ctx, r.apiPrefix+"/changes?"+params.Encode(), &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
 func (r *RemoteBackend) ReadFile(ctx context.Context, path string) (string, string, error) {
 	resp, err := r.do(ctx, http.MethodGet, r.apiPrefix+"/file?path="+url.QueryEscape(path), nil)
 	if err != nil {
@@ -168,6 +183,32 @@ func (r *RemoteBackend) DeleteFile(ctx context.Context, path, actor string) erro
 	return err
 }
 
+func (r *RemoteBackend) Append(ctx context.Context, path, content, separator, actor string) (string, error) {
+	q := r.apiPrefix + "/file/append?path=" + url.QueryEscape(path)
+	if separator != "" && separator != "\n" {
+		q += "&separator=" + url.QueryEscape(separator)
+	}
+	hdrs := []string{"Content-Type", "text/plain"}
+	if actor != "" {
+		hdrs = append(hdrs, "X-Actor", actor)
+	}
+	resp, err := r.do(ctx, http.MethodPost, q, strings.NewReader(content), hdrs...)
+	if err != nil {
+		return "", err
+	}
+	data, err := r.readBody(resp)
+	if err != nil {
+		return "", err
+	}
+	var result struct {
+		ETag string `json:"etag"`
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return "", err
+	}
+	return result.ETag, nil
+}
+
 func (r *RemoteBackend) Rename(ctx context.Context, from, to, actor string) (string, error) {
 	body := map[string]string{"from": from, "to": to}
 	var result struct {
@@ -181,6 +222,22 @@ func (r *RemoteBackend) Rename(ctx context.Context, from, to, actor string) (str
 		return "", err
 	}
 	return result.ETag, nil
+}
+
+func (r *RemoteBackend) RenameWithLinks(ctx context.Context, from, to, actor string, updateLinks bool) (string, []string, error) {
+	body := map[string]string{"from": from, "to": to}
+	var result struct {
+		ETag         string   `json:"etag"`
+		UpdatedLinks []string `json:"updated_links"`
+	}
+	q := r.apiPrefix + "/rename"
+	if !updateLinks {
+		q += "?update_links=false"
+	}
+	if err := r.postJSON(ctx, q, body, &result); err != nil {
+		return "", nil, err
+	}
+	return result.ETag, result.UpdatedLinks, nil
 }
 
 func (r *RemoteBackend) Tree(ctx context.Context, path string) (json.RawMessage, error) {
@@ -240,13 +297,16 @@ func (r *RemoteBackend) QueryMeta(ctx context.Context, filters []string, sort, o
 	return r.QueryMetaOr(ctx, filters, nil, sort, order, limit, offset)
 }
 
-func (r *RemoteBackend) QueryMetaOr(ctx context.Context, andFilters, orFilters []string, sort, order string, limit, offset int) ([]MetaResult, error) {
+func (r *RemoteBackend) QueryMetaOr(ctx context.Context, andFilters, orFilters []string, sort, order string, limit, offset int, paths ...string) ([]MetaResult, error) {
 	params := url.Values{}
 	for _, f := range andFilters {
 		params.Add("where", f)
 	}
 	for _, f := range orFilters {
 		params.Add("or", f)
+	}
+	for _, p := range paths {
+		params.Add("path", p)
 	}
 	if sort != "" {
 		params.Set("sort", sort)

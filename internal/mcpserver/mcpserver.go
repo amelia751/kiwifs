@@ -21,6 +21,7 @@ import (
 	"github.com/kiwifs/kiwifs/internal/dataview"
 	"github.com/kiwifs/kiwifs/internal/exporter"
 	"github.com/kiwifs/kiwifs/internal/importer"
+	"github.com/kiwifs/kiwifs/internal/markdown"
 	"github.com/kiwifs/kiwifs/internal/memory"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
@@ -82,6 +83,8 @@ func registerTools(s *server.MCPServer, b Backend, opts Options) {
 				mcp.WithDescription("Read a markdown file from the knowledge base. Use this to check existing knowledge before writing — e.g. read the coverage strategy before deciding what to test, or read failure patterns to check if a similar failure has been seen before."),
 				mcp.WithString("path", pathOpts...),
 				mcp.WithBoolean("resolve_links", mcp.Description("When true, resolve [[wiki-links]] to full permalink URLs in the returned content. Default false (raw markdown).")),
+				mcp.WithBoolean("metadata_only", mcp.Description("If true, return only YAML frontmatter as JSON. Saves tokens when you only need metadata (status, tags, dates) not the full page content.")),
+				mcp.WithString("if_not_etag", mcp.Description("If provided and matches current ETag, returns not_modified instead of content. Saves tokens on unchanged files.")),
 				mcp.WithReadOnlyHintAnnotation(true),
 				mcp.WithDestructiveHintAnnotation(false),
 			),
@@ -127,6 +130,7 @@ func registerTools(s *server.MCPServer, b Backend, opts Options) {
 				mcp.WithDescription("Query files by their YAML frontmatter fields. Use this for structured queries like 'find all failure patterns with status=open' or 'find all run records for project X sorted by date'. Filter format: $.field=value (e.g. $.status=published, $.priority=high). Filters can be empty to return all rows."),
 				mcp.WithArray("filters", mcp.Description("Filters in format $.field=value (AND-ed). Can be empty to return all rows."), mcp.WithStringItems()),
 				mcp.WithArray("or", mcp.Description("OR-group filters in format $.field=value (OR-ed together, AND-ed with filters)"), mcp.WithStringItems()),
+				mcp.WithArray("paths", mcp.Description("Filter to these specific file paths. Returns frontmatter for each."), mcp.WithStringItems()),
 				mcp.WithString("sort", mcp.Description("Sort field like $.last-exercised")),
 				mcp.WithString("order", mcp.Description("asc or desc")),
 				mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
@@ -168,10 +172,11 @@ func registerTools(s *server.MCPServer, b Backend, opts Options) {
 		},
 		server.ServerTool{
 			Tool: mcp.NewTool("kiwi_rename",
-				mcp.WithDescription("Atomically rename/move a file. The old path is removed and the new path is created in a single git commit. File history is preserved."),
+				mcp.WithDescription("Atomically rename/move a file. The old path is removed and the new path is created in a single git commit. File history is preserved. By default, all [[wiki-links]] pointing to the old name are rewritten."),
 				mcp.WithString("from", mcp.Required(), mcp.Description("Current file path"), mcp.MaxLength(500)),
 				mcp.WithString("to", mcp.Required(), mcp.Description("New file path"), mcp.MaxLength(500)),
 				mcp.WithString("actor", mcp.Description("Who is renaming")),
+				mcp.WithBoolean("update_links", mcp.Description("Rewrite [[wiki-links]] in other files that point to the old name (default true)")),
 				mcp.WithDestructiveHintAnnotation(true),
 				mcp.WithIdempotentHintAnnotation(false),
 			),
@@ -250,6 +255,48 @@ func registerTools(s *server.MCPServer, b Backend, opts Options) {
 				mcp.WithDestructiveHintAnnotation(false),
 			),
 			Handler: handleExport(b, opts),
+		},
+		server.ServerTool{
+			Tool: mcp.NewTool("kiwi_changes",
+				mcp.WithDescription("List files changed since a given checkpoint. Returns changes with paths, actions, actors, and timestamps. Store last_seq and pass it as since on next call to get incremental updates."),
+				mcp.WithString("since", mcp.Description("Commit hash to start from (exclusive). Omit to get recent changes.")),
+				mcp.WithNumber("limit", mcp.Description("Max changes to return (default 50, max 500)")),
+				mcp.WithReadOnlyHintAnnotation(true),
+				mcp.WithDestructiveHintAnnotation(false),
+			),
+			Handler: handleChanges(b),
+		},
+		server.ServerTool{
+			Tool: mcp.NewTool("kiwi_append",
+				mcp.WithDescription("Atomically append content to a file. No read-modify-write race. Ideal for log files, journals, and append-only records."),
+				mcp.WithString("path", pathOpts...),
+				mcp.WithString("content", mcp.Required(), mcp.Description("Content to append")),
+				mcp.WithString("separator", mcp.Description(`Separator between existing and new content (default "\\n")`)),
+				mcp.WithString("actor", mcp.Description("Who is appending")),
+				mcp.WithDestructiveHintAnnotation(true),
+				mcp.WithIdempotentHintAnnotation(false),
+			),
+			Handler: handleAppend(b),
+		},
+		server.ServerTool{
+			Tool: mcp.NewTool("kiwi_search_semantic",
+				mcp.WithDescription("Find pages semantically similar to a query. Uses vector embeddings. Useful for finding related content, checking for near-duplicates before creating a page, and discovering connections."),
+				mcp.WithString("query", mcp.Required(), mcp.Description("Search query")),
+				mcp.WithNumber("limit", mcp.Description("Max results (default 5)")),
+				mcp.WithNumber("threshold", mcp.Description("Minimum similarity score 0.0–1.0")),
+				mcp.WithReadOnlyHintAnnotation(true),
+				mcp.WithDestructiveHintAnnotation(false),
+			),
+			Handler: handleSearchSemantic(b),
+		},
+		server.ServerTool{
+			Tool: mcp.NewTool("kiwi_backlinks",
+				mcp.WithDescription("List all pages that link to a given page via [[wiki links]]. Useful for understanding page connections and impact of changes."),
+				mcp.WithString("path", pathOpts...),
+				mcp.WithReadOnlyHintAnnotation(true),
+				mcp.WithDestructiveHintAnnotation(false),
+			),
+			Handler: handleBacklinks(b),
 		},
 		server.ServerTool{
 			Tool: mcp.NewTool("kiwi_analytics",
@@ -396,6 +443,14 @@ func handleRead(b Backend) server.ToolHandlerFunc {
 				return mcp.NewToolResultError(fmt.Sprintf("File not found at %s. Use kiwi_tree to see available files.", path)), nil
 			}
 			return mcp.NewToolResultError(fmt.Sprintf("Failed to read %s: %v", path, err)), nil
+		}
+		if ifNotEtag, _ := args["if_not_etag"].(string); ifNotEtag != "" && ifNotEtag == etag {
+			return mcp.NewToolResultText(fmt.Sprintf("File not modified (etag: %s). Content unchanged since your last read.", etag)), nil
+		}
+		if metadataOnly, _ := args["metadata_only"].(bool); metadataOnly {
+			fm := extractFrontmatterFromContent(content)
+			fmJSON, _ := json.Marshal(fm)
+			return mcp.NewToolResultText(fmt.Sprintf("[ETag: %s]\n\n%s", etag, string(fmJSON))), nil
 		}
 		if resolveLinks, _ := args["resolve_links"].(bool); resolveLinks {
 			content = b.ResolveWikiLinks(ctx, content)
@@ -579,12 +634,26 @@ func handleQueryMeta(b Backend) server.ToolHandlerFunc {
 			}
 		}
 
+		var paths []string
+		if raw, ok := args["paths"]; ok {
+			switch v := raw.(type) {
+			case []any:
+				for _, item := range v {
+					if s, ok := item.(string); ok {
+						paths = append(paths, s)
+					}
+				}
+			case []string:
+				paths = v
+			}
+		}
+
 		sortField, _ := args["sort"].(string)
 		order, _ := args["order"].(string)
 		limit := intArg(args, "limit", 20)
 		offset := intArg(args, "offset", 0)
 
-		results, err := b.QueryMetaOr(ctx, filters, orFilters, sortField, order, limit+1, offset)
+		results, err := b.QueryMetaOr(ctx, filters, orFilters, sortField, order, limit+1, offset, paths...)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("Query failed: %v", err)), nil
 		}
@@ -859,6 +928,126 @@ func handleHealthCheck(b Backend) server.ToolHandlerFunc {
 	}
 }
 
+func handleChanges(b Backend) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		args := req.GetArguments()
+		since, _ := args["since"].(string)
+		limit := intArg(args, "limit", 50)
+
+		result, err := b.Changes(ctx, since, limit)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Changes failed: %v", err)), nil
+		}
+		if len(result.Changes) == 0 {
+			return mcp.NewToolResultText("No changes found."), nil
+		}
+
+		var sb strings.Builder
+		for _, ch := range result.Changes {
+			seq := ch.Seq
+			if len(seq) > 8 {
+				seq = seq[:8]
+			}
+			if ch.Path != "" {
+				fmt.Fprintf(&sb, "%s %s %s (by %s at %s)\n", seq, ch.Action, ch.Path, ch.Actor, ch.Timestamp)
+			} else {
+				fmt.Fprintf(&sb, "%s %s (by %s at %s)\n", seq, ch.Action, ch.Actor, ch.Timestamp)
+			}
+		}
+		fmt.Fprintf(&sb, "\nlast_seq: %s\n", result.LastSeq)
+		return mcp.NewToolResultText(sb.String()), nil
+	}
+}
+
+func handleAppend(b Backend) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		args := req.GetArguments()
+		path, _ := args["path"].(string)
+		content, _ := args["content"].(string)
+		separator, _ := args["separator"].(string)
+		actor, _ := args["actor"].(string)
+		if path == "" {
+			return mcp.NewToolResultError("path is required"), nil
+		}
+		if content == "" {
+			return mcp.NewToolResultError("content is required"), nil
+		}
+		if actor == "" {
+			actor = "mcp-agent"
+		}
+		etag, err := b.Append(ctx, path, content, separator, actor)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Append failed: %v", err)), nil
+		}
+		return mcp.NewToolResultText(fmt.Sprintf("Appended to %s (ETag: %s)", path, etag)), nil
+	}
+}
+
+func handleSearchSemantic(b Backend) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		args := req.GetArguments()
+		query, _ := args["query"].(string)
+		if query == "" {
+			return mcp.NewToolResultError("query is required"), nil
+		}
+		limit := intArg(args, "limit", 5)
+		if limit > 50 {
+			limit = 50
+		}
+		var threshold float64
+		if v, ok := args["threshold"].(float64); ok {
+			threshold = v
+		}
+
+		results, err := b.SearchSemantic(ctx, query, limit)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Semantic search failed: %v", err)), nil
+		}
+		if len(results) == 0 {
+			return mcp.NewToolResultText("No results found."), nil
+		}
+
+		var sb strings.Builder
+		for i, r := range results {
+			if threshold > 0 && r.Score < threshold {
+				continue
+			}
+			fmt.Fprintf(&sb, "%d. %s (score: %.3f)\n", i+1, r.Path, r.Score)
+			if r.Snippet != "" {
+				fmt.Fprintf(&sb, "   %s\n", r.Snippet)
+			}
+			sb.WriteString("\n")
+		}
+		if sb.Len() == 0 {
+			return mcp.NewToolResultText("No results above threshold."), nil
+		}
+		return mcp.NewToolResultText(sb.String()), nil
+	}
+}
+
+func handleBacklinks(b Backend) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		args := req.GetArguments()
+		path, _ := args["path"].(string)
+		if path == "" {
+			return mcp.NewToolResultError("path is required"), nil
+		}
+		links, err := b.Backlinks(ctx, path)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Backlinks failed: %v", err)), nil
+		}
+		if len(links) == 0 {
+			return mcp.NewToolResultText(fmt.Sprintf("No pages link to %s.", path)), nil
+		}
+		var sb strings.Builder
+		fmt.Fprintf(&sb, "%d pages link to %s:\n", len(links), path)
+		for _, bl := range links {
+			fmt.Fprintf(&sb, "  - %s (%d links)\n", bl.Path, bl.Count)
+		}
+		return mcp.NewToolResultText(sb.String()), nil
+	}
+}
+
 func handleDelete(b Backend) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		args := req.GetArguments()
@@ -892,14 +1081,26 @@ func handleRename(b Backend) server.ToolHandlerFunc {
 		if actor == "" {
 			actor = "mcp-agent"
 		}
-		etag, err := b.Rename(ctx, from, to, actor)
+		updateLinks := true
+		if ul, ok := args["update_links"].(bool); ok {
+			updateLinks = ul
+		}
+		etag, updatedLinks, err := b.RenameWithLinks(ctx, from, to, actor, updateLinks)
 		if err != nil {
 			if isNotFound(err) {
 				return mcp.NewToolResultError(fmt.Sprintf("File not found at %s. Use kiwi_tree to see available files.", from)), nil
 			}
 			return mcp.NewToolResultError(fmt.Sprintf("Failed to rename %s → %s: %v", from, to, err)), nil
 		}
-		return mcp.NewToolResultText(fmt.Sprintf("Renamed %s → %s (ETag: %s)", from, to, etag)), nil
+		var sb strings.Builder
+		fmt.Fprintf(&sb, "Renamed %s → %s (ETag: %s)", from, to, etag)
+		if len(updatedLinks) > 0 {
+			fmt.Fprintf(&sb, "\nUpdated links in %d files:", len(updatedLinks))
+			for _, p := range updatedLinks {
+				fmt.Fprintf(&sb, "\n  - %s", p)
+			}
+		}
+		return mcp.NewToolResultText(sb.String()), nil
 	}
 }
 
@@ -1212,6 +1413,14 @@ func intArg(args map[string]any, key string, def int) int {
 		return def
 	}
 	return n
+}
+
+func extractFrontmatterFromContent(content string) map[string]any {
+	fm, err := markdown.Frontmatter([]byte(content))
+	if err != nil || fm == nil {
+		return map[string]any{}
+	}
+	return fm
 }
 
 func isNotFound(err error) bool {

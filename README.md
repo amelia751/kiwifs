@@ -169,7 +169,7 @@ kiwifs mcp --root ~/knowledge          # in-process, no server needed
 kiwifs mcp --remote http://host:3333   # proxy to a running KiwiFS server
 ```
 
-16 tools: `kiwi_read`, `kiwi_write`, `kiwi_search`, `kiwi_tree`, `kiwi_query_meta`, `kiwi_delete`, `kiwi_bulk_write`, `kiwi_rename`, `kiwi_query`, `kiwi_aggregate`, `kiwi_import`, `kiwi_export`, `kiwi_analytics`, `kiwi_memory_report`, `kiwi_view_refresh`, `kiwi_health_check`. Plus resources (`kiwi://schema`, `kiwi://file/{path}`, `kiwi://tree/{path}`).
+20 tools: `kiwi_read`, `kiwi_write`, `kiwi_search`, `kiwi_tree`, `kiwi_query_meta`, `kiwi_delete`, `kiwi_bulk_write`, `kiwi_rename`, `kiwi_query`, `kiwi_aggregate`, `kiwi_import`, `kiwi_export`, `kiwi_analytics`, `kiwi_memory_report`, `kiwi_view_refresh`, `kiwi_health_check`, `kiwi_changes`, `kiwi_append`, `kiwi_search_semantic`, `kiwi_backlinks`. Plus resources (`kiwi://schema`, `kiwi://file/{path}`, `kiwi://tree/{path}`).
 
 **Claude Desktop / Cursor:**
 ```json
@@ -599,7 +599,9 @@ PUT    /api/kiwi/file?path=                 → write + git commit + re-index
 DELETE /api/kiwi/file?path=                 → delete + git commit
 POST   /api/kiwi/bulk                       → multi-file write, one commit
 POST   /api/kiwi/rename                     → atomic rename ({"from":"...","to":"..."})
+POST   /api/kiwi/file/append?path=          → append content to file
 
+GET    /api/kiwi/changes?since=&limit=      → git-based change feed
 GET    /api/kiwi/search?q=                  → full-text search (BM25)
 POST   /api/kiwi/search/semantic            → vector search
 

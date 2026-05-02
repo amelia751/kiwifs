@@ -264,6 +264,7 @@ func (s *Server) setupRoutes() {
 	if mw := s.authMiddleware(); mw != nil {
 		api.Use(mw)
 	}
+	api.GET("/changes", h.Changes)
 	api.GET("/tree", h.Tree)
 	api.GET("/file", h.ReadFile)
 	api.GET("/readlink", h.Readlink)
@@ -272,6 +273,7 @@ func (s *Server) setupRoutes() {
 	api.POST("/rename", h.RenameFile)
 	api.POST("/rename-dir", h.RenameDir)
 	api.POST("/bulk", h.BulkWrite)
+	api.POST("/file/append", h.AppendFile)
 	api.POST("/assets", h.UploadAsset)
 	api.POST("/resolve-links", h.ResolveLinks)
 	api.GET("/search", h.Search)

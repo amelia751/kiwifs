@@ -27,6 +27,13 @@ func mustCallTool(t *testing.T, handler func(context.Context, mcp.CallToolReques
 	return result.Content[0].(mcp.TextContent).Text
 }
 
+func callToolReq(name string, args map[string]any) mcp.CallToolRequest {
+	req := mcp.CallToolRequest{}
+	req.Params.Name = name
+	req.Params.Arguments = args
+	return req
+}
+
 func setupTestBackend(t *testing.T) (*LocalBackend, string) {
 	t.Helper()
 	tmp := t.TempDir()
