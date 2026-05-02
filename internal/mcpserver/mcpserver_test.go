@@ -187,6 +187,41 @@ strategy = "none"
 	}
 }
 
+func TestBulkWriteToolDeclaresArrayItemsSchema(t *testing.T) {
+	s, backend, err := New(Options{Root: t.TempDir()})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer backend.Close()
+
+	tool := s.GetTool("kiwi_bulk_write")
+	if tool == nil {
+		t.Fatal("expected kiwi_bulk_write tool")
+	}
+
+	files, ok := tool.Tool.InputSchema.Properties["files"].(map[string]any)
+	if !ok {
+		t.Fatalf("files schema = %#v, want object", tool.Tool.InputSchema.Properties["files"])
+	}
+	items, ok := files["items"].(map[string]any)
+	if !ok {
+		t.Fatalf("files schema missing object items: %#v", files)
+	}
+	if items["type"] != "object" {
+		t.Fatalf("files.items.type = %#v, want object", items["type"])
+	}
+	props, ok := items["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("files.items.properties = %#v, want object", items["properties"])
+	}
+	if _, ok := props["path"]; !ok {
+		t.Fatalf("files.items.properties missing path: %#v", props)
+	}
+	if _, ok := props["content"]; !ok {
+		t.Fatalf("files.items.properties missing content: %#v", props)
+	}
+}
+
 func TestToolHandlerRead(t *testing.T) {
 	b, _ := setupTestBackend(t)
 	defer b.Close()

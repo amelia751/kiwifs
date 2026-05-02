@@ -177,7 +177,19 @@ func registerTools(s *server.MCPServer, b Backend, opts Options) {
 		server.ServerTool{
 			Tool: mcp.NewTool("kiwi_bulk_write",
 				mcp.WithDescription("Write multiple files in a single atomic git commit. Use this when updating related files together — e.g. writing a run record and updating the coverage strategy in the same operation. Old content is preserved in git history."),
-				mcp.WithArray("files", mcp.Required(), mcp.Description("Array of {path, content} objects")),
+				mcp.WithArray(
+					"files",
+					mcp.Required(),
+					mcp.Description("Array of {path, content} objects"),
+					mcp.Items(map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"path":    map[string]any{"type": "string"},
+							"content": map[string]any{"type": "string"},
+						},
+						"required": []string{"path", "content"},
+					}),
+				),
 				mcp.WithString("actor", mcp.Description("Who is writing — defaults to mcp-agent")),
 				mcp.WithString("provenance", mcp.Description("Link to source, format type:id")),
 				mcp.WithDestructiveHintAnnotation(true),
