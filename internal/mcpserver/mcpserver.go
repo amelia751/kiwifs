@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -32,6 +33,8 @@ type Options struct {
 	Root   string
 	APIKey string
 	Space  string
+	HTTP   bool
+	Port   int
 }
 
 func New(opts Options) (*server.MCPServer, Backend, error) {
@@ -1232,5 +1235,37 @@ func Serve(opts Options) error {
 		}
 	}
 
+	if opts.HTTP {
+		return serveHTTP(s, opts.Port)
+	}
+
 	return server.ServeStdio(s)
+}
+
+func serveHTTP(s *server.MCPServer, port int) error {
+	addr := fmt.Sprintf(":%d", port)
+	stderr.Printf("serving MCP Streamable HTTP on http://localhost:%d/mcp", port)
+	return http.ListenAndServe(addr, newHTTPHandler(s, time.Now()))
+}
+
+func newHTTPHandler(s *server.MCPServer, started time.Time) http.Handler {
+	mcpHandler := server.NewStreamableHTTPServer(
+		s,
+		server.WithEndpointPath("/mcp"),
+		server.WithStateLess(true),
+	)
+
+	mux := http.NewServeMux()
+	mux.Handle("/mcp", mcpHandler)
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"status":"ok","transport":"http","uptime_seconds":%d}`+"\n", int(time.Since(started).Seconds()))
+	})
+
+	return mux
 }

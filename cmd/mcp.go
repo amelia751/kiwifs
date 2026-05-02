@@ -9,19 +9,25 @@ import (
 
 var mcpCmd = &cobra.Command{
 	Use:   "mcp",
-	Short: "Start the KiwiFS MCP server (stdio transport)",
+	Short: "Start the KiwiFS MCP server",
 	Long: `Start a Model Context Protocol server for KiwiFS.
 
 The MCP server gives any AI agent (Claude, Cursor, custom) a structured
 tool interface to KiwiFS — read, write, search, query metadata — over
 the standard MCP protocol.
 
-Two modes:
+Backend modes:
   --root  <path>   In-process mode — opens the knowledge directory directly
-  --remote <url>   Proxy mode — talks to a running KiwiFS server over REST`,
+  --remote <url>   Proxy mode — talks to a running KiwiFS server over REST
+
+Transports:
+  stdio            Default transport for clients that launch KiwiFS as a subprocess
+  --http           Streamable HTTP transport served at /mcp`,
 	Example: `  kiwifs mcp --root ~/knowledge
   kiwifs mcp --remote http://localhost:3333
-  kiwifs mcp --remote http://kiwifs.example.com:3333 --api-key $KIWI_API_KEY`,
+  kiwifs mcp --remote http://kiwifs.example.com:3333 --api-key $KIWI_API_KEY
+  kiwifs mcp --root ~/knowledge --http
+  kiwifs mcp --remote http://localhost:3333 --http --port 8080`,
 	RunE: runMCP,
 }
 
@@ -30,6 +36,8 @@ func init() {
 	mcpCmd.Flags().String("remote", "", "KiwiFS server URL (proxy mode)")
 	mcpCmd.Flags().String("api-key", "", "API key for remote server")
 	mcpCmd.Flags().String("space", "default", "space to scope operations to")
+	mcpCmd.Flags().Bool("http", false, "serve MCP over Streamable HTTP instead of stdio")
+	mcpCmd.Flags().Int("port", 8181, "HTTP MCP port (used with --http)")
 }
 
 func runMCP(cmd *cobra.Command, args []string) error {
@@ -37,6 +45,8 @@ func runMCP(cmd *cobra.Command, args []string) error {
 	remote, _ := cmd.Flags().GetString("remote")
 	apiKey, _ := cmd.Flags().GetString("api-key")
 	space, _ := cmd.Flags().GetString("space")
+	httpTransport, _ := cmd.Flags().GetBool("http")
+	port, _ := cmd.Flags().GetInt("port")
 
 	if root == "" && remote == "" {
 		return fmt.Errorf("exactly one of --root or --remote is required")
@@ -47,11 +57,19 @@ func runMCP(cmd *cobra.Command, args []string) error {
 	if root != "" && space != "default" && cmd.Flags().Changed("space") {
 		return fmt.Errorf("--space is only meaningful with --remote; local mode operates on the --root directory directly")
 	}
+	if !httpTransport && cmd.Flags().Changed("port") {
+		return fmt.Errorf("--port requires --http")
+	}
+	if port <= 0 || port > 65535 {
+		return fmt.Errorf("--port must be between 1 and 65535")
+	}
 
 	return mcpserver.Serve(mcpserver.Options{
 		Remote: remote,
 		Root:   root,
 		APIKey: apiKey,
 		Space:  space,
+		HTTP:   httpTransport,
+		Port:   port,
 	})
 }
