@@ -23,6 +23,7 @@ import (
 	"github.com/kiwifs/kiwifs/internal/importer"
 	"github.com/kiwifs/kiwifs/internal/markdown"
 	"github.com/kiwifs/kiwifs/internal/memory"
+	"github.com/kiwifs/kiwifs/internal/tracing"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )
@@ -30,12 +31,13 @@ import (
 var stderr = log.New(os.Stderr, "kiwifs-mcp: ", log.LstdFlags)
 
 type Options struct {
-	Remote string
-	Root   string
-	APIKey string
-	Space  string
-	HTTP   bool
-	Port   int
+	Remote  string
+	Root    string
+	APIKey  string
+	Space   string
+	HTTP    bool
+	Port    int
+	Emitter tracing.Emitter
 }
 
 func New(opts Options) (*server.MCPServer, Backend, error) {
@@ -46,11 +48,16 @@ func New(opts Options) (*server.MCPServer, Backend, error) {
 		backend = NewLocalBackend(opts.Root)
 	}
 
+	em := opts.Emitter
+	if em == nil {
+		em = tracing.NoopEmitter{}
+	}
+
 	s := server.NewMCPServer(
 		"kiwifs",
 		"1.0.0",
 		server.WithRecovery(),
-		server.WithToolHandlerMiddleware(auditMiddleware),
+		server.WithToolHandlerMiddleware(tracingMiddleware(em)),
 	)
 
 	registerTools(s, backend, opts)
@@ -59,13 +66,27 @@ func New(opts Options) (*server.MCPServer, Backend, error) {
 	return s, backend, nil
 }
 
-func auditMiddleware(next server.ToolHandlerFunc) server.ToolHandlerFunc {
-	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		start := time.Now()
-		result, err := next(ctx, req)
-		isErr := err != nil || (result != nil && result.IsError)
-		stderr.Printf("tool=%s duration=%s error=%v", req.Params.Name, time.Since(start).Round(time.Millisecond), isErr)
-		return result, err
+func tracingMiddleware(em tracing.Emitter) server.ToolHandlerMiddleware {
+	return func(next server.ToolHandlerFunc) server.ToolHandlerFunc {
+		return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			ctx = tracing.Start(ctx, "mcp", req.Params.Name)
+
+			if q, ok := req.GetArguments()["query"].(string); ok {
+				tracing.SetQuery(ctx, q)
+			}
+
+			result, err := next(ctx, req)
+
+			isErr := err != nil || (result != nil && result.IsError)
+			rec := tracing.Finish(ctx, err)
+			if rec != nil {
+				em.Emit(*rec)
+			}
+			stderr.Printf("tool=%s trace=%s duration=%s error=%v",
+				req.Params.Name, rec.ID, rec.Duration, isErr)
+
+			return result, err
+		}
 	}
 }
 

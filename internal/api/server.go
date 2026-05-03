@@ -23,6 +23,7 @@ import (
 	"github.com/kiwifs/kiwifs/internal/pipeline"
 	"github.com/kiwifs/kiwifs/internal/rbac"
 	"github.com/kiwifs/kiwifs/internal/search"
+	"github.com/kiwifs/kiwifs/internal/tracing"
 	"github.com/kiwifs/kiwifs/internal/vectorstore"
 	"github.com/kiwifs/kiwifs/internal/webui"
 	"github.com/labstack/echo/v4"
@@ -36,6 +37,7 @@ type Server struct {
 	comments     *comments.Store
 	shares       *rbac.ShareStore
 	linkResolver *links.Resolver
+	emitter      tracing.Emitter
 	echo         *echo.Echo
 
 	janitorSched  *janitor.Scheduler
@@ -63,7 +65,11 @@ func NewServer(
 	cstore *comments.Store,
 	shares *rbac.ShareStore,
 	lr *links.Resolver,
+	em tracing.Emitter,
 ) *Server {
+	if em == nil {
+		em = tracing.NoopEmitter{}
+	}
 	s := &Server{
 		cfg:          cfg,
 		pipe:         pipe,
@@ -71,6 +77,7 @@ func NewServer(
 		comments:     cstore,
 		shares:       shares,
 		linkResolver: lr,
+		emitter:      em,
 		echo:         echo.New(),
 	}
 	s.echo.HideBanner = true
@@ -114,6 +121,9 @@ func (s *Server) setupMiddleware() {
 			return p == "/health" || p == "/healthz" || p == "/readyz" || p == "/metrics"
 		},
 	}))
+	if s.cfg.Tracing.IsEnabled() {
+		s.echo.Use(apiTracingMiddleware(s.emitter))
+	}
 	s.echo.Use(middleware.CORSWithConfig(middleware.CORSConfig{
 		AllowOriginFunc: s.corsOriginAllowed,
 		AllowMethods:    []string{http.MethodGet, http.MethodPut, http.MethodPost, http.MethodDelete, http.MethodOptions},
@@ -458,6 +468,32 @@ func perSpaceKeyHandler(keys []config.APIKeyEntry) echo.MiddlewareFunc {
 				c.Request().Header.Set("X-Space", e.space)
 			}
 			return next(c)
+		}
+	}
+}
+
+func apiTracingMiddleware(em tracing.Emitter) echo.MiddlewareFunc {
+	return func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error {
+			req := c.Request()
+			p := req.URL.Path
+			if p == "/health" || p == "/healthz" || p == "/readyz" || p == "/metrics" {
+				return next(c)
+			}
+
+			ctx := tracing.Start(req.Context(), "api", req.Method+" "+p)
+			if q := c.QueryParam("q"); q != "" {
+				tracing.SetQuery(ctx, q)
+			}
+			c.SetRequest(req.WithContext(ctx))
+
+			err := next(c)
+
+			rec := tracing.Finish(ctx, err)
+			if rec != nil {
+				em.Emit(*rec)
+			}
+			return err
 		}
 	}
 }

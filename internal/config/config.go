@@ -23,6 +23,7 @@ type Config struct {
 	Janitor    JanitorConfig    `toml:"janitor"`
 	Dataview   DataviewConfig   `toml:"dataview"`
 	Memory     MemoryConfig     `toml:"memory"`
+	Tracing    TracingConfig    `toml:"tracing"`
 	// Spaces enables multi-tenant mode: each entry becomes an
 	// independent knowledge base mapped under /api/kiwi/{name}/...
 	// When empty, the server runs single-space against Storage.Root.
@@ -41,6 +42,21 @@ type DataviewConfig struct {
 	MaxAutoIndexes int               `toml:"max_auto_indexes"`
 	ComputedFields bool              `toml:"computed_fields"`
 	CustomFields   map[string]string `toml:"custom_fields"`
+}
+
+// TracingConfig controls query tracing — structured JSON records of what
+// KiwiFS did during each MCP or HTTP request (files read, searches run,
+// links resolved, etc.). Enabled by default (stderr). Set enabled=false
+// to suppress trace output entirely.
+type TracingConfig struct {
+	Enabled *bool  `toml:"enabled"` // nil (unset) treated as true
+	Output  string `toml:"output"`  // "stderr" (default) or "file"
+	File    string `toml:"file"`    // path when output="file"
+}
+
+// IsEnabled returns true unless explicitly set to false.
+func (t TracingConfig) IsEnabled() bool {
+	return t.Enabled == nil || *t.Enabled
 }
 
 // MemoryConfig controls episodic/semantic heuristics and consolidation tooling.

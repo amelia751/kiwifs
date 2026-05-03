@@ -15,6 +15,7 @@ import (
 	"github.com/kiwifs/kiwifs/internal/config"
 	"github.com/kiwifs/kiwifs/internal/pipeline"
 	"github.com/kiwifs/kiwifs/internal/storage"
+	"github.com/kiwifs/kiwifs/internal/tracing"
 	"github.com/labstack/echo/v4"
 )
 
@@ -101,8 +102,10 @@ func (h *Handlers) ReadFile(c echo.Context) error {
 		c.Response().Header().Set("X-File-Type", "symlink")
 	}
 
-	etag := fmt.Sprintf(`"%s"`, pipeline.ETag(content))
+	rawETag := pipeline.ETag(content)
+	etag := fmt.Sprintf(`"%s"`, rawETag)
 	c.Response().Header().Set("ETag", etag)
+	tracing.Record(c.Request().Context(), tracing.Event{Kind: tracing.KindRead, Path: path, ETag: rawETag})
 	ext := strings.ToLower(filepath.Ext(path))
 	if ext == ".md" || ext == ".markdown" {
 		c.Response().Header().Set("Cache-Control", "no-cache")
@@ -143,6 +146,7 @@ func (h *Handlers) ReadFile(c echo.Context) error {
 
 	if c.QueryParam("resolve_links") == "true" && h.publicURL != "" && h.linkResolver != nil {
 		content = []byte(h.linkResolver.Resolve(c.Request().Context(), string(content), h.publicURL))
+		tracing.Record(c.Request().Context(), tracing.Event{Kind: tracing.KindLinkResolve, Path: path, Detail: "wiki-links resolved"})
 	}
 
 	return c.Blob(http.StatusOK, detectContentType(path, content), content)
@@ -236,6 +240,7 @@ func (h *Handlers) WriteFile(c echo.Context) error {
 	}
 
 	c.Response().Header().Set("ETag", fmt.Sprintf(`"%s"`, res.ETag))
+	tracing.Record(c.Request().Context(), tracing.Event{Kind: tracing.KindWrite, Path: path, ETag: res.ETag})
 	return c.JSON(http.StatusOK, map[string]string{
 		"path": res.Path,
 		"etag": res.ETag,
@@ -617,6 +622,7 @@ func (h *Handlers) AppendFile(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
 	c.Response().Header().Set("ETag", fmt.Sprintf(`"%s"`, res.ETag))
+	tracing.Record(c.Request().Context(), tracing.Event{Kind: tracing.KindWrite, Path: path, ETag: res.ETag})
 	return c.JSON(http.StatusOK, map[string]string{
 		"path": res.Path,
 		"etag": res.ETag,
@@ -638,5 +644,6 @@ func (h *Handlers) DeleteFile(c echo.Context) error {
 		}
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
+	tracing.Record(c.Request().Context(), tracing.Event{Kind: tracing.KindDelete, Path: path})
 	return c.JSON(http.StatusOK, map[string]string{"deleted": path})
 }

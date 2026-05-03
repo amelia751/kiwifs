@@ -228,7 +228,7 @@ func TestPerSpaceKeyMiddlewareValidates(t *testing.T) {
 		{Key: "secret-team-a", Space: "team-a", Actor: "alice"},
 		{Key: "secret-team-b", Space: "team-b", Actor: "bob"},
 	}
-	s := NewServer(cfg, pipe, nil, cstore, nil, nil)
+	s := NewServer(cfg, pipe, nil, cstore, nil, nil, nil)
 
 	cases := []struct {
 		name string

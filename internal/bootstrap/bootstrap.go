@@ -17,6 +17,7 @@ import (
 	"github.com/kiwifs/kiwifs/internal/rbac"
 	"github.com/kiwifs/kiwifs/internal/search"
 	"github.com/kiwifs/kiwifs/internal/storage"
+	"github.com/kiwifs/kiwifs/internal/tracing"
 	"github.com/kiwifs/kiwifs/internal/vectorstore"
 	"github.com/kiwifs/kiwifs/internal/versioning"
 )
@@ -52,6 +53,7 @@ type Stack struct {
 	Comments     *comments.Store
 	Server       *api.Server
 	JanitorSched *janitor.Scheduler
+	Emitter      tracing.Emitter
 }
 
 func Build(name, root string, cfg *config.Config) (*Stack, error) {
@@ -128,7 +130,9 @@ func Build(name, root string, cfg *config.Config) (*Stack, error) {
 		shares = nil
 	}
 
-	server := api.NewServer(cfg, pipe, vectors, cstore, shares, linkResolver)
+	em := tracing.NewEmitter(cfg.Tracing.IsEnabled(), cfg.Tracing.Output, cfg.Tracing.File)
+
+	server := api.NewServer(cfg, pipe, vectors, cstore, shares, linkResolver, em)
 
 	var janitorSched *janitor.Scheduler
 	if iv := janitorInterval(cfg); iv > 0 {
@@ -161,6 +165,7 @@ func Build(name, root string, cfg *config.Config) (*Stack, error) {
 		Comments:     cstore,
 		Server:       server,
 		JanitorSched: janitorSched,
+		Emitter:      em,
 	}
 
 	pipe.DrainUncommitted(context.Background())

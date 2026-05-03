@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 
+	"github.com/kiwifs/kiwifs/internal/tracing"
 	"github.com/kiwifs/kiwifs/internal/versioning"
 	"github.com/labstack/echo/v4"
 )
@@ -25,6 +26,7 @@ func (h *Handlers) Versions(c echo.Context) error {
 	if versions == nil {
 		versions = []versioning.Version{}
 	}
+	tracing.Record(c.Request().Context(), tracing.Event{Kind: tracing.KindVersions, Path: path, HitCount: len(versions)})
 	return c.JSON(http.StatusOK, versionsResponse{Path: path, Versions: versions})
 }
 

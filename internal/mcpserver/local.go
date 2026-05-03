@@ -22,6 +22,7 @@ import (
 	"github.com/kiwifs/kiwifs/internal/pipeline"
 	"github.com/kiwifs/kiwifs/internal/search"
 	"github.com/kiwifs/kiwifs/internal/storage"
+	"github.com/kiwifs/kiwifs/internal/tracing"
 	"github.com/kiwifs/kiwifs/internal/vectorstore"
 )
 
@@ -193,6 +194,7 @@ func (b *LocalBackend) ReadFile(ctx context.Context, path string) (string, strin
 		return "", "", err
 	}
 	etag := pipeline.ETag(content)
+	tracing.Record(ctx, tracing.Event{Kind: tracing.KindRead, Path: path, ETag: etag})
 	return string(content), etag, nil
 }
 
@@ -212,6 +214,7 @@ func (b *LocalBackend) WriteFile(ctx context.Context, path, content, actor, prov
 	if err != nil {
 		return "", err
 	}
+	tracing.Record(ctx, tracing.Event{Kind: tracing.KindWrite, Path: path, ETag: res.ETag})
 	return res.ETag, nil
 }
 
@@ -219,7 +222,11 @@ func (b *LocalBackend) DeleteFile(ctx context.Context, path, actor string) error
 	if err := b.init(); err != nil {
 		return err
 	}
-	return b.stack.Pipeline.Delete(ctx, path, actor)
+	err := b.stack.Pipeline.Delete(ctx, path, actor)
+	if err == nil {
+		tracing.Record(ctx, tracing.Event{Kind: tracing.KindDelete, Path: path})
+	}
+	return err
 }
 
 func (b *LocalBackend) Append(ctx context.Context, path, content, separator, actor string) (string, error) {
@@ -287,6 +294,7 @@ func (b *LocalBackend) Search(ctx context.Context, query string, limit, offset i
 			Score:   r.Score,
 		}
 	}
+	tracing.Record(ctx, tracing.Event{Kind: tracing.KindSearch, Query: query, HitCount: len(out)})
 	return out, nil
 }
 
@@ -436,6 +444,7 @@ func (b *LocalBackend) QueryDQL(ctx context.Context, dql string, limit, offset i
 	for _, g := range result.Groups {
 		qr.Groups = append(qr.Groups, GroupResult{Key: g.Key, Count: g.Count})
 	}
+	tracing.Record(ctx, tracing.Event{Kind: tracing.KindDQL, Query: dql, HitCount: result.Total})
 	return qr, nil
 }
 
@@ -451,6 +460,7 @@ func (b *LocalBackend) Versions(ctx context.Context, path string) ([]Version, er
 	for i, v := range vers {
 		out[i] = Version{Hash: v.Hash, Date: v.Date, Author: v.Author, Message: v.Message}
 	}
+	tracing.Record(ctx, tracing.Event{Kind: tracing.KindVersions, Path: path, HitCount: len(out)})
 	return out, nil
 }
 
@@ -630,7 +640,9 @@ func (b *LocalBackend) ResolveWikiLinks(ctx context.Context, content string) str
 		return content
 	}
 	publicURL := b.stack.Config.ResolvedPublicURL()
-	return b.stack.LinkResolver.Resolve(ctx, content, publicURL)
+	resolved := b.stack.LinkResolver.Resolve(ctx, content, publicURL)
+	tracing.Record(ctx, tracing.Event{Kind: tracing.KindLinkResolve, Detail: "wiki-links resolved"})
+	return resolved
 }
 
 func (b *LocalBackend) Analytics(ctx context.Context, scope string, staleThreshold int) (json.RawMessage, error) {

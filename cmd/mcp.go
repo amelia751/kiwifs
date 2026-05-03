@@ -2,8 +2,11 @@ package cmd
 
 import (
 	"fmt"
+	"log"
 
+	"github.com/kiwifs/kiwifs/internal/config"
 	"github.com/kiwifs/kiwifs/internal/mcpserver"
+	"github.com/kiwifs/kiwifs/internal/tracing"
 	"github.com/spf13/cobra"
 )
 
@@ -64,12 +67,22 @@ func runMCP(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("--port must be between 1 and 65535")
 	}
 
+	var em tracing.Emitter
+	if root != "" {
+		if cfg, err := config.Load(root); err == nil {
+			em = tracing.NewEmitter(cfg.Tracing.IsEnabled(), cfg.Tracing.Output, cfg.Tracing.File)
+		} else {
+			log.Printf("mcp: config load (%v) — tracing disabled", err)
+		}
+	}
+
 	return mcpserver.Serve(mcpserver.Options{
-		Remote: remote,
-		Root:   root,
-		APIKey: apiKey,
-		Space:  space,
-		HTTP:   httpTransport,
-		Port:   port,
+		Remote:  remote,
+		Root:    root,
+		APIKey:  apiKey,
+		Space:   space,
+		HTTP:    httpTransport,
+		Port:    port,
+		Emitter: em,
 	})
 }

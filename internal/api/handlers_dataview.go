@@ -7,6 +7,7 @@ import (
 
 	"github.com/kiwifs/kiwifs/internal/dataview"
 	"github.com/kiwifs/kiwifs/internal/search"
+	"github.com/kiwifs/kiwifs/internal/tracing"
 	"github.com/labstack/echo/v4"
 )
 
@@ -37,6 +38,7 @@ func (h *Handlers) Query(c echo.Context) error {
 	if err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 	}
+	tracing.Record(c.Request().Context(), tracing.Event{Kind: tracing.KindDQL, Query: q, HitCount: result.Total})
 
 	if format == "table" || format == "list" || format == "count" || format == "distinct" {
 		rendered := dataview.Render(result, format)

@@ -7,6 +7,7 @@ import (
 
 	"github.com/kiwifs/kiwifs/internal/config"
 	"github.com/kiwifs/kiwifs/internal/search"
+	"github.com/kiwifs/kiwifs/internal/tracing"
 	"github.com/kiwifs/kiwifs/internal/vectorstore"
 	"github.com/labstack/echo/v4"
 )
@@ -95,6 +96,7 @@ func (h *Handlers) Search(c echo.Context) error {
 			}
 		}
 	}
+	tracing.Record(c.Request().Context(), tracing.Event{Kind: tracing.KindSearch, Query: q, HitCount: len(results)})
 	return c.JSON(http.StatusOK, searchResponse{
 		Query:   q,
 		Limit:   limit,
@@ -122,6 +124,7 @@ func (h *Handlers) VerifiedSearch(c echo.Context) error {
 	if results == nil {
 		results = []search.Result{}
 	}
+	tracing.Record(c.Request().Context(), tracing.Event{Kind: tracing.KindSearch, Query: q, HitCount: len(results)})
 	return c.JSON(http.StatusOK, searchResponse{
 		Query:   q,
 		Limit:   limit,
@@ -257,6 +260,7 @@ func (h *Handlers) SemanticSearch(c echo.Context) error {
 	if results == nil {
 		results = []vectorstore.Result{}
 	}
+	tracing.Record(c.Request().Context(), tracing.Event{Kind: tracing.KindSearch, Query: req.Query, HitCount: len(results), Detail: "semantic"})
 	return c.JSON(http.StatusOK, semanticResponse{
 		Query:   req.Query,
 		TopK:    topK,

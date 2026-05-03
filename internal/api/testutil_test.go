@@ -52,7 +52,7 @@ func buildTestServer(t *testing.T) *Server {
 	dir, pipe, cstore := buildTestPipeline(t)
 	cfg := &config.Config{}
 	cfg.Storage.Root = dir
-	return NewServer(cfg, pipe, nil, cstore, nil, nil)
+	return NewServer(cfg, pipe, nil, cstore, nil, nil, nil)
 }
 
 func buildSQLiteTestServer(t *testing.T) (*Server, string) {
@@ -76,7 +76,7 @@ func buildSQLiteTestServer(t *testing.T) (*Server, string) {
 	}
 	cfg := &config.Config{}
 	cfg.Storage.Root = dir
-	return NewServer(cfg, pipe, nil, cstore, nil, nil), dir
+	return NewServer(cfg, pipe, nil, cstore, nil, nil, nil), dir
 }
 
 func buildTestServerWithAssets(t *testing.T, assets config.AssetsConfig) *Server {
@@ -84,7 +84,7 @@ func buildTestServerWithAssets(t *testing.T, assets config.AssetsConfig) *Server
 	dir, pipe, cstore := buildTestPipeline(t)
 	cfg := &config.Config{Assets: assets}
 	cfg.Storage.Root = dir
-	return NewServer(cfg, pipe, nil, cstore, nil, nil)
+	return NewServer(cfg, pipe, nil, cstore, nil, nil, nil)
 }
 
 func buildTestServerWithPublicURL(t *testing.T, publicURL string) *Server {
@@ -112,7 +112,7 @@ func buildTestServerWithPublicURL(t *testing.T, publicURL string) *Server {
 	cfg := &config.Config{}
 	cfg.Storage.Root = dir
 	cfg.Server.PublicURL = publicURL
-	return NewServer(cfg, pipe, nil, cstore, nil, lr)
+	return NewServer(cfg, pipe, nil, cstore, nil, lr, nil)
 }
 
 var pngMagic = []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n', 0, 0, 0, 0}
